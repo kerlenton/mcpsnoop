@@ -23,10 +23,9 @@ func NopSink() Sink           { return nopSink{} }
 func (nopSink) Emit(Envelope) {}
 func (nopSink) Close() error  { return nil }
 
-// AsyncSink serialises envelopes as newline-delimited JSON to an io.Writer from
-// a single background goroutine. The channel is buffered and drops on overflow,
-// so a slow/blocked writer can never back-pressure the proxied stream. This is
-// the embryo of the hub transport — Phase 2 swaps the file writer for a socket.
+// AsyncSink writes envelopes as newline-delimited JSON to an io.Writer from a
+// single background goroutine. The channel is buffered and drops on overflow, so
+// a slow or blocked writer can never back-pressure the proxied stream.
 type AsyncSink struct {
 	w       io.Writer
 	closer  io.Closer

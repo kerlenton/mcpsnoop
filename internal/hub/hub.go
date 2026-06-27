@@ -61,7 +61,7 @@ func (h *Hub) Run(ctx context.Context) error {
 	// Backfill BEFORE accepting: this primes the per-session high-water marks
 	// from disk so a live shim that reconnects (e.g. after a hub restart) can't
 	// race its high-Seq frames ahead of the file's history and cause the gate to
-	// drop it. Shims simply keep retrying their connection until we accept.
+	// drop it. Shims keep retrying their connection until we accept.
 	h.backfill(ctx)
 
 	// Stop accepting when the context is done.
