@@ -18,7 +18,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/store"
 )
 
-// sortState tracks the active column sort for a table (k9s shift+<key>).
+// sortState tracks the active column sort for a table (shift+<key>).
 type sortState struct {
 	col  string
 	desc bool
@@ -31,7 +31,7 @@ func (s sortState) toggled(col string) sortState {
 	return sortState{col: col, desc: false}
 }
 
-// viewMode is the current table, k9s-style: you drill from the sessions list
+// viewMode is the current table: you drill from the sessions list
 // into a session's frame stream and back out with esc.
 type viewMode int
 
@@ -57,7 +57,7 @@ const (
 	overlayReplay
 )
 
-// inputMode is the active bottom prompt (k9s "/" filter and ":" command).
+// inputMode is the active bottom prompt ("/" filter and ":" command).
 type inputMode int
 
 const (
@@ -75,7 +75,7 @@ type tickMsg time.Time
 
 const tickEvery = 400 * time.Millisecond
 
-// Model is the Bubble Tea model for the k9s-style hub view.
+// Model is the Bubble Tea model for the hub view.
 type Model struct {
 	store  *store.Store
 	keys   keyMap
@@ -223,7 +223,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Shift+<letter> sorts the current table by a column (k9s).
+	// Shift+<letter> sorts the current table by a column.
 	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && m.applySortKey(msg.Runes[0]) {
 		return m, nil
 	}
@@ -318,7 +318,7 @@ func (m Model) handleInput(msg tea.KeyMsg) (Model, tea.Cmd) {
 	default:
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
-		// Live filter/search as you type feels like k9s / less.
+		// Live filter/search as you type.
 		switch m.inputMode {
 		case inputFilter:
 			m.applyFilter(strings.TrimSpace(m.input.Value()))
@@ -403,7 +403,7 @@ func (m *Model) drillIn() {
 	}
 }
 
-// back pops one level (k9s): clear an active filter, then stream→sessions. At
+// back pops one level: clear an active filter, then stream→sessions. At
 // the root it does NOTHING — quitting is deliberately only `:q`/Ctrl-C so you
 // can't fall out of the UI by mashing esc/q.
 func (m *Model) back() tea.Cmd {

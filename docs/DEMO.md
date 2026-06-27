@@ -35,17 +35,3 @@ claude mcp add everything -- mcpsnoop -- npx -y @modelcontextprotocol/server-eve
 
 (Both the shim — spawned by the client — and the TUI use the default home, so
 they find each other automatically. Don't set `MCPSNOOP_HOME`.)
-
-## Recording the demo GIF
-
-Layout: one terminal, vertical split — `claude` left, `mcpsnoop` right.
-
-Beats (~25s, loops well):
-1. mcpsnoop empty: "Waiting for MCP traffic…".
-2. `claude` starts → the session appears with the live handshake.
-3. Type the prompt above → tool calls + progress + a SLOW response stream in.
-4. `enter` on the slow response → full JSON; `/progress` to highlight.
-5. `r` to replay a call against a fresh server copy — no re-prompting.
-
-Save the result to `docs/demo.gif` (README's hero image points there). Keep it
-≤ ~6 MB / ~1200px wide for fast loading.

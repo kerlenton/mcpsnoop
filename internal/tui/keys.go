@@ -2,7 +2,7 @@ package tui
 
 import "github.com/charmbracelet/bubbles/key"
 
-// keyMap mirrors k9s: navigate a table with j/k, page with ctrl-f/ctrl-b, drill
+// keyMap defines table navigation: move with j/k, page with ctrl-f/ctrl-b, drill
 // in with enter, back out with esc, jump views with ":", filter with "/",
 // help with "?".
 type keyMap struct {
@@ -14,7 +14,7 @@ type keyMap struct {
 	Bottom   key.Binding
 
 	Enter   key.Binding
-	Back    key.Binding // esc / q — pop the view stack (k9s); quits at the root
+	Back    key.Binding // esc / q — pop the view stack; at the root it does nothing
 	Filter  key.Binding
 	Command key.Binding
 	Help    key.Binding

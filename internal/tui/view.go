@@ -13,7 +13,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/store"
 )
 
-const headerH = 6 // fixed header height (k9s-style banner)
+const headerH = 6 // fixed header height (the top banner)
 
 func (m Model) View() string {
 	if !m.ready {
@@ -58,7 +58,7 @@ func (m Model) View() string {
 	rule := m.styles.rule.Render(strings.Repeat("─", max(m.width, 1)))
 	body = padLines(body, bodyH) // fill the region so the rule+status sit at the bottom
 	// header · rule · breadcrumb · body · rule · status — horizontal rules frame
-	// the content region and give the layout structure (k9s/lazygit style).
+	// the content region and give the layout structure.
 	return strings.Join([]string{header, rule, topbar, "", body, rule, m.renderStatus()}, "\n")
 }
 
@@ -75,7 +75,7 @@ func (m Model) bodyHeight() int {
 	return max(m.height-headerH-5, 1) // header + 2 rules + breadcrumb + blank + status
 }
 
-// renderStatus is the k9s-style bottom bar: counts on the left, mode flags on
+// renderStatus is the bottom status bar: counts on the left, mode flags on
 // the right, across a full-width subtle band.
 func (m Model) renderStatus() string {
 	sep := m.styles.dim.Render("  ·  ")

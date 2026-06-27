@@ -2,7 +2,7 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// palette — a k9s-flavoured set: blue logo/keys, cyan crumbs & selection, with
+// palette — blue logo/keys, cyan crumbs & selection, with
 // per-kind accents for the frame stream. Tuned for dark terminals.
 var (
 	colAccent = lipgloss.Color("39") // dodger blue — logo, hint keys, titles
