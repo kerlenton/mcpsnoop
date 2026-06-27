@@ -87,10 +87,11 @@ pointing Claude at a published test server through mcpsnoop.
 ## Install
 
 ```bash
-brew install kerlenton/tap/mcpsnoop
-# or
 go install github.com/kerlenton/mcpsnoop/cmd/mcpsnoop@latest
 ```
+
+Or grab a prebuilt binary for your platform from the
+[Releases](https://github.com/kerlenton/mcpsnoop/releases) page.
 
 From source:
 

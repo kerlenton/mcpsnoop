@@ -25,6 +25,3 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # A PAT with `contents:write` on kerlenton/homebrew-tap, so the brew
-          # formula can be pushed to that separate repo.
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
