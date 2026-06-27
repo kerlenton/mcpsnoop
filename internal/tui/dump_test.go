@@ -24,11 +24,13 @@ func TestDumpView(t *testing.T) {
 		t.Skip("set MCPSNOOP_DUMP=1 to dump the view")
 	}
 	st := store.New(0)
-	seed(st)
-	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slow_search","arguments":{}}}`))
-	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"boom"}}`))
-	st.Ingest(sessionEnv("s2", "search-api"))
-	st.Ingest(sessionEnv("s3", "github"))
+	if mode != "empty" {
+		seed(st)
+		st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slow_search","arguments":{}}}`))
+		st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"boom"}}`))
+		st.Ingest(sessionEnv("s2", "search-api"))
+		st.Ingest(sessionEnv("s3", "github"))
+	}
 
 	m := New(st)
 	m = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})

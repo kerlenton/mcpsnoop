@@ -223,6 +223,15 @@ func (m Model) activeFilter() string {
 // ---- sessions table -------------------------------------------------------
 
 func (m Model) renderSessionsTable(w, h int) string {
+	// Empty state: no table header (it'd be an orphan), just a centered card.
+	if len(m.sessions) == 0 {
+		card := m.onboardingCard()
+		if m.sessionQuery != "" {
+			card = m.styles.dim.Render("no sessions match ") + m.styles.infoVal.Render("/"+m.sessionQuery)
+		}
+		return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, card)
+	}
+
 	inner := w - 1
 	const nameW, reqW, respW, errW, lastW = 30, 4, 4, 4, 6
 
@@ -232,15 +241,6 @@ func (m Model) renderSessionsTable(w, h int) string {
 		"  " + cellR("RESP"+sortMark(st, "resp"), respW) + "  " + cellR("ERR"+sortMark(st, "err"), errW) +
 		"  " + cellR("LAST"+sortMark(st, "last"), lastW)
 	b.WriteString(" " + m.styles.tableHead.Render(head) + "\n")
-
-	if len(m.sessions) == 0 {
-		if m.sessionQuery != "" {
-			b.WriteString(m.styles.dim.Render(" no sessions match /" + m.sessionQuery))
-		} else {
-			b.WriteString(m.onboarding())
-		}
-		return b.String()
-	}
 
 	rows := h - 1
 	start, end := window(m.selSession, len(m.sessions), rows)
@@ -629,24 +629,25 @@ func sortMark(st sortState, col string) string {
 	return " ▲"
 }
 
-// onboarding is the first-run empty state: it tells the user exactly how to
-// attach mcpsnoop, instead of a bare "waiting…".
-func (m Model) onboarding() string {
-	key := m.styles.hintKey.Render
-	val := m.styles.infoVal.Render
+// onboardingCard is the first-run empty state: a centered card telling the user
+// how to attach mcpsnoop. Rendered via lipgloss.Place by the caller.
+func (m Model) onboardingCard() string {
+	num := m.styles.hintKey.Render
 	dim := m.styles.dim.Render
-	lines := []string{
-		"",
-		" " + m.styles.panelTitle.Render("Waiting for MCP traffic…") + dim("  (the spinner stays until a client connects)"),
-		"",
-		" " + val("1.") + dim(" Wrap your server in your MCP client config (Claude Desktop, Cursor, …):"),
-		"      " + key(`"command": "mcpsnoop", "args": ["--", "node", "build/index.js"]`),
-		"",
-		" " + val("2.") + dim(" Use your client normally — every tool call shows up here, live."),
-		"",
-		" " + dim(" HTTP server?  ") + key("mcpsnoop http --target http://localhost:3000/mcp"),
-	}
-	return strings.Join(lines, "\n")
+	box := lipgloss.NewStyle().
+		MarginLeft(3).
+		Border(lipgloss.RoundedBorder()).BorderForeground(colFaint).
+		Foreground(colHeader).Padding(0, 1)
+
+	title := m.styles.logo.Render("Waiting for MCP traffic")
+	step1 := num("1") + "  " + dim("Wrap your server in your client's MCP config:")
+	snippet := box.Render(`"command": "mcpsnoop", "args": ["--", "node", "build/index.js"]`)
+	step2 := num("2") + "  " + dim("Use your client. Every tool call appears here, live.")
+	http := dim("Streamable HTTP?  ") + m.styles.hintKey.Render("mcpsnoop http --target <url>")
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		title, "", step1, snippet, "", step2, "", http,
+	)
 }
 
 // frameText is the copy-to-clipboard payload for a frame: pretty JSON, or the
