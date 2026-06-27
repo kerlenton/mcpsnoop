@@ -103,17 +103,17 @@ go build -o mcpsnoop ./cmd/mcpsnoop
 ## How it works
 
 ```
-                          stdio / HTTP                                stdio / HTTP
-┌───────────────────┐                       ┌───────────────────┐                       ┌───────────────────┐
-│     AI client     │──────────────────────▶│    mcpsnoop --    │──────────────────────▶│     MCP server    │
-│ Claude, Cursor, … │◀──────────────────────│  transparent shim │◀──────────────────────│   yours, or any   │
-└───────────────────┘                       └─────────┬─────────┘                       └───────────────────┘
-                                                      │  copy of every JSON-RPC frame
-                                                      ▼
-                                            ┌───────────────────┐
-                                            │      mcpsnoop     │   ← you watch this, live
-                                            │  live terminal UI │
-                                            └───────────────────┘
+                 stdio / HTTP               stdio / HTTP
+┌──────────────────┐       ┌──────────────────┐       ┌──────────────────┐
+│    AI client     │──────▶│   mcpsnoop --    │──────▶│    MCP server    │
+│ Claude, Cursor…  │◀──────│ transparent shim │◀──────│  yours, or any   │
+└──────────────────┘       └─────────┬────────┘       └──────────────────┘
+                                     │  copy of every JSON-RPC frame
+                                     ▼
+                           ┌──────────────────┐
+                           │     mcpsnoop     │   ← you watch this, live
+                           │ live terminal UI │
+                           └──────────────────┘
 ```
 
 The client is whatever drives the conversation (Claude Desktop, Cursor, Claude
@@ -172,8 +172,26 @@ start first.
 
 | Key | Action |
 |---|---|
-| `/` | Filter the table by `tool:`, `status:`, `dir:`, `kind:`, `id:`, or plain text |
+| `/` | Filter the current table (the stream supports a query language — see below) |
 | `/` in a frame | Search within the open frame; `n` / `N` jump between matches |
+
+## Filtering the stream
+
+Inside a session, press `/` and combine space-separated tokens — they are ANDed,
+so each one narrows the stream further.
+
+| Token | Matches | Example |
+|---|---|---|
+| `<text>` | substring over method, tool name, id, and the raw JSON payload | `searchFiles` |
+| `tool:<name>` | the tool of a `tools/call` | `tool:echo` |
+| `method:<name>` | the JSON-RPC method | `method:tools/list` |
+| `id:<n>` | an exact request id | `id:7` |
+| `kind:<type>` | message type: `req`, `resp`, `notify`, `stderr` | `kind:resp` |
+| `dir:<way>` | direction: `c2s` (client→server) or `s2c` (server→client) | `dir:s2c` |
+| `status:<state>` | outcome: `ok`, `err`, `slow`, `pending` | `status:err` |
+
+For example, `tool:search status:slow` shows only slow calls to a search tool,
+and `dir:s2c kind:req` surfaces server-initiated requests (sampling, roots).
 
 ## Security
 
