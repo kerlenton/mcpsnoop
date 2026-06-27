@@ -1,0 +1,107 @@
+package proxy
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+)
+
+// emitterTo adapts a captureSink into the emit func httpProxyHandler expects.
+func emitterTo(sink *captureSink) func(Direction, []byte) {
+	return func(d Direction, raw []byte) {
+		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...)})
+	}
+}
+
+func TestHTTPProxyJSON(t *testing.T) {
+	const wantResp = `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, wantResp)
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	reqBody := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	resp, err := http.Post(front.URL, "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != wantResp {
+		t.Fatalf("client got %q, want %q", got, wantResp)
+	}
+
+	c2s := sink.byDir(ClientToServer)
+	s2c := sink.byDir(ServerToClient)
+	if len(c2s) != 1 || string(c2s[0].Raw) != reqBody {
+		t.Fatalf("c2s = %+v", c2s)
+	}
+	if len(s2c) != 1 || string(s2c[0].Raw) != wantResp {
+		t.Fatalf("s2c = %+v", s2c)
+	}
+}
+
+func TestHTTPProxySSE(t *testing.T) {
+	msgs := []string{
+		`{"jsonrpc":"2.0","id":1,"result":{"step":1}}`,
+		`{"jsonrpc":"2.0","method":"notifications/progress","params":{"p":0.5}}`,
+	}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("backend ResponseWriter is not a Flusher")
+		}
+		for _, m := range msgs {
+			fmt.Fprintf(w, "data: %s\n\n", m)
+			fl.Flush()
+		}
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	resp, err := http.Post(front.URL, "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if !strings.Contains(string(body), `"step":1`) {
+		t.Fatalf("client did not receive SSE payload: %q", body)
+	}
+	s2c := sink.byDir(ServerToClient)
+	if len(s2c) != 2 {
+		t.Fatalf("expected 2 SSE frames observed, got %d: %+v", len(s2c), s2c)
+	}
+	if string(s2c[0].Raw) != msgs[0] || string(s2c[1].Raw) != msgs[1] {
+		t.Fatalf("SSE frames mismatch: %q / %q", s2c[0].Raw, s2c[1].Raw)
+	}
+}
+
+func TestSSETapMultiChunk(t *testing.T) {
+	var got []string
+	tap := newSSETap(io.NopCloser(strings.NewReader("")), func(d []byte) { got = append(got, string(d)) })
+	// Feed split across arbitrary chunk boundaries.
+	for _, chunk := range []string{"data: {\"a\":", "1}\n", "\nda", "ta: {\"b\":2}\n\n"} {
+		tap.feed([]byte(chunk))
+	}
+	if len(got) != 2 || got[0] != `{"a":1}` || got[1] != `{"b":2}` {
+		t.Fatalf("sseTap parsed %v", got)
+	}
+}

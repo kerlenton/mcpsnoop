@@ -1,0 +1,182 @@
+package store
+
+import (
+	"encoding/json"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/kerlenton/mcpsnoop/internal/proxy"
+)
+
+func req(seq uint64, ts time.Time, dir proxy.Direction, id, method, params string) proxy.Envelope {
+	raw := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":%q`, id, method)
+	if params != "" {
+		raw += `,"params":` + params
+	}
+	raw += "}"
+	return proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: ts, Direction: dir, Raw: json.RawMessage(raw)}
+}
+
+func resp(seq uint64, ts time.Time, dir proxy.Direction, id, body string) proxy.Envelope {
+	raw := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,%s}`, id, body)
+	return proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: ts, Direction: dir, Raw: json.RawMessage(raw)}
+}
+
+func TestCorrelationAndTiming(t *testing.T) {
+	s := New(100 * time.Millisecond)
+	t0 := time.Now()
+
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"echo","arguments":{"text":"hi"}}`))
+	// Response 200ms later, in the opposite direction.
+	ev := s.Ingest(resp(2, t0.Add(200*time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[]}`))
+
+	if ev.Kind != EventResponse || ev.Call == nil {
+		t.Fatalf("expected matched response event, got %+v", ev)
+	}
+	c := ev.Call
+	if c.State != Completed {
+		t.Fatalf("state = %v, want Completed", c.State)
+	}
+	if !c.IsTool || c.ToolName != "echo" {
+		t.Fatalf("tool extraction failed: isTool=%v name=%q", c.IsTool, c.ToolName)
+	}
+	if got := c.Duration(); got != 200*time.Millisecond {
+		t.Fatalf("duration = %v, want 200ms", got)
+	}
+	if !c.Slow(100 * time.Millisecond) {
+		t.Fatalf("call should be flagged slow (200ms > 100ms threshold)")
+	}
+
+	calls := s.Calls("s1")
+	if len(calls) != 1 || calls[0].State != Completed {
+		t.Fatalf("Calls() = %+v", calls)
+	}
+}
+
+func TestErrorResponse(t *testing.T) {
+	s := New(0)
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "7", "tools/call", `{"name":"nope"}`))
+	ev := s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "7", `"error":{"code":-32601,"message":"unknown tool"}`))
+	if ev.Call == nil || ev.Call.State != Failed || ev.Call.Err == nil {
+		t.Fatalf("expected failed call with error, got %+v", ev.Call)
+	}
+	if h := s.Sessions()[0]; h.Errors != 1 {
+		t.Fatalf("session errors = %d, want 1", h.Errors)
+	}
+}
+
+func TestToolLevelError(t *testing.T) {
+	// MCP tool failures arrive as a 200-OK response with result.isError=true,
+	// NOT as a JSON-RPC error. They must still count/flag as errors.
+	s := New(0)
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"add"}`))
+	ev := s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
+		`"result":{"content":[{"type":"text","text":"Tool add not found"}],"isError":true}`))
+	if ev.Call == nil || ev.Call.State != Failed || !ev.Call.ToolErr || !ev.Call.Failed() {
+		t.Fatalf("tool-level error not detected: %+v", ev.Call)
+	}
+	if ev.Call.Err != nil {
+		t.Fatalf("tool error must not be a JSON-RPC error: %+v", ev.Call.Err)
+	}
+	if h := s.Sessions()[0]; h.Errors != 1 {
+		t.Fatalf("session errors = %d, want 1", h.Errors)
+	}
+}
+
+func TestServerToClientRequest(t *testing.T) {
+	// Server-initiated request (e.g. sampling) must correlate with the client's
+	// response travelling the other way.
+	s := New(0)
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ServerToClient, "99", "sampling/createMessage", `{}`))
+	ev := s.Ingest(resp(2, t0.Add(5*time.Millisecond), proxy.ClientToServer, "99", `"result":{"ok":true}`))
+	if ev.Call == nil || ev.Call.State != Completed {
+		t.Fatalf("server->client request not correlated: %+v", ev.Call)
+	}
+}
+
+func TestCapabilitiesCapture(t *testing.T) {
+	s := New(0)
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "initialize",
+		`{"protocolVersion":"2025-06-18","capabilities":{"sampling":{}},"clientInfo":{"name":"cli"}}`))
+	if _, ok := s.Capabilities("s1"); !ok {
+		t.Fatal("expected client caps captured after initialize request")
+	}
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
+		`"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"srv"}}`))
+	caps, ok := s.Capabilities("s1")
+	if !ok {
+		t.Fatal("caps missing")
+	}
+	if caps.ProtocolVersion != "2025-06-18" {
+		t.Fatalf("protocolVersion = %q", caps.ProtocolVersion)
+	}
+	if len(caps.Client) == 0 || len(caps.Server) == 0 {
+		t.Fatalf("client/server caps not both captured: %+v", caps)
+	}
+}
+
+func TestNotificationAndUnmatchedResponse(t *testing.T) {
+	s := New(0)
+	t0 := time.Now()
+	s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: t0, Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)})
+	// Response with no prior request.
+	ev := s.Ingest(resp(2, t0, proxy.ServerToClient, "404", `"result":{}`))
+	if ev.Call != nil {
+		t.Fatalf("unmatched response should have nil Call, got %+v", ev.Call)
+	}
+	h := s.Sessions()[0]
+	if h.Notifications != 1 {
+		t.Fatalf("notifications = %d, want 1", h.Notifications)
+	}
+}
+
+// TestConcurrentIngest exercises the lock under -race: many goroutines ingest
+// while another reads snapshots.
+func TestConcurrentIngest(t *testing.T) {
+	s := New(0)
+	var wg sync.WaitGroup
+	for g := range 8 {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			sess := fmt.Sprintf("sess-%d", g)
+			t0 := time.Now()
+			for i := range 200 {
+				id := fmt.Sprintf("%d", i)
+				s.Ingest(proxy.Envelope{SessionID: sess, ServerLabel: sess, Seq: uint64(2 * i), TS: t0, Direction: proxy.ClientToServer,
+					Raw: json.RawMessage(`{"jsonrpc":"2.0","id":` + id + `,"method":"ping"}`)})
+				s.Ingest(proxy.Envelope{SessionID: sess, ServerLabel: sess, Seq: uint64(2*i + 1), TS: t0, Direction: proxy.ServerToClient,
+					Raw: json.RawMessage(`{"jsonrpc":"2.0","id":` + id + `,"result":{}}`)})
+			}
+		}(g)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range 100 {
+			for _, h := range s.Sessions() {
+				_ = s.Timeline(h.ID)
+			}
+		}
+	}()
+	wg.Wait()
+
+	if got := len(s.Sessions()); got != 8 {
+		t.Fatalf("sessions = %d, want 8", got)
+	}
+	for _, h := range s.Sessions() {
+		if h.Pending != 0 {
+			t.Fatalf("session %s has %d pending, want 0", h.ID, h.Pending)
+		}
+		if h.Requests != 200 || h.Responses != 200 {
+			t.Fatalf("session %s req=%d resp=%d, want 200/200", h.ID, h.Requests, h.Responses)
+		}
+	}
+}

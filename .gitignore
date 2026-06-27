@@ -1,0 +1,19 @@
+# Binaries
+/mcpsnoop
+/dist/
+*.exe
+*.out
+
+# Traces / local artefacts
+*.jsonl
+
+# Go
+/vendor/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Local agent config (keep private)
+.claude/settings.local.json

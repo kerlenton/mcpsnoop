@@ -1,0 +1,59 @@
+# GoReleaser v2 — builds cross-platform binaries, archives, checksums, and
+# publishes a Homebrew formula to kerlenton/homebrew-tap on tag push.
+# Run locally: goreleaser release --snapshot --clean
+version: 2
+
+project_name: mcpsnoop
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: mcpsnoop
+    main: ./cmd/mcpsnoop
+    binary: mcpsnoop
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+brews:
+  - name: mcpsnoop
+    repository:
+      owner: kerlenton
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/kerlenton/mcpsnoop"
+    description: "Wireshark for MCP — see every real tool call between your AI client and your MCP servers, live in your terminal."
+    license: "MIT"
+    install: |
+      bin.install "mcpsnoop"
+    test: |
+      system "#{bin}/mcpsnoop", "--version"
