@@ -35,22 +35,7 @@ checksum:
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
+# Use GitHub's own release-notes generator: each entry is the PR title, linked,
+# credited to its author (by @user in #N) — instead of a raw commit + email dump.
 changelog:
-  sort: asc
-  use: github
-  groups:
-    - title: Features
-      regexp: '^.*?feat(\(.+\))??!?:.+$'
-      order: 0
-    - title: Bug fixes
-      regexp: '^.*?fix(\(.+\))??!?:.+$'
-      order: 1
-    - title: Other changes
-      order: 999
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
-      - "^ci:"
-      - "^Merge "
+  use: github-native
