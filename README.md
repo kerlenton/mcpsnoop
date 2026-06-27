@@ -102,6 +102,26 @@ go build -o mcpsnoop ./cmd/mcpsnoop
 
 ## How it works
 
+```
+                          stdio / HTTP                                stdio / HTTP
+┌───────────────────┐                       ┌───────────────────┐                       ┌───────────────────┐
+│     AI client     │──────────────────────▶│    mcpsnoop --    │──────────────────────▶│     MCP server    │
+│ Claude, Cursor, … │◀──────────────────────│  transparent shim │◀──────────────────────│   yours, or any   │
+└───────────────────┘                       └─────────┬─────────┘                       └───────────────────┘
+                                                      │  copy of every JSON-RPC frame
+                                                      ▼
+                                            ┌───────────────────┐
+                                            │      mcpsnoop     │   ← you watch this, live
+                                            │  live terminal UI │
+                                            └───────────────────┘
+```
+
+The client is whatever drives the conversation (Claude Desktop, Cursor, Claude
+Code, your own agent). The server is any MCP server, in any language, over stdio
+or streamable HTTP. The official Inspector connects as a *second* client, off to
+the side; mcpsnoop sits in the actual pipe, so it sees exactly what your real
+client and server say to each other.
+
 mcpsnoop is two roles in one binary.
 
 `mcpsnoop -- <server>` is a transparent stdio shim that your client spawns
@@ -118,9 +138,42 @@ start first.
 
 ## Keybindings
 
-`j`/`k` move · `enter` drill in · `esc` back · `/` filter and search ·
-`:` command · `shift`+column to sort · `r` replay · `c` capabilities ·
-`y` copy · `ctrl-d` delete session · `p` pause · `?` help · `:q` quit
+**Navigate**
+
+| Key | Action |
+|---|---|
+| `j` / `k` (or `↑` / `↓`) | Move down / up |
+| `ctrl-f` / `ctrl-b` | Page down / up |
+| `g` / `G` | Jump to top / bottom |
+| `shift`+column | Sort by that column (press again to reverse) |
+
+**Move between views**
+
+| Key | Action |
+|---|---|
+| `enter` | Drill into the selected session, or open the frame inspector |
+| `esc` | Back out one level |
+| `:` | Command prompt (`:sessions`, `:stream`, `:q`, …) |
+| `?` | Help |
+| `:q` | Quit |
+
+**Act on the selection**
+
+| Key | Action |
+|---|---|
+| `r` | Replay the selected call against a fresh, isolated server |
+| `c` | Capability inspector |
+| `y` | Copy the frame's JSON to the clipboard |
+| `p` | Pause / resume the live stream |
+| `f` | Toggle follow (auto-scroll to the newest frame) |
+| `ctrl-d` | Delete the selected session |
+
+**Filter & search**
+
+| Key | Action |
+|---|---|
+| `/` | Filter the table by `tool:`, `status:`, `dir:`, `kind:`, `id:`, or plain text |
+| `/` in a frame | Search within the open frame; `n` / `N` jump between matches |
 
 ## Security
 
