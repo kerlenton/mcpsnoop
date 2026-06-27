@@ -77,12 +77,12 @@ pointing Claude at a published test server through mcpsnoop.
 
 | | MCP Inspector | mcp-trace | mcpsnoop |
 |---|:---:|:---:|:---:|
-| Sees your real client↔server traffic | no (own client) | yes | yes |
-| Interactive terminal UI | no (web) | yes | yes |
-| Zero-config (no flags or ordering) | — | no | yes |
+| Sees your real client↔server traffic | no | yes | yes |
+| Interactive terminal UI | no | yes | yes |
+| Zero-config, no flags or ordering | no | no | yes |
 | Capability inspector | partial | no | yes |
 | Replay a captured call | no | no | yes |
-| Single binary, no deps | no (Node) | varies | yes |
+| Single binary, no runtime deps | no | varies | yes |
 
 ## Install
 
