@@ -3,7 +3,16 @@
 Releases are cut by pushing a `vX.Y.Z` tag. The
 [`release`](.github/workflows/release.yml) workflow runs GoReleaser, which
 cross-compiles the binaries, builds the archives and checksums, and publishes a
-GitHub Release. No secrets beyond the default `GITHUB_TOKEN` are required.
+GitHub Release with a changelog generated from the commit log. No secrets beyond
+the default `GITHUB_TOKEN` are required.
+
+## Versioning
+
+mcpsnoop follows [SemVer](https://semver.org). Pick the bump from what changed
+since the last tag (see the [versioning policy](CONTRIBUTING.md#versioning)):
+while on `0.x`, a minor (`0.Y.0`) may change user-facing behaviour and a patch
+(`0.y.Z`) is bug fixes only. Conventional-commit subjects (`feat:` / `fix:`)
+make this call obvious and group the generated changelog.
 
 ## Cut a release
 

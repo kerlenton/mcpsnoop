@@ -181,6 +181,13 @@ mcpsnoop runs the server command you wrap, so only wrap servers you trust and
 run untrusted ones in a container. It never executes anything you didn't put in
 your client config.
 
+## Contributing
+
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for
+the dev setup and the `make check` gate. mcpsnoop is pre-1.0 and follows
+[SemVer](https://semver.org): while on `0.x`, minor releases may change
+user-facing behaviour, and patch releases are bug fixes.
+
 ## License
 
 [MIT](LICENSE)

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -30,7 +31,7 @@ func Run(ctx context.Context, socketPath, sessionsDir string, slow time.Duration
 
 	_, err := p.Run()
 	cancel() // stop the hub once the UI exits
-	if err == tea.ErrProgramKilled || err == context.Canceled {
+	if errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, context.Canceled) {
 		return nil
 	}
 	return err

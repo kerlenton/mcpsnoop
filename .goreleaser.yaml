@@ -1,6 +1,6 @@
-# GoReleaser v2 — builds cross-platform binaries, archives, checksums, and
-# publishes a Homebrew formula to kerlenton/homebrew-tap on tag push.
-# Run locally: goreleaser release --snapshot --clean
+# GoReleaser v2 — on a pushed tag, cross-compiles the binaries, builds the
+# archives and checksums, and publishes a GitHub Release with a generated
+# changelog. Run locally: goreleaser release --snapshot --clean
 version: 2
 
 project_name: mcpsnoop
@@ -37,9 +37,20 @@ snapshot:
 
 changelog:
   sort: asc
+  use: github
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other changes
+      order: 999
   filters:
     exclude:
       - "^docs:"
       - "^test:"
       - "^chore:"
       - "^ci:"
+      - "^Merge "

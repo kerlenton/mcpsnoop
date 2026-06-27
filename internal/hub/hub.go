@@ -17,7 +17,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
@@ -132,7 +132,7 @@ func (h *Hub) backfill(ctx context.Context) {
 			files = append(files, filepath.Join(h.sessionsDir, e.Name()))
 		}
 	}
-	sort.Strings(files)
+	slices.Sort(files)
 	for _, f := range files {
 		if ctx.Err() != nil {
 			return

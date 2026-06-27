@@ -29,7 +29,10 @@ fmt-check:
 
 lint: vet staticcheck
 
-check: fmt-check lint test
+# check is the pre-commit/CI gate: formatting, static analysis, and the full
+# test suite under the race detector (matching CI).
+check: fmt-check lint
+	$(GO) test -race $(PKG)
 
 clean:
 	rm -f $(BIN)

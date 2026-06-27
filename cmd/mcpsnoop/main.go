@@ -33,6 +33,11 @@ func main() {
 	if args := os.Args[1:]; len(args) > 0 && args[0] == "http" {
 		os.Exit(runHTTP(args[1:]))
 	}
+	// `mcpsnoop version` mirrors the --version flag (what most CLIs expect).
+	if args := os.Args[1:]; len(args) == 1 && (args[0] == "version" || args[0] == "-v") {
+		fmt.Println("mcpsnoop", version)
+		return
+	}
 
 	fs := flag.NewFlagSet("mcpsnoop", flag.ExitOnError)
 	var (
