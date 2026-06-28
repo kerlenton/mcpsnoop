@@ -22,10 +22,8 @@ silently isn't called, capabilities don't line up, or a call just hangs, you're
 back to `tail`-ing a log in `/tmp` and guessing.
 
 mcpsnoop sits in the real data path instead. Wrap your server command with it
-and every JSON-RPC frame shows up in a live terminal UI: tool calls, arguments,
-responses, timings, errors, and the capabilities both sides actually negotiated.
-You can also replay any captured call against a fresh server, without driving
-your whole client again.
+and watch every JSON-RPC frame in a live terminal UI as your real client and
+server talk.
 
 ## Quick start
 
@@ -63,23 +61,18 @@ pointing Claude at a published test server through mcpsnoop.
 
 ## Features
 
-- **Live JSON-RPC stream.** Requests, responses, notifications and server
-  stderr, colour-coded, with errors and slow calls called out.
-- **Replay.** Re-run any captured tool call against a fresh, isolated copy of
-  the server. The fastest loop for iterating on a tool.
-- **Capability inspector** (`c`). See exactly what the client and server agreed
-  on at the handshake.
+- **Live JSON-RPC stream.** Requests, responses, notifications and server stderr,
+  colour-coded, with errors and slow calls flagged, including tool-level
+  `result.isError`, not just JSON-RPC errors.
+- **Replay.** Re-run any captured tool call against a fresh, isolated copy of the
+  server. The fastest loop for iterating on a tool.
+- **Capability inspector** (`c`). See exactly what the client and server agreed on
+  at the handshake.
 - **Frame inspector** (`enter`). Full, pretty-printed JSON with in-frame search.
-- **Hung-call detection.** In-flight requests show `PENDING` with a live timer,
-  so a stuck tool is obvious at a glance.
+- **Hung-call detection.** In-flight requests show `PENDING` with a live timer, so
+  a stuck tool is obvious at a glance.
 - **A real filter query.** Narrow the stream with `tool:`, `status:`, `dir:`,
   `kind:`, `id:` or plain text.
-- **Tool-level errors too.** A response with `result.isError: true` is flagged,
-  not just JSON-RPC errors.
-- **Copy** (`y`) any frame's JSON straight to the clipboard.
-- **Multiple servers** at once, each in its own session.
-- **stdio and streamable HTTP** (JSON and SSE).
-- **One static binary, no runtime dependencies.**
 
 ## How it compares
 
@@ -101,13 +94,6 @@ go install github.com/kerlenton/mcpsnoop/cmd/mcpsnoop@latest
 Or grab a prebuilt binary for your platform from the
 [Releases](https://github.com/kerlenton/mcpsnoop/releases) page.
 
-From source:
-
-```bash
-git clone https://github.com/kerlenton/mcpsnoop && cd mcpsnoop
-go build -o mcpsnoop ./cmd/mcpsnoop
-```
-
 ## How it works
 
 <p align="center">
@@ -117,82 +103,29 @@ go build -o mcpsnoop ./cmd/mcpsnoop
   </picture>
 </p>
 
-The client is whatever drives the conversation (Claude Desktop, Cursor, Claude
-Code, your own agent). The server is any MCP server, in any language, over stdio
-or streamable HTTP. The official Inspector connects as a *second* client, off to
-the side; mcpsnoop sits in the actual pipe, so it sees exactly what your real
-client and server say to each other.
+The official Inspector connects as a *second* client, off to the side. mcpsnoop
+sits in the actual pipe, so it sees exactly what your real client and server say
+to each other, whatever the server is written in.
 
-mcpsnoop is two roles in one binary.
-
-`mcpsnoop -- <server>` is a transparent stdio shim that your client spawns
-instead of the server. It forwards bytes verbatim (it can never corrupt the
-pipe) while shipping a copy of each JSON-RPC frame to the hub, and it also writes
-a per-session log to disk.
-
-`mcpsnoop` with no arguments is the hub and TUI. It listens on a well-known
-socket, pairs requests with responses to derive timings, parses tool calls and
-capabilities, and renders everything live.
-
-Because the log is on disk and the socket is well-known, neither side has to
-start first.
+It's two roles in one binary: `mcpsnoop -- <server>` is the transparent shim your
+client spawns (forwarding bytes verbatim while shipping a copy of each frame),
+and `mcpsnoop` with no arguments is the hub and TUI. They pair through a
+well-known socket and on-disk logs, so neither has to start first.
 
 ## Keybindings
 
-**Navigate**
-
-| Key | Action |
-|---|---|
-| `j` / `k` (or `↑` / `↓`) | Move down / up |
-| `ctrl-f` / `ctrl-b` | Page down / up |
-| `g` / `G` | Jump to top / bottom |
-| `shift`+column | Sort by that column (press again to reverse) |
-
-**Move between views**
-
-| Key | Action |
-|---|---|
-| `enter` | Drill into the selected session, or open the frame inspector |
-| `esc` | Back out one level |
-| `:` | Command prompt (`:sessions`, `:stream`, `:q`, …) |
-| `?` | Help |
-| `:q` | Quit |
-
-**Act on the selection**
-
-| Key | Action |
-|---|---|
-| `r` | Replay the selected call against a fresh, isolated server |
-| `c` | Capability inspector |
-| `y` | Copy the frame's JSON to the clipboard |
-| `p` | Pause / resume the live stream |
-| `f` | Toggle follow (auto-scroll to the newest frame) |
-| `ctrl-d` | Delete the selected session |
-
-**Filter & search**
-
-| Key | Action |
-|---|---|
-| `/` | Filter the current table (the stream supports a query language, see below) |
-| `/` in a frame | Search within the open frame; `n` / `N` jump between matches |
+`enter` drill in · `esc` back · `r` replay · `c` capabilities · `y` copy ·
+`/` filter · `:` command · `p` pause · `f` follow · `ctrl-d` delete. Move with
+`j`/`k`, page with `ctrl-f`/`ctrl-b`, `g`/`G` for top and bottom, `shift`+column
+to sort. Press `?` in the app for the full list.
 
 ## Filtering the stream
 
-Inside a session, press `/` and combine space-separated tokens. They are ANDed,
-so each one narrows the stream further.
-
-| Token | Matches | Example |
-|---|---|---|
-| `<text>` | substring over method, tool name, id, and the raw JSON payload | `searchFiles` |
-| `tool:<name>` | the tool of a `tools/call` | `tool:echo` |
-| `method:<name>` | the JSON-RPC method | `method:tools/list` |
-| `id:<n>` | an exact request id | `id:7` |
-| `kind:<type>` | message type: `req`, `resp`, `notify`, `stderr` | `kind:resp` |
-| `dir:<way>` | direction: `c2s` (client→server) or `s2c` (server→client) | `dir:s2c` |
-| `status:<state>` | outcome: `ok`, `err`, `slow`, `pending` | `status:err` |
-
-For example, `tool:search status:slow` shows only slow calls to a search tool,
-and `dir:s2c kind:req` surfaces server-initiated requests (sampling, roots).
+In a session, press `/` and combine space-separated tokens (ANDed): plain text
+matches the method, tool, id and payload, while `tool:` `method:` `id:` `kind:`
+`dir:` `status:` filter by field. So `tool:search status:slow` shows slow calls
+to a search tool, and `dir:s2c kind:req` surfaces server-initiated requests
+(sampling, roots).
 
 ## Security
 
