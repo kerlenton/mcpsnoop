@@ -1,4 +1,6 @@
-# mcpsnoop
+<p align="center">
+  <img src="assets/png/mcpsnoop-lockup.png" alt="mcpsnoop" width="440">
+</p>
 
 **Wireshark for MCP.** A transparent proxy that shows every real tool call
 between your AI client and your MCP servers, live in your terminal.

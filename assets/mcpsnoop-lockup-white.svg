@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="240" viewBox="0 0 1120 240" fill="none">
+  <defs></defs>
+  <svg x="10" y="45" width="361" height="150" viewBox="0 0 260 108" preserveAspectRatio="xMidYMid meet" fill="none">
+  <line x1="38" y1="54" x2="102" y2="54" stroke="#FFFFFF" stroke-width="13"></line>
+  <line x1="158" y1="54" x2="222" y2="54" stroke="#FFFFFF" stroke-width="13"></line>
+  <rect x="14" y="42" width="24" height="24" fill="#FFFFFF"></rect>
+  <rect x="222" y="42" width="24" height="24" fill="#FFFFFF"></rect>
+  <path d="M116 30 H102 V78 H116" fill="none" stroke="#FFFFFF" stroke-width="13"></path>
+  <path d="M144 30 H158 V78 H144" fill="none" stroke="#FFFFFF" stroke-width="13"></path>
+  <rect x="122" y="39" width="16" height="30" fill="#FFFFFF"></rect>
+  </svg>
+  <text x="431" y="168" font-family="&#39;JetBrains Mono&#39;, ui-monospace, monospace" font-size="132" font-weight="500" letter-spacing="-1.5" fill="#FFFFFF">mcpsnoop</text>
+</svg>
