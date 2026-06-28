@@ -13,9 +13,11 @@ between your AI client and your MCP servers, live in your terminal.
 
 The official [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
 connects as its own client. It never sees the traffic between *your* client
-(Claude Desktop, Cursor, Claude Code) and your server. So when a tool silently
-isn't called, capabilities don't line up, or a call just hangs, you're back to
-`tail`-ing a log in `/tmp` and guessing.
+(Claude Desktop, Cursor, Claude Code) and your server. A breakpoint in your own
+server only fires once a request arrives — it can't show you the call the real
+client never made, or made with arguments you didn't expect. So when a tool
+silently isn't called, capabilities don't line up, or a call just hangs, you're
+back to `tail`-ing a log in `/tmp` and guessing.
 
 mcpsnoop sits in the real data path instead. Wrap your server command with it
 and every JSON-RPC frame shows up in a live terminal UI: tool calls, arguments,
