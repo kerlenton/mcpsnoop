@@ -38,6 +38,10 @@ func main() {
 		fmt.Println("mcpsnoop", version)
 		return
 	}
+	// `mcpsnoop demo` plays a scripted session, no client or server to set up.
+	if args := os.Args[1:]; len(args) == 1 && args[0] == "demo" {
+		os.Exit(runDemo())
+	}
 
 	fs := flag.NewFlagSet("mcpsnoop", flag.ExitOnError)
 	var (
@@ -51,7 +55,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop [flags] -- <server command> [args...]   run as transparent stdio shim\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop http --target <url> [--listen :7000]     run as transparent HTTP proxy\n")
-		fmt.Fprintf(os.Stderr, "  mcpsnoop                                          run the live TUI (collector)\n\n")
+		fmt.Fprintf(os.Stderr, "  mcpsnoop                                          run the live TUI (collector)\n")
+		fmt.Fprintf(os.Stderr, "  mcpsnoop demo                                     play a scripted session (no setup)\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fs.PrintDefaults()
 	}

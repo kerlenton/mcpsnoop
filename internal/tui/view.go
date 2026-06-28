@@ -645,9 +645,10 @@ func (m Model) onboardingCard() string {
 	snippet := box.Render(`"command": "mcpsnoop", "args": ["--", "node", "build/index.js"]`)
 	step2 := num("2") + "  " + dim("Use your client. Every tool call appears here, live.")
 	http := dim("Streamable HTTP?  ") + m.styles.hintKey.Render("mcpsnoop http --target <url>")
+	demo := dim("Just want to see it?  ") + m.styles.hintKey.Render("mcpsnoop demo")
 
 	return lipgloss.JoinVertical(lipgloss.Left,
-		title, "", step1, snippet, "", step2, "", http,
+		title, "", step1, snippet, "", step2, "", http, "", demo,
 	)
 }
 
