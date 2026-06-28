@@ -102,7 +102,8 @@ type Model struct {
 
 	overlay        overlayMode
 	vp             viewport.Model
-	overlayContent string // un-highlighted overlay body, for re-search
+	overlayRaw     string // overlay body before soft-wrapping (re-wrapped on resize)
+	overlayContent string // soft-wrapped, un-highlighted body, for re-search
 	overlaySearch  string
 	overlayMatches []int // line numbers containing a match
 	overlayMatchIx int
@@ -153,6 +154,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.layoutOverlay()
+		if m.overlay != overlayNone {
+			m.setOverlayBody(m.overlayRaw) // re-wrap to the new width
+			if m.overlaySearch != "" {
+				m.applyOverlaySearch(m.overlaySearch)
+			}
+		}
 		m.ready = true
 		m.refresh()
 		return m, nil
@@ -171,7 +178,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case replayDoneMsg:
 		if m.overlay == overlayReplay {
-			m.vp.SetContent(m.replayContent(msg))
+			m.setOverlayBody(m.replayContent(msg))
 			m.vp.GotoTop()
 		}
 		return m, nil
@@ -777,13 +784,21 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 // openOverlay shows a full-screen scrollable panel with the given content.
 func (m *Model) openOverlay(mode overlayMode, content string) {
 	m.overlay = mode
-	m.overlayContent = content
 	m.overlaySearch = ""
 	m.overlayMatches = nil
 	m.overlayMatchIx = 0
 	m.layoutOverlay()
-	m.vp.SetContent(content)
+	m.setOverlayBody(content)
 	m.vp.GotoTop()
+}
+
+// setOverlayBody stores the raw panel text and renders it soft-wrapped to the
+// viewport width, so long single-line JSON values stay readable instead of
+// running off the edge.
+func (m *Model) setOverlayBody(content string) {
+	m.overlayRaw = content
+	m.overlayContent = softWrap(content, m.vp.Width)
+	m.vp.SetContent(m.overlayContent)
 }
 
 // copyCurrent copies the most relevant thing for the current context to the
@@ -795,7 +810,7 @@ func (m *Model) copyCurrent() {
 	case m.overlay == overlayInspector && m.selEvent < len(m.timeline):
 		text, label = frameText(m.timeline[m.selEvent]), "frame JSON"
 	case m.overlay != overlayNone:
-		text, label = m.overlayContent, "panel"
+		text, label = m.overlayRaw, "panel"
 	case m.view == viewStream && m.selEvent < len(m.timeline):
 		text, label = frameText(m.timeline[m.selEvent]), "frame JSON"
 	case m.view == viewSessions && len(m.sessions) > 0:
@@ -828,6 +843,7 @@ func (m *Model) deleteCurrentSession() {
 // closeOverlay dismisses the overlay and clears any in-overlay search.
 func (m *Model) closeOverlay() {
 	m.overlay = overlayNone
+	m.overlayRaw = ""
 	m.overlayContent = ""
 	m.overlaySearch = ""
 	m.overlayMatches = nil

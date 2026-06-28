@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
@@ -743,4 +744,20 @@ func truncate(s string, w int) string {
 		return string(r[:max(0, min(len(r), w))])
 	}
 	return string(r[:w-1]) + "…"
+}
+
+// softWrap hard-wraps any line wider than width so long values (e.g. a big JSON
+// string) stay visible in the inspector instead of running off the edge. Lines
+// already within width are left untouched. ANSI-aware.
+func softWrap(s string, width int) string {
+	if width <= 1 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if lipgloss.Width(line) > width {
+			lines[i] = ansi.Hardwrap(line, width, false)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
