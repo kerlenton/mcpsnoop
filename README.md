@@ -35,6 +35,10 @@ Wrap your server in your client's MCP config:
 }}
 ```
 
+Everything after `--` is the command that normally launches your server (here, a
+TypeScript build run with `node`). Swap in whatever you already use, like
+`python server.py`, `npx -y @scope/server`, or a compiled binary.
+
 Use your client as usual, then open the UI:
 
 ```bash
