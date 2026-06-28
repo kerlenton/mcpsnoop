@@ -125,7 +125,7 @@ In a session, press `/` and combine space-separated tokens (ANDed): plain text
 matches the method, tool, id and payload, while `tool:` `method:` `id:` `kind:`
 `dir:` `status:` filter by field. So `tool:search status:slow` shows slow calls
 to a search tool, and `dir:s2c kind:req` surfaces server-initiated requests
-(sampling, roots).
+(sampling, roots). The `?` help lists each token and the values it accepts.
 
 ## Security
 
