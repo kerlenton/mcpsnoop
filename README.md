@@ -110,19 +110,12 @@ go build -o mcpsnoop ./cmd/mcpsnoop
 
 ## How it works
 
-```
-                 stdio / HTTP               stdio / HTTP
-┌──────────────────┐       ┌──────────────────┐       ┌──────────────────┐
-│    AI client     │──────▶│   mcpsnoop --    │──────▶│    MCP server    │
-│ Claude, Cursor…  │◀──────│ transparent shim │◀──────│  yours, or any   │
-└──────────────────┘       └─────────┬────────┘       └──────────────────┘
-                                     │  copy of every JSON-RPC frame
-                                     ▼
-                           ┌──────────────────┐
-                           │     mcpsnoop     │   ← you watch this, live
-                           │ live terminal UI │
-                           └──────────────────┘
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
+    <img alt="mcpsnoop sits in the pipe between your AI client and your MCP servers, copying every JSON-RPC frame to a live terminal UI" src="assets/architecture-light.svg" width="760">
+  </picture>
+</p>
 
 The client is whatever drives the conversation (Claude Desktop, Cursor, Claude
 Code, your own agent). The server is any MCP server, in any language, over stdio
