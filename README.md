@@ -14,7 +14,7 @@ between your AI client and your MCP servers, live in your terminal.
 The official [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
 connects as its own client. It never sees the traffic between *your* client
 (Claude Desktop, Cursor, Claude Code) and your server. A breakpoint in your own
-server only fires once a request arrives — it can't show you the call the real
+server only fires once a request arrives. It can't show you the call the real
 client never made, or made with arguments you didn't expect. So when a tool
 silently isn't called, capabilities don't line up, or a call just hangs, you're
 back to `tail`-ing a log in `/tmp` and guessing.
@@ -174,12 +174,12 @@ start first.
 
 | Key | Action |
 |---|---|
-| `/` | Filter the current table (the stream supports a query language — see below) |
+| `/` | Filter the current table (the stream supports a query language, see below) |
 | `/` in a frame | Search within the open frame; `n` / `N` jump between matches |
 
 ## Filtering the stream
 
-Inside a session, press `/` and combine space-separated tokens — they are ANDed,
+Inside a session, press `/` and combine space-separated tokens. They are ANDed,
 so each one narrows the stream further.
 
 | Token | Matches | Example |
@@ -203,7 +203,7 @@ your client config.
 
 ## Contributing
 
-Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
 the dev setup and the `make check` gate. mcpsnoop is pre-1.0 and follows
 [SemVer](https://semver.org): while on `0.x`, minor releases may change
 user-facing behaviour, and patch releases are bug fixes.

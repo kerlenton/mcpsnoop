@@ -14,7 +14,7 @@ make build        # builds ./mcpsnoop
 ```
 
 To see real traffic while hacking, wrap a published server and drive it with a
-real client — see [docs/DEMO.md](docs/DEMO.md).
+real client. See [docs/DEMO.md](docs/DEMO.md).
 
 ## Before you open a pull request
 
@@ -25,7 +25,7 @@ make check
 ```
 
 That runs `gofmt -s`, `go vet`, [staticcheck](https://staticcheck.dev), and the
-test suite under the race detector — the same checks CI runs. A focused unit
+test suite under the race detector, the same checks CI runs. A focused unit
 test for new behaviour is appreciated; most packages already have one to copy
 the style from.
 
@@ -56,7 +56,7 @@ mcpsnoop follows [Semantic Versioning](https://semver.org) (`vMAJOR.MINOR.PATCH`
 with the usual pre-1.0 rules:
 
 - **While `0.x`** the tool is still stabilising. A **minor** bump (`0.Y.0`) may
-  change user-facing behaviour — CLI flags, keybindings, the on-disk log format,
+  change user-facing behaviour: CLI flags, keybindings, the on-disk log format,
   or the shim↔hub protocol. A **patch** bump (`0.y.Z`) is reserved for bug fixes
   and backward-compatible additions.
 - **From `1.0.0` on**, breaking changes go in a **major** bump, new features in a
