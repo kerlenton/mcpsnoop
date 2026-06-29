@@ -1,0 +1,28 @@
+# Configures GitHub's native release-notes generator, which goreleaser uses via
+# `changelog: use: github-native`. PRs are grouped into sections by label; the
+# label.yml workflow applies those labels automatically from the Conventional
+# Commit prefix in each PR title. Empty sections are omitted.
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+    authors:
+      - dependabot
+  categories:
+    - title: Features
+      labels: [feature]
+    - title: Bug Fixes
+      labels: [fix]
+    - title: Performance
+      labels: [performance]
+    - title: Documentation
+      labels: [documentation]
+    - title: Refactoring
+      labels: [refactor]
+    - title: Build & CI
+      labels: [ci]
+    - title: Maintenance
+      labels: [maintenance]
+    - title: Other Changes
+      labels:
+        - "*"

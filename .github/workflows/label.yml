@@ -1,0 +1,57 @@
+name: label
+
+# Labels each PR from the Conventional Commit prefix in its title, so the
+# release notes (see .github/release.yml) group it into the right section.
+on:
+  pull_request:
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const title = context.payload.pull_request.title || "";
+            const m = title.match(/^(\w+)(\([^)]*\))?!?:/);
+            const map = {
+              feat: "feature", fix: "fix", perf: "performance",
+              docs: "documentation", refactor: "refactor",
+              build: "ci", ci: "ci",
+              chore: "maintenance", style: "maintenance",
+              test: "maintenance", revert: "maintenance",
+            };
+            const colors = {
+              feature: "1FB6FF", fix: "D73A4A", performance: "A2EEEF",
+              documentation: "0075CA", refactor: "FBCA04",
+              ci: "BFD4F2", maintenance: "CFD3D7",
+            };
+            const repo = context.repo;
+            const num = context.payload.pull_request.number;
+            const want = m ? map[m[1].toLowerCase()] : undefined;
+            const managed = new Set(Object.values(map));
+
+            // Drop any managed label that no longer matches (e.g. title edited).
+            for (const l of context.payload.pull_request.labels) {
+              if (managed.has(l.name) && l.name !== want) {
+                await github.rest.issues.removeLabel(
+                  { ...repo, issue_number: num, name: l.name }).catch(() => {});
+              }
+            }
+            if (!want) return;
+
+            // Create the label on first use, then apply it.
+            try {
+              await github.rest.issues.getLabel({ ...repo, name: want });
+            } catch {
+              await github.rest.issues.createLabel(
+                { ...repo, name: want, color: colors[want] || "EDEDED" });
+            }
+            await github.rest.issues.addLabels(
+              { ...repo, issue_number: num, labels: [want] });

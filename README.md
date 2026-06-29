@@ -101,6 +101,13 @@ brew tap kerlenton/mcpsnoop
 brew install mcpsnoop
 ```
 
+Recent Homebrew gates third-party taps; if it refuses, trust the tap once with
+`brew trust kerlenton/mcpsnoop` and re-run the install.
+
+A tap-free `brew install mcpsnoop` (no tap, no trust) needs Homebrew core, which
+only accepts projects past a notability bar (stars, forks, watchers). If you'd
+find that handy, a star on the repo helps it qualify.
+
 Or grab a prebuilt binary for your platform from the
 [Releases](https://github.com/kerlenton/mcpsnoop/releases) page.
 
