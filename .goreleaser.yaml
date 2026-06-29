@@ -32,6 +32,23 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# Publish a Homebrew formula to the kerlenton/homebrew-mcpsnoop tap on each
+# release. Needs HOMEBREW_TAP_TOKEN (a PAT that can push to that tap repo).
+brews:
+  - name: mcpsnoop
+    repository:
+      owner: kerlenton
+      name: homebrew-mcpsnoop
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/kerlenton/mcpsnoop"
+    description: "Wireshark for MCP: a transparent proxy and TUI for debugging MCP traffic"
+    license: "MIT"
+    commit_author:
+      name: goreleaser
+      email: noreply@github.com
+    test: |
+      system "#{bin}/mcpsnoop", "version"
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 

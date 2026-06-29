@@ -27,7 +27,10 @@ server talk.
 
 ## Quick start
 
-Wrap your server in your client's MCP config:
+Want to see it first, with nothing to set up? Run `mcpsnoop demo` for a scripted
+session that plays into the live UI.
+
+To use it for real, wrap your server in your client's MCP config:
 
 ```jsonc
 { "mcpServers": {
@@ -89,6 +92,13 @@ pointing Claude at a published test server through mcpsnoop.
 
 ```bash
 go install github.com/kerlenton/mcpsnoop/cmd/mcpsnoop@latest
+```
+
+Or with [Homebrew](https://brew.sh):
+
+```bash
+brew tap kerlenton/mcpsnoop
+brew install mcpsnoop
 ```
 
 Or grab a prebuilt binary for your platform from the

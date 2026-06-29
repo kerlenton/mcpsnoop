@@ -1,13 +1,14 @@
 GO ?= go
 BIN := mcpsnoop
 PKG := ./...
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .PHONY: all build test vet staticcheck fmt fmt-check lint check clean
 
 all: check build
 
 build:
-	$(GO) build -o $(BIN) ./cmd/mcpsnoop
+	$(GO) build -ldflags "-X main.version=$(VERSION)" -o $(BIN) ./cmd/mcpsnoop
 
 test:
 	$(GO) test $(PKG)

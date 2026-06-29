@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -28,6 +29,21 @@ import (
 // version is overridden at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
+// appVersion resolves the version to report: the value baked in by -ldflags
+// (release builds and `make build`), else the module version embedded by
+// `go install ...@vX`, else "dev" for a plain local build.
+func appVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v := info.Main.Version; v != "" && v != "(devel)" {
+			return v
+		}
+	}
+	return version
+}
+
 func main() {
 	// `mcpsnoop http ...` is a separate subcommand with its own flags.
 	if args := os.Args[1:]; len(args) > 0 && args[0] == "http" {
@@ -35,7 +51,7 @@ func main() {
 	}
 	// `mcpsnoop version` mirrors the --version flag (what most CLIs expect).
 	if args := os.Args[1:]; len(args) == 1 && (args[0] == "version" || args[0] == "-v") {
-		fmt.Println("mcpsnoop", version)
+		fmt.Println("mcpsnoop", appVersion())
 		return
 	}
 	// `mcpsnoop demo` plays a scripted session, no client or server to set up.
@@ -51,7 +67,7 @@ func main() {
 		showVer   = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "mcpsnoop %s — Wireshark for MCP\n\n", version)
+		fmt.Fprintf(os.Stderr, "mcpsnoop %s — Wireshark for MCP\n\n", appVersion())
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop [flags] -- <server command> [args...]   run as transparent stdio shim\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop http --target <url> [--listen :7000]     run as transparent HTTP proxy\n")
@@ -63,7 +79,7 @@ func main() {
 	_ = fs.Parse(os.Args[1:])
 
 	if *showVer {
-		fmt.Println("mcpsnoop", version)
+		fmt.Println("mcpsnoop", appVersion())
 		return
 	}
 
