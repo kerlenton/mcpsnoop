@@ -21,9 +21,10 @@ client never made, or made with arguments you didn't expect. So when a tool
 silently isn't called, capabilities don't line up, or a call just hangs, you're
 back to `tail`-ing a log in `/tmp` and guessing.
 
-mcpsnoop sits in the real data path instead. Wrap your server command with it
-and watch every JSON-RPC frame in a live terminal UI as your real client and
-server talk.
+mcpsnoop sits in the real data path instead, so you can debug the actual MCP
+traffic between your client and server. Wrap your server command with it and
+watch every JSON-RPC frame in a live terminal UI as your real client and server
+talk.
 
 ## Quick start
 
