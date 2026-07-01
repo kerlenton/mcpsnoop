@@ -324,7 +324,7 @@ func (m Model) streamCells(e store.EventView) streamCell {
 	c := streamCell{time: e.TS.Format("15:04:05.000"), id: e.ID}
 	switch e.Kind {
 	case store.EventStderr:
-		c.dir, c.method = "⚠", "stderr"
+		c.dir, c.method = "┆", "stderr"
 		c.detail = e.Text
 	case store.EventRequest:
 		c.dir = arrow(e.Dir)

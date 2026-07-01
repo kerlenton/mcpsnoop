@@ -16,7 +16,7 @@ var (
 	colErr    = lipgloss.Color("203") // red — error
 	colSlow   = lipgloss.Color("215") // warm amber — slow call
 	colNotif  = lipgloss.Color("146") // muted lavender — notification
-	colStderr = lipgloss.Color("216") // peach — server stderr
+	colStderr = lipgloss.Color("245") // muted gray — server stderr (a side channel, not an error)
 	colHeader = lipgloss.Color("231") // near-white
 )
 
