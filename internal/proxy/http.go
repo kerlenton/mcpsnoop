@@ -86,7 +86,7 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte)) http.Handle
 			req.URL.Host = target.Host
 			req.Host = target.Host
 			if target.Path != "" && target.Path != "/" {
-				req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
+				req.URL.Path = target.Path
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
@@ -142,18 +142,6 @@ func emitFrames(emit func(Direction, []byte), dir Direction, body []byte) {
 		}
 	}
 	emit(dir, b)
-}
-
-func singleJoiningSlash(a, b string) string {
-	aslash := strings.HasSuffix(a, "/")
-	bslash := strings.HasPrefix(b, "/")
-	switch {
-	case aslash && bslash:
-		return a + b[1:]
-	case !aslash && !bslash:
-		return a + "/" + b
-	}
-	return a + b
 }
 
 // sseTap passes SSE bytes through unchanged while extracting each event's

@@ -52,6 +52,28 @@ func TestHTTPProxyJSON(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyTargetPathIsEndpoint(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mcp" {
+			t.Fatalf("backend path = %q, want /mcp", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL + "/mcp")
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	resp, err := http.Post(front.URL+"/mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+}
+
 func TestHTTPProxySSE(t *testing.T) {
 	msgs := []string{
 		`{"jsonrpc":"2.0","id":1,"result":{"step":1}}`,
