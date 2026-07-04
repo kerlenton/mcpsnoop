@@ -3,7 +3,11 @@ name: label
 # Labels each PR from the Conventional Commit prefix in its title, so the
 # release notes (see .github/release.yml) group it into the right section.
 on:
-  pull_request:
+  # pull_request_target (not pull_request) so labeling also works on PRs from
+  # forks. A fork PR runs pull_request with a read-only token, which can't add
+  # labels. This is safe here because the job only reads the PR title from the
+  # event payload and never checks out or runs the PR's code.
+  pull_request_target:
     types: [opened, edited, reopened]
 
 permissions:
