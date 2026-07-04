@@ -200,6 +200,9 @@ func (t *sseTap) line(l []byte) {
 		return
 	}
 	if rest, ok := bytes.CutPrefix(l, []byte("data:")); ok {
+		if t.dataBuf.Len() > 0 {
+			t.dataBuf.WriteByte('\n')
+		}
 		t.dataBuf.Write(bytes.TrimPrefix(rest, []byte(" ")))
 	}
 	// other SSE fields (event:, id:, retry:) are ignored

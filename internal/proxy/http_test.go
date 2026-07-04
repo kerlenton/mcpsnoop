@@ -105,3 +105,14 @@ func TestSSETapMultiChunk(t *testing.T) {
 		t.Fatalf("sseTap parsed %v", got)
 	}
 }
+
+func TestSSETapMultilineData(t *testing.T) {
+	var got []string
+	tap := newSSETap(io.NopCloser(strings.NewReader("")), func(d []byte) { got = append(got, string(d)) })
+
+	tap.feed([]byte("data: first line\ndata: second line\n\n"))
+
+	if len(got) != 1 || got[0] != "first line\nsecond line" {
+		t.Fatalf("sseTap parsed %v", got)
+	}
+}
