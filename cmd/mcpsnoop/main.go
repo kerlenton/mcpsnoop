@@ -54,6 +54,10 @@ func main() {
 	if args := os.Args[1:]; len(args) > 0 && args[0] == "export" {
 		os.Exit(runExport(args[1:]))
 	}
+	// `mcpsnoop open <session.jsonl>` opens a session file directly in the TUI.
+	if args := os.Args[1:]; len(args) > 0 && args[0] == "open" {
+		os.Exit(runOpen(args[1:]))
+	}
 	// `mcpsnoop version` mirrors the --version flag (what most CLIs expect).
 	if args := os.Args[1:]; len(args) == 1 && (args[0] == "version" || args[0] == "-v") {
 		fmt.Println("mcpsnoop", appVersion())
@@ -304,4 +308,9 @@ func runHub() int {
 		return 1
 	}
 	return 0
+}
+
+// runOpen opens a persisted JSONL session directly in the TUI.
+func runOpen(args []string) int {
+	panic("TODO")
 }
