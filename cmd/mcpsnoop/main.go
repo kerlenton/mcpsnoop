@@ -24,6 +24,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/store"
 	"github.com/kerlenton/mcpsnoop/internal/tui"
 )
 
@@ -312,5 +313,43 @@ func runHub() int {
 
 // runOpen opens a persisted JSONL session directly in the TUI.
 func runOpen(args []string) int {
-	panic("TODO")
+	fs := flag.NewFlagSet("mcpsnoop open", flag.ExitOnError)
+
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: mcpsnoop open <session.jsonl>\n\n")
+		fmt.Fprintf(os.Stderr, "Open a persisted session log directly in the TUI.\n")
+	}
+
+	_ = fs.Parse(args)
+
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return 2
+	}
+
+	path := fs.Arg(0)
+
+	f, err := os.Open(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
+		return 1
+	}
+	defer f.Close()
+	st := store.New(0)
+	err = proxy.Decode(f, func(e proxy.Envelope) {
+		st.Ingest(e)
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := tui.RunOpen(ctx, st); err != nil {
+		fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
+		return 1
+	}
+
+	return 0
 }
