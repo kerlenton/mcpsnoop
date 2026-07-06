@@ -1,59 +1,44 @@
 # Review past sessions from logs
 
-mcpsnoop keeps a per-session JSONL trace while it proxies MCP traffic. That
-means you can open the TUI after the client/server session already happened and
-review the captured traffic from disk.
+mcpsnoop keeps a per-session JSONL trace while it proxies MCP traffic. So you can
+open the TUI after a client and server session already happened and review the
+captured traffic straight from disk.
 
 ## Where session logs live
 
-By default, session logs are stored under:
-
-```text
-~/.local/state/mcpsnoop/sessions/
-```
-
-Each session is one `.jsonl` file named after the session id:
+By default each session is one `.jsonl` file under your state directory, named
+after the session id.
 
 ```text
 ~/.local/state/mcpsnoop/sessions/<session-id>.jsonl
 ```
 
-The base directory can be overridden with:
-
-```bash
-MCPSNOOP_HOME=/path/to/mcpsnoop-state
-```
-
-If `XDG_STATE_HOME` is set, mcpsnoop uses:
-
-```text
-$XDG_STATE_HOME/mcpsnoop/sessions/
-```
+Set `MCPSNOOP_HOME` to move that base directory somewhere else, or set
+`XDG_STATE_HOME` to keep sessions under `$XDG_STATE_HOME/mcpsnoop/sessions`.
+`MCPSNOOP_HOME` wins when both are set.
 
 ## Open a past session
 
-Run the TUI with no arguments:
+Run the TUI with no arguments.
 
 ```bash
 mcpsnoop
 ```
 
-On startup, the hub reads existing session logs from disk before accepting new
-live shim connections. Past sessions appear in the sessions table alongside any
-currently running sessions.
-
-From the sessions table:
+On startup the hub reads existing session logs from disk before it accepts live
+shim connections, so past sessions appear in the sessions table next to any
+running ones. From there a few keys do the work.
 
 - Press `/` to filter by session name.
 - Press `enter` to open the selected session stream.
 - Press `:` and type part of a session name to jump to it.
-- Press `y` on a selected session to copy its log path.
-- Press `ctrl-d` only when you intentionally want to remove the selected session
-  and its on-disk log.
+- Press `y` to copy the selected session log path.
+- Press `ctrl-d` to remove the selected session and its on-disk log, only when
+  you mean to.
 
 ## Review the captured stream
 
-Inside a session stream:
+Inside a session stream, a few more keys apply.
 
 - Press `/` to filter frames with tokens such as `tool:`, `method:`, `id:`,
   `kind:`, `dir:`, `status:`, or plain text.
@@ -66,27 +51,28 @@ Inside a session stream:
 
 ## Capture to a known file
 
-For debugging reports or reproducible examples, write a session to a known path:
+For a bug report or a reproducible example, write a session straight to a path
+you choose.
 
 ```bash
 mcpsnoop --trace-file ./mcpsnoop-session.jsonl -- node build/index.js
 ```
 
-You can keep that file as an attachment or move it into a test fixture.
-Note that `--trace-file` writes the log only to that path, not to the default
-sessions directory. A running TUI still shows the session live through the
-socket, but because the log is not in the sessions directory, it will not
-appear in the TUI backfill on a later start. For a session that shows up
-automatically later, leave `--trace-file` off and use the default location.
+Keep that file as an attachment or move it into a test fixture. `--trace-file`
+writes the log only to that path, not to the default sessions directory. A
+running TUI still shows the session live through the socket, but since the log
+lives outside the sessions directory it will not show up in the backfill on a
+later start. For a session that reappears automatically, leave `--trace-file`
+off and use the default location.
 
 ## What to include in a bug report
 
-When reporting a past-session problem, include:
+A useful report about a past session covers a few things.
 
-- the wrapped server command;
-- the session log path, or the smallest relevant JSON frame copied with `y`;
-- the filter you used, if one made the problem visible;
-- whether the session came from stdio mode or `mcpsnoop http`.
+- The wrapped server command.
+- The session log path, or the smallest relevant JSON frame copied with `y`.
+- The filter that made the problem visible, if you used one.
+- Whether the session ran in stdio mode or through `mcpsnoop http`.
 
-Avoid pasting secrets or private tool payloads directly into a public issue.
-Trim or redact frames before sharing them.
+Keep secrets and private tool payloads out of public issues. Trim or redact
+frames before you share them.

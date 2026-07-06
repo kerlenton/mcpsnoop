@@ -9,109 +9,94 @@ between your AI client and your MCP servers, live in your terminal.
 [![Go Reference](https://pkg.go.dev/badge/github.com/kerlenton/mcpsnoop.svg)](https://pkg.go.dev/github.com/kerlenton/mcpsnoop)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-![demo](docs/demo.gif)
+<p align="center">
+  <img src="docs/demo.gif" alt="mcpsnoop demo">
+</p>
 
 ## The problem
 
 The official [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
-connects as its own client. It never sees the traffic between *your* client
-(Claude Desktop, Cursor, Claude Code) and your server. A breakpoint in your own
-server only fires once a request arrives. It can't show you the call the real
-client never made, or made with arguments you didn't expect. So when a tool
-silently isn't called, capabilities don't line up, or a call just hangs, you're
-back to `tail`-ing a log in `/tmp` and guessing.
+connects as its own client, so it never sees what *your* client (Cursor, Claude
+Code, Codex) actually sends your server. A breakpoint only fires once a request
+arrives, so it can't show the call the model never made, or made with the wrong
+arguments. When a tool silently isn't called, capabilities don't line up, or a
+call just hangs, you're left digging through logs and guessing.
 
-mcpsnoop sits in the real data path instead, so you can debug the actual MCP
-traffic between your client and server. Wrap your server command with it and
-watch every JSON-RPC frame in a live terminal UI as your real client and server
-talk.
+**mcpsnoop sits in the real data path instead.** Wrap your server command with
+it and watch every JSON-RPC frame live, as your real client and server talk.
 
 ## Quick start
 
-Want to see it first, with nothing to set up? Run `mcpsnoop demo` for a scripted
-session that plays into the live UI.
+See it right away, with nothing to set up.
 
-To use it for real, wrap your server in your client's MCP config:
-
-```jsonc
-{ "mcpServers": {
-    "my-server": { "command": "mcpsnoop", "args": ["--", "node", "build/index.js"] }
-}}
+```bash
+mcpsnoop demo
 ```
 
-Everything after `--` is the command that normally launches your server (here, a
-TypeScript build run with `node`). Swap in whatever you already use, like
-`python server.py`, `npx -y @scope/server`, or a compiled binary.
+To use it for real, wrap your server in your client's MCP config.
 
-Use your client as usual, then open the UI:
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "mcpsnoop",
+      "args": ["--", "node", "build/index.js"]
+    }
+  }
+}
+```
+
+Everything after `--` is the command that normally launches your server. Swap in
+whatever you already use, like `python server.py`, `npx -y @scope/server`, or a
+compiled binary. Then use your client as usual and open the UI.
 
 ```bash
 mcpsnoop
 ```
 
-No flags, no socket paths, no startup order to remember. The shim and the UI
-find each other on their own, and the UI backfills past sessions from disk, so
-it doesn't matter whether you open it before or after your client. To inspect a
-session after it happened, see [review past sessions from logs](docs/POST_MORTEM.md).
+No flags, no socket paths, no startup order to remember. The shim and the UI find
+each other on their own, and the UI backfills past sessions from disk.
 
-For a streamable-HTTP server, run mcpsnoop as a reverse proxy and point your
-client at it:
+For a streamable-HTTP server, run mcpsnoop as a reverse proxy.
 
 ```bash
 mcpsnoop http --target http://localhost:3000/mcp --listen :7000
 ```
 
-No server of your own to test against? [docs/DEMO.md](docs/DEMO.md) walks through
-pointing Claude at a published test server through mcpsnoop.
-
-## Features
-
-- **Live JSON-RPC stream.** Requests, responses, notifications and server stderr,
-  colour-coded, with errors and slow calls flagged, including tool-level
-  `result.isError`, not just JSON-RPC errors.
-- **Replay.** Re-run any captured tool call against a fresh, isolated copy of the
-  server. The fastest loop for iterating on a tool.
-- **Capability inspector** (`c`). See exactly what the client and server agreed on
-  at the handshake.
-- **Frame inspector** (`enter`). Full, pretty-printed JSON with in-frame search.
-- **Hung-call detection.** In-flight requests show `PENDING` with a live timer, so
-  a stuck tool is obvious at a glance.
-- **A real filter query.** Narrow the stream with `tool:`, `status:`, `dir:`,
-  `kind:`, `id:` or plain text.
+No server of your own? [Try it for real](docs/TRY_IT.md) against a published
+test server, driven by your own client. To inspect a session after it happened,
+see [review past sessions from logs](docs/POST_MORTEM.md).
 
 ## How it compares
 
-| | MCP Inspector | mcp-trace | mcpsnoop |
-|---|:---:|:---:|:---:|
-| Sees your real client↔server traffic | no | yes | yes |
-| Interactive terminal UI | no | yes | yes |
-| Zero-config, no flags or ordering | no | no | yes |
-| Capability inspector | partial | no | yes |
-| Replay a captured call | no | no | yes |
-| Single binary, no runtime deps | no | varies | yes |
+| | MCP Inspector | mcpsnoop |
+|---|:---:|:---:|
+| Sees your real client and server traffic | no | yes |
+| Flags slow and hung calls | no | yes |
+| Interactive terminal UI | no | yes |
+| Zero-config, no flags or ordering | no | yes |
+| Capability inspector | partial | yes |
+| Replay a captured call | no | yes |
+| Session export (json / html / text) | no | yes |
+| Single binary, no runtime deps | no | yes |
 
 ## Install
+
+### Go
 
 ```bash
 go install github.com/kerlenton/mcpsnoop/cmd/mcpsnoop@latest
 ```
 
-Or with [Homebrew](https://brew.sh):
+### Homebrew
 
 ```bash
 brew tap kerlenton/mcpsnoop
+brew trust kerlenton/mcpsnoop
 brew install mcpsnoop
 ```
 
-Recent Homebrew gates third-party taps; if it refuses, trust the tap once with
-`brew trust kerlenton/mcpsnoop` and re-run the install.
-
-A tap-free `brew install mcpsnoop` (no tap, no trust) needs Homebrew core, which
-only accepts projects past a notability bar (stars, forks, watchers). If you'd
-find that handy, a star on the repo helps it qualify.
-
-Or grab a prebuilt binary for your platform from the
-[Releases](https://github.com/kerlenton/mcpsnoop/releases) page.
+Prebuilt binaries for every platform are on the [Releases](https://github.com/kerlenton/mcpsnoop/releases) page.
 
 ## How it works
 
@@ -122,54 +107,86 @@ Or grab a prebuilt binary for your platform from the
   </picture>
 </p>
 
-The official Inspector connects as a *second* client, off to the side. mcpsnoop
-sits in the actual pipe, so it sees exactly what your real client and server say
-to each other, whatever the server is written in.
-
-It's two roles in one binary: `mcpsnoop -- <server>` is the transparent shim your
-client spawns (forwarding bytes verbatim while shipping a copy of each frame),
-and `mcpsnoop` with no arguments is the hub and TUI. They pair through a
+mcpsnoop is two roles in one binary. `mcpsnoop -- <server>` is the transparent
+shim your client spawns, forwarding bytes verbatim while shipping a copy of every
+frame to mcpsnoop with no arguments, the hub and TUI. They pair through a
 well-known socket and on-disk logs, so neither has to start first.
+
+Because it sits in the actual pipe, not off to the side like the Inspector, it
+sees exactly what your real client and server say to each other, whatever the
+server is written in.
 
 ## Keybindings
 
-`enter` drill in · `esc` back · `r` replay · `c` capabilities · `y` copy ·
-`/` filter · `:` command · `p` pause · `f` follow · `ctrl-d` delete. Move with
-`j`/`k`, page with `ctrl-f`/`ctrl-b`, `g`/`G` for top and bottom, `shift`+column
-to sort. Press `?` in the app for the full list.
+| Key | Action | | Key | Action |
+|---|---|---|---|---|
+| `enter` | inspect / drill in | | `/` | filter |
+| `esc` | back | | `:` | command |
+| `j` / `k` | move | | `r` | replay a call |
+| `g` / `G` | top / bottom | | `c` | capabilities |
+| `ctrl-f` / `ctrl-b` | page | | `y` | copy |
+| `shift`+column | sort | | `e` | export |
+| `p` | pause | | `ctrl-d` | delete session |
+| `f` | follow | | `?` | help |
+
+Press `?` in the app for the full list.
 
 ## Filtering the stream
 
-In a session, press `/` and combine space-separated tokens (ANDed): plain text
-matches the method, tool, id and payload, while `tool:` `method:` `id:` `kind:`
-`dir:` `status:` filter by field. So `tool:search status:slow` shows slow calls
-to a search tool, and `dir:s2c kind:req` surfaces server-initiated requests
-(sampling, roots). The `?` help lists each token and the values it accepts.
+Press `/` in a session and combine space-separated tokens, ANDed. Plain text
+matches the method, tool, id, and payload.
+
+| Token | Filters by | Example |
+|---|---|---|
+| `tool:` | tool name | `tool:search` |
+| `method:` | JSON-RPC method | `method:tools/call` |
+| `id:` | request id | `id:7` |
+| `dir:` | direction (`c2s`, `s2c`) | `dir:s2c` |
+| `kind:` | frame type (`req`, `resp`, `notify`, `stderr`) | `kind:notify` |
+| `status:` | call outcome (`ok`, `error`, `slow`, `pending`) | `status:slow` |
+
+Stack tokens to get specific.
+
+```text
+tool:search status:slow           # slow calls to one search tool
+method:tools/call status:error    # tool calls that failed
+dir:s2c kind:req                  # server-initiated requests (sampling, roots)
+```
 
 ## Exporting sessions
 
-`mcpsnoop export -T json|html|text [-o file|-] [session-id|log.jsonl]` reads a
-captured JSONL session and writes a portable export. `json` includes correlated
-calls, durations, status, tool-level `isError`, capabilities, and the raw
-frames. `html` is a self-contained browser file with search and collapsible
-JSON. `text` is a pretty plain dump. Omit the session argument to export the
-newest saved session, and use `-o -` to write to stdout.
+Turn any captured session into a portable file.
 
-In the TUI, press `e` to export the selected session as HTML, or run
+```bash
+mcpsnoop export -T json|html|text [-o file|-] [session-id|log.jsonl]
+```
+
+| Format | What you get |
+|---|---|
+| `json` | correlated calls, durations, status, tool-level `isError`, capabilities, and raw frames |
+| `html` | a self-contained browser file with search and collapsible JSON |
+| `text` | a pretty plain-text dump |
+
+```bash
+mcpsnoop export -T html -o out.html       # an HTML file to open in a browser
+mcpsnoop export -T text server.py-48213   # a specific session, as text
+mcpsnoop export -T json | jq              # the newest session, piped to jq
+```
+
+Omit `-o` to write to stdout, and omit the session to take the newest. In the
+TUI, press `e` to export the selected session as HTML, or run
 `:export json|html|text [path]` from command mode.
 
 ## Security
 
-mcpsnoop runs the server command you wrap, so only wrap servers you trust and
+mcpsnoop runs the server command you wrap, so only wrap servers you trust, and
 run untrusted ones in a container. It never executes anything you didn't put in
 your client config.
 
 ## Contributing
 
 Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
-the dev setup and the `make check` gate. mcpsnoop is pre-1.0 and follows
-[SemVer](https://semver.org): while on `0.x`, minor releases may change
-user-facing behaviour, and patch releases are bug fixes.
+the details.
 
 ## License
 
