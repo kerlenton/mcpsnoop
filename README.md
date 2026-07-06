@@ -63,6 +63,15 @@ For a streamable-HTTP server, run mcpsnoop as a reverse proxy.
 mcpsnoop http --target http://localhost:3000/mcp --listen :7000
 ```
 
+If payloads can contain secrets, opt in to key-based trace redaction. Matching
+JSON fields are scrubbed in saved session logs, while the proxied bytes still
+pass through unchanged.
+
+```bash
+mcpsnoop --redact-key token,api_key,password -- node build/index.js
+mcpsnoop http --target http://localhost:3000/mcp --redact-key authorization
+```
+
 No server of your own? [Try it for real](docs/TRY_IT.md) against a published
 test server, driven by your own client. To inspect a session after it happened,
 see [review past sessions from logs](docs/POST_MORTEM.md).

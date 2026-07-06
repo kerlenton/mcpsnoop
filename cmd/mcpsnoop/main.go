@@ -45,6 +45,29 @@ func appVersion() string {
 	return version
 }
 
+type redactKeysFlag []string
+
+func (f *redactKeysFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	return strings.Join(*f, ",")
+}
+
+func (f *redactKeysFlag) Set(value string) error {
+	for _, key := range strings.Split(value, ",") {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			*f = append(*f, key)
+		}
+	}
+	return nil
+}
+
+func (f redactKeysFlag) config() proxy.RedactConfig {
+	return proxy.RedactConfig{Keys: []string(f)}
+}
+
 func main() {
 	// `mcpsnoop http ...` is a separate subcommand with its own flags.
 	if args := os.Args[1:]; len(args) > 0 && args[0] == "http" {
@@ -65,12 +88,14 @@ func main() {
 	}
 
 	fs := flag.NewFlagSet("mcpsnoop", flag.ExitOnError)
+	var redactKeys redactKeysFlag
 	var (
 		label     = fs.String("label", "", "server label shown in the TUI (default: command name)")
 		traceFile = fs.String("trace-file", "", "override the JSONL trace path (default: well-known session log)")
 		noTrace   = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
 		showVer   = fs.Bool("version", false, "print version and exit")
 	)
+	fs.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads (repeat or comma-separated)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "mcpsnoop %s — Wireshark for MCP\n\n", appVersion())
 		fmt.Fprintf(os.Stderr, "Usage:\n")
@@ -90,7 +115,7 @@ func main() {
 	}
 
 	if command := fs.Args(); len(command) > 0 {
-		os.Exit(runShim(command, *label, *traceFile, *noTrace))
+		os.Exit(runShim(command, *label, *traceFile, *noTrace, redactKeys.config()))
 	}
 	os.Exit(runHub())
 }
@@ -201,13 +226,13 @@ func runExport(args []string) int {
 
 // runShim runs the transparent stdio proxy. It writes the durable session log
 // AND streams live to the hub; neither has to be running first.
-func runShim(command []string, label, traceFile string, noTrace bool) int {
+func runShim(command []string, label, traceFile string, noTrace bool, redaction proxy.RedactConfig) int {
 	if label == "" {
 		label = labelFor(command)
 	}
 	sessionID := fmt.Sprintf("%s-%d", label, os.Getpid())
 
-	sink := traceSink(sessionID, traceFile, noTrace)
+	sink := traceSink(sessionID, traceFile, noTrace, redaction)
 	defer sink.Close()
 	if !noTrace {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: tracing %q (session %s)\n", strings.Join(command, " "), sessionID)
@@ -233,7 +258,7 @@ func runShim(command []string, label, traceFile string, noTrace bool) int {
 
 // traceSink builds the shared sink: a durable per-session JSONL log plus a
 // best-effort live stream to the hub. Returns a no-op sink when disabled.
-func traceSink(sessionID, traceFile string, noTrace bool) proxy.Sink {
+func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.RedactConfig) proxy.Sink {
 	if noTrace {
 		return proxy.NopSink()
 	}
@@ -244,7 +269,11 @@ func traceSink(sessionID, traceFile string, noTrace bool) proxy.Sink {
 	if f, err := os.OpenFile(traceFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: cannot open trace file %q: %v (continuing without file trace)\n", traceFile, err)
 	} else {
-		sinks = append(sinks, proxy.NewAsyncSink(f, 0))
+		fileSink := proxy.Sink(proxy.NewAsyncSink(f, 0))
+		if redaction.Enabled() {
+			fileSink = proxy.NewRedactingSink(fileSink, redaction)
+		}
+		sinks = append(sinks, fileSink)
 	}
 	sinks = append(sinks, proxy.NewSocketSink(paths.SocketPath(), 0))
 	return proxy.NewMultiSink(sinks...)
@@ -253,12 +282,14 @@ func traceSink(sessionID, traceFile string, noTrace bool) proxy.Sink {
 // runHTTP runs the transparent HTTP proxy subcommand.
 func runHTTP(args []string) int {
 	fs := flag.NewFlagSet("mcpsnoop http", flag.ExitOnError)
+	var redactKeys redactKeysFlag
 	var (
 		target  = fs.String("target", "", "real MCP server endpoint, e.g. http://localhost:3000/mcp (required)")
 		listen  = fs.String("listen", ":7000", "address to listen on")
 		label   = fs.String("label", "", "server label shown in the TUI (default: target host)")
 		noTrace = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
 	)
+	fs.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads (repeat or comma-separated)")
 	_ = fs.Parse(args)
 	if *target == "" {
 		fmt.Fprintln(os.Stderr, "mcpsnoop http: --target is required")
@@ -274,7 +305,7 @@ func runHTTP(args []string) int {
 	}
 	sessionID := fmt.Sprintf("%s-%d", lbl, os.Getpid())
 
-	sink := traceSink(sessionID, "", *noTrace)
+	sink := traceSink(sessionID, "", *noTrace, redactKeys.config())
 	defer sink.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
