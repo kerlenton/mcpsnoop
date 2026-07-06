@@ -51,7 +51,8 @@ mcpsnoop
 
 No flags, no socket paths, no startup order to remember. The shim and the UI
 find each other on their own, and the UI backfills past sessions from disk, so
-it doesn't matter whether you open it before or after your client.
+it doesn't matter whether you open it before or after your client. To inspect a
+session after it happened, see [review past sessions from logs](docs/POST_MORTEM.md).
 
 For a streamable-HTTP server, run mcpsnoop as a reverse proxy and point your
 client at it:
