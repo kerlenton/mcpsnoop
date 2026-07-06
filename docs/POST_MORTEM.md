@@ -72,9 +72,12 @@ For debugging reports or reproducible examples, write a session to a known path:
 mcpsnoop --trace-file ./mcpsnoop-session.jsonl -- node build/index.js
 ```
 
-You can keep that file as an attachment or move it into a test fixture. When the
-same traffic is also written to the normal mcpsnoop sessions directory, `mcpsnoop`
-will pick it up automatically on the next TUI start.
+You can keep that file as an attachment or move it into a test fixture.
+Note that `--trace-file` writes the log only to that path, not to the default
+sessions directory. A running TUI still shows the session live through the
+socket, but because the log is not in the sessions directory, it will not
+appear in the TUI backfill on a later start. For a session that shows up
+automatically later, leave `--trace-file` off and use the default location.
 
 ## What to include in a bug report
 
