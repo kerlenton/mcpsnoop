@@ -855,25 +855,25 @@ func (m *Model) exportCurrent(formatArg, outPath string) {
 		var err error
 		format, err = exporter.ParseFormat(formatArg)
 		if err != nil {
-			m.setFlash("export failed: bad format")
+			m.setFlash("export failed: " + err.Error())
 			return
 		}
 	}
 	data, err := exporter.Build(m.store, id)
 	if err != nil {
-		m.setFlash("export failed")
+		m.setFlash("export failed: " + err.Error())
 		return
 	}
 	if outPath == "" {
 		outPath = exporter.DefaultOutputPath(id, format)
 	}
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o700); err != nil {
-		m.setFlash("export failed")
+		m.setFlash("export failed: " + err.Error())
 		return
 	}
 	f, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		m.setFlash("export failed")
+		m.setFlash("export failed: " + err.Error())
 		return
 	}
 	err = exporter.Write(f, data, exporter.Options{Format: format})
@@ -881,7 +881,7 @@ func (m *Model) exportCurrent(formatArg, outPath string) {
 		err = cerr
 	}
 	if err != nil {
-		m.setFlash("export failed")
+		m.setFlash("export failed: " + err.Error())
 		return
 	}
 	m.setFlash("✓ exported " + outPath)
