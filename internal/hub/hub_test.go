@@ -2,8 +2,16 @@ package hub
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,6 +29,40 @@ func env(session string, seq uint64, method string) proxy.Envelope {
 		Transport: "stdio",
 		Raw:       json.RawMessage(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q}`, seq, method)),
 	}
+}
+
+func writeTestCert(t *testing.T, dir string) (certFile, keyFile string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile = filepath.Join(dir, "cert.pem")
+	keyFile = filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
 }
 
 // writeLog writes envelopes as JSONL to the session log for session.
@@ -96,5 +138,76 @@ func TestHubBackfillLiveDedup(t *testing.T) {
 	case e := <-got:
 		t.Fatalf("unexpected extra frame: %+v", e)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestHubRemoteTLSAuth(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile := writeTestCert(t, dir)
+
+	got := make(chan proxy.Envelope, 4)
+	h := New("", dir, func(e proxy.Envelope) { got <- e }, WithRemote(RemoteConfig{
+		Listen: "127.0.0.1:0", Token: "secret", CertFile: certFile, KeyFile: keyFile,
+	}))
+	ln, err := h.listenRemote()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.accept(ctx, ln, true)
+
+	sink, err := proxy.NewRemoteSink(proxy.RemoteSinkConfig{
+		Addr: ln.Addr().String(), Token: "secret", CAFile: certFile,
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	sink.Emit(env("remote", 1, "initialize"))
+
+	select {
+	case e := <-got:
+		if e.SessionID != "remote" || e.Seq != 1 {
+			t.Fatalf("unexpected envelope: %+v", e)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for remote envelope")
+	}
+}
+
+func TestHubRemoteRejectsBadToken(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile := writeTestCert(t, dir)
+
+	got := make(chan proxy.Envelope, 4)
+	h := New("", dir, func(e proxy.Envelope) { got <- e }, WithRemote(RemoteConfig{
+		Listen: "127.0.0.1:0", Token: "secret", CertFile: certFile, KeyFile: keyFile,
+	}))
+	ln, err := h.listenRemote()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.accept(ctx, ln, true)
+
+	sink, err := proxy.NewRemoteSink(proxy.RemoteSinkConfig{
+		Addr: ln.Addr().String(), Token: "wrong", CAFile: certFile,
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	sink.Emit(env("remote", 1, "initialize"))
+
+	select {
+	case e := <-got:
+		t.Fatalf("bad token was accepted: %+v", e)
+	case <-time.After(300 * time.Millisecond):
 	}
 }

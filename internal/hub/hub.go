@@ -11,9 +11,9 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -30,20 +30,42 @@ type Handler func(proxy.Envelope)
 type Hub struct {
 	socketPath  string
 	sessionsDir string
+	remote      RemoteConfig
 	handler     Handler
 
 	mu   sync.Mutex
 	seen map[string]uint64 // session id -> highest seq forwarded
 }
 
+// RemoteConfig enables a TLS listener for shims running on other hosts.
+type RemoteConfig struct {
+	Listen   string
+	Token    string
+	CertFile string
+	KeyFile  string
+}
+
+// Option configures optional hub inputs.
+type Option func(*Hub)
+
+// WithRemote enables a TLS remote ingest listener. The token authenticates
+// shims after TLS is established.
+func WithRemote(cfg RemoteConfig) Option {
+	return func(h *Hub) { h.remote = cfg }
+}
+
 // New creates a hub. handler is invoked for every deduplicated envelope.
-func New(socketPath, sessionsDir string, handler Handler) *Hub {
-	return &Hub{
+func New(socketPath, sessionsDir string, handler Handler, opts ...Option) *Hub {
+	h := &Hub{
 		socketPath:  socketPath,
 		sessionsDir: sessionsDir,
 		handler:     handler,
 		seen:        make(map[string]uint64),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // ErrHubRunning means another hub already owns the socket.
@@ -58,6 +80,15 @@ func (h *Hub) Run(ctx context.Context) error {
 	defer ln.Close()
 	defer os.Remove(h.socketPath)
 
+	var remote net.Listener
+	if h.remote.Listen != "" {
+		remote, err = h.listenRemote()
+		if err != nil {
+			return err
+		}
+		defer remote.Close()
+	}
+
 	// Backfill BEFORE accepting: this primes the per-session high-water marks
 	// from disk so a live shim that reconnects (e.g. after a hub restart) can't
 	// race its high-Seq frames ahead of the file's history and cause the gate to
@@ -68,21 +99,22 @@ func (h *Hub) Run(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		ln.Close()
+		if remote != nil {
+			remote.Close()
+		}
 	}()
 
 	var wg sync.WaitGroup
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				break // clean shutdown
-			}
-			continue
-		}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		h.accept(ctx, ln, false)
+	}()
+	if remote != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			h.handleConn(conn)
+			h.accept(ctx, remote, true)
 		}()
 	}
 	wg.Wait()
@@ -103,17 +135,76 @@ func (h *Hub) listen() (net.Listener, error) {
 	return net.Listen("unix", h.socketPath)
 }
 
+func (h *Hub) listenRemote() (net.Listener, error) {
+	if h.remote.Token == "" {
+		return nil, errors.New("hub: --remote-token is required with --remote-listen")
+	}
+	if h.remote.CertFile == "" || h.remote.KeyFile == "" {
+		return nil, errors.New("hub: --remote-cert and --remote-key are required with --remote-listen")
+	}
+	cert, err := tls.LoadX509KeyPair(h.remote.CertFile, h.remote.KeyFile)
+	if err != nil {
+		return nil, err
+	}
+	return tls.Listen("tcp", h.remote.Listen, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+	})
+}
+
+func (h *Hub) accept(ctx context.Context, ln net.Listener, remote bool) {
+	var wg sync.WaitGroup
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				break
+			}
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if remote {
+				h.handleRemoteConn(conn)
+				return
+			}
+			h.handleConn(conn)
+		}()
+	}
+	wg.Wait()
+}
+
+type remoteHello struct {
+	Version string `json:"mcpsnoop_remote"`
+	Token   string `json:"token"`
+}
+
 // handleConn decodes a stream of newline/whitespace-separated envelopes.
 func (h *Hub) handleConn(conn net.Conn) {
 	defer conn.Close()
 	dec := json.NewDecoder(conn)
+	h.decodeEnvelopes(dec)
+}
+
+func (h *Hub) handleRemoteConn(conn net.Conn) {
+	defer conn.Close()
+	dec := json.NewDecoder(conn)
+	var hello remoteHello
+	if err := dec.Decode(&hello); err != nil {
+		return
+	}
+	if hello.Version != "1" || hello.Token != h.remote.Token {
+		return
+	}
+	h.decodeEnvelopes(dec)
+}
+
+func (h *Hub) decodeEnvelopes(dec *json.Decoder) {
 	for {
 		var env proxy.Envelope
 		if err := dec.Decode(&env); err != nil {
-			if err == io.EOF || errors.Is(err, net.ErrClosed) {
-				return
-			}
-			return // malformed stream; drop the connection
+			return
 		}
 		h.emit(env)
 	}

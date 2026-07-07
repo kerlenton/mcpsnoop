@@ -47,34 +47,25 @@ type SocketSink struct {
 	done    chan struct{}
 	once    sync.Once
 	dropped atomic.Uint64
+	dial    func(context.Context, string) (net.Conn, error)
 }
 
 // NewSocketSink dials addr (a unix socket path) lazily and keeps it connected.
 func NewSocketSink(addr string, buffer int) *SocketSink {
-	if buffer <= 0 {
-		buffer = 4096
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	s := &SocketSink{
-		addr:   addr,
-		ch:     make(chan Envelope, buffer),
-		cancel: cancel,
-		done:   make(chan struct{}),
-	}
-	go s.run(ctx)
-	return s
+	return newSocketSink(addr, buffer, func(ctx context.Context, addr string) (net.Conn, error) {
+		return defaultDial(ctx, "unix", addr)
+	})
 }
 
 func (s *SocketSink) run(ctx context.Context) {
 	defer close(s.done)
 	const minBackoff, maxBackoff = 200 * time.Millisecond, 2 * time.Second
 	backoff := minBackoff
-	var d net.Dialer
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		conn, err := d.DialContext(ctx, "unix", s.addr)
+		conn, err := s.dial(ctx, s.addr)
 		if err != nil {
 			if !sleep(ctx, backoff) {
 				return
@@ -124,16 +115,4 @@ func (s *SocketSink) Close() error {
 	})
 	<-s.done
 	return nil
-}
-
-// sleep waits for d or until ctx is cancelled; returns false if cancelled.
-func sleep(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
 }
