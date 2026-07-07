@@ -36,3 +36,14 @@ func Run(ctx context.Context, socketPath, sessionsDir string, slow time.Duration
 	}
 	return err
 }
+
+// RunOpen starts the TUI using a preloaded store without starting the live hub.
+func RunOpen(ctx context.Context, st *store.Store) error {
+	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx))
+
+	_, err := p.Run()
+	if errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
+}

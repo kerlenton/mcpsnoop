@@ -135,7 +135,8 @@ func (m Model) flashActive() bool {
 func New(st *store.Store) Model {
 	ti := textinput.New()
 	ti.Prompt = ""
-	return Model{
+
+	m := Model{
 		store:  st,
 		keys:   defaultKeys(),
 		styles: newStyles(),
@@ -143,6 +144,10 @@ func New(st *store.Store) Model {
 		follow: true,
 		input:  ti,
 	}
+
+	m.refresh()
+
+	return m
 }
 
 func (m Model) Init() tea.Cmd { return tick() }
