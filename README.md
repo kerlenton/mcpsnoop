@@ -64,8 +64,10 @@ mcpsnoop http --target http://localhost:3000/mcp --listen :7000
 ```
 
 If payloads can contain secrets, opt in to key-based trace redaction. Matching
-JSON fields are scrubbed in saved session logs, while the proxied bytes still
-pass through unchanged.
+JSON fields are scrubbed in observed trace copies, while the proxied bytes still
+pass through unchanged. Redaction is best effort: it only scrubs values under
+matching JSON object keys, so secrets in stderr text, string values under other
+keys, or frames that are not valid JSON pass through.
 
 ```bash
 mcpsnoop --redact-key token,api_key,password -- node build/index.js

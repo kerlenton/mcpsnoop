@@ -269,14 +269,14 @@ func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.Redact
 	if f, err := os.OpenFile(traceFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: cannot open trace file %q: %v (continuing without file trace)\n", traceFile, err)
 	} else {
-		fileSink := proxy.Sink(proxy.NewAsyncSink(f, 0))
-		if redaction.Enabled() {
-			fileSink = proxy.NewRedactingSink(fileSink, redaction)
-		}
-		sinks = append(sinks, fileSink)
+		sinks = append(sinks, proxy.NewAsyncSink(f, 0))
 	}
 	sinks = append(sinks, proxy.NewSocketSink(paths.SocketPath(), 0))
-	return proxy.NewMultiSink(sinks...)
+	sink := proxy.Sink(proxy.NewMultiSink(sinks...))
+	if redaction.Enabled() {
+		sink = proxy.NewRedactingSink(sink, redaction)
+	}
+	return sink
 }
 
 // runHTTP runs the transparent HTTP proxy subcommand.
