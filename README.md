@@ -63,17 +63,6 @@ For a streamable-HTTP server, run mcpsnoop as a reverse proxy.
 mcpsnoop http --target http://localhost:3000/mcp --listen :7000
 ```
 
-If payloads can contain secrets, opt in to key-based trace redaction. Matching
-JSON fields are scrubbed in observed trace copies, while the proxied bytes still
-pass through unchanged. Redaction is best effort and only scrubs values under
-matching JSON object keys, so secrets in stderr text, string values under other
-keys, or frames that are not valid JSON pass through.
-
-```bash
-mcpsnoop --redact-key token,api_key,password -- node build/index.js
-mcpsnoop http --target http://localhost:3000/mcp --redact-key authorization
-```
-
 No server of your own? [Try it for real](docs/TRY_IT.md) against a published
 test server, driven by your own client. To inspect a session after it happened,
 see [review past sessions from logs](docs/POST_MORTEM.md).
@@ -221,9 +210,14 @@ Copy the remote session logs into your local sessions directory, then open the
 TUI as normal.
 
 ```bash
+# make your local sessions directory
 mkdir -p ~/.local/state/mcpsnoop/sessions
+
+# copy the remote logs into it
 scp remote-user@remote-host:'~/.local/state/mcpsnoop/sessions/*.jsonl' \
   ~/.local/state/mcpsnoop/sessions/
+
+# open the TUI, it backfills the copied sessions
 mcpsnoop
 ```
 
@@ -234,9 +228,20 @@ run untrusted ones in a container. It never executes anything you didn't put in
 your client config.
 
 Captured frames can include prompts, tool arguments, credentials, and tool
-results. For remote workflows, use SSH tunnelling or SSH file transfer so
-transport auth, encryption, host verification, key rotation, and audit policy
-stay in your existing SSH setup.
+results. If payloads can carry secrets, opt in to key-based redaction to scrub
+matching JSON fields from the observed trace copies while the proxied bytes still
+pass through unchanged. It is best effort and only scrubs values under matching
+JSON object keys, so secrets in stderr text, string values under other keys, or
+non-JSON frames pass through.
+
+```bash
+mcpsnoop --redact-key token,api_key,password -- node build/index.js
+mcpsnoop http --target http://localhost:3000/mcp --redact-key authorization
+```
+
+For remote workflows, use SSH tunnelling or SSH file transfer so transport auth,
+encryption, host verification, key rotation, and audit policy stay in your
+existing SSH setup.
 
 ## Contributing
 
