@@ -22,7 +22,6 @@ import (
 	"syscall"
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
-	"github.com/kerlenton/mcpsnoop/internal/hub"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/tui"
@@ -67,16 +66,10 @@ func main() {
 
 	fs := flag.NewFlagSet("mcpsnoop", flag.ExitOnError)
 	var (
-		label        = fs.String("label", "", "server label shown in the TUI (default: command name)")
-		traceFile    = fs.String("trace-file", "", "override the JSONL trace path (default: well-known session log)")
-		noTrace      = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
-		remoteSink   = fs.String("remote-sink", "", "remote hub TLS address for live streaming, e.g. host:7447")
-		remoteToken  = fs.String("remote-token", "", "shared token for remote live streaming")
-		remoteCA     = fs.String("remote-ca", "", "PEM CA/certificate file used to verify --remote-sink")
-		remoteListen = fs.String("remote-listen", "", "TLS address for the hub to accept remote shims, e.g. :7447")
-		remoteCert   = fs.String("remote-cert", "", "PEM certificate for --remote-listen")
-		remoteKey    = fs.String("remote-key", "", "PEM private key for --remote-listen")
-		showVer      = fs.Bool("version", false, "print version and exit")
+		label     = fs.String("label", "", "server label shown in the TUI (default: command name)")
+		traceFile = fs.String("trace-file", "", "override the JSONL trace path (default: well-known session log)")
+		noTrace   = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
+		showVer   = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "mcpsnoop %s — Wireshark for MCP\n\n", appVersion())
@@ -97,13 +90,9 @@ func main() {
 	}
 
 	if command := fs.Args(); len(command) > 0 {
-		os.Exit(runShim(command, *label, *traceFile, *noTrace, remoteSinkConfig{
-			Addr: *remoteSink, Token: *remoteToken, CAFile: *remoteCA,
-		}))
+		os.Exit(runShim(command, *label, *traceFile, *noTrace))
 	}
-	os.Exit(runHub(hubRemoteConfig{
-		Listen: *remoteListen, Token: *remoteToken, CertFile: *remoteCert, KeyFile: *remoteKey,
-	}))
+	os.Exit(runHub())
 }
 
 // runnerNames are launchers we skip when guessing a session label, so wrapping
@@ -210,28 +199,15 @@ func runExport(args []string) int {
 	return 0
 }
 
-type remoteSinkConfig struct {
-	Addr   string
-	Token  string
-	CAFile string
-}
-
-type hubRemoteConfig struct {
-	Listen   string
-	Token    string
-	CertFile string
-	KeyFile  string
-}
-
 // runShim runs the transparent stdio proxy. It writes the durable session log
 // AND streams live to the hub; neither has to be running first.
-func runShim(command []string, label, traceFile string, noTrace bool, remote remoteSinkConfig) int {
+func runShim(command []string, label, traceFile string, noTrace bool) int {
 	if label == "" {
 		label = labelFor(command)
 	}
 	sessionID := fmt.Sprintf("%s-%d", label, os.Getpid())
 
-	sink := traceSink(sessionID, traceFile, noTrace, remote)
+	sink := traceSink(sessionID, traceFile, noTrace)
 	defer sink.Close()
 	if !noTrace {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: tracing %q (session %s)\n", strings.Join(command, " "), sessionID)
@@ -257,7 +233,7 @@ func runShim(command []string, label, traceFile string, noTrace bool, remote rem
 
 // traceSink builds the shared sink: a durable per-session JSONL log plus a
 // best-effort live stream to the hub. Returns a no-op sink when disabled.
-func traceSink(sessionID, traceFile string, noTrace bool, remote remoteSinkConfig) proxy.Sink {
+func traceSink(sessionID, traceFile string, noTrace bool) proxy.Sink {
 	if noTrace {
 		return proxy.NopSink()
 	}
@@ -271,16 +247,6 @@ func traceSink(sessionID, traceFile string, noTrace bool, remote remoteSinkConfi
 		sinks = append(sinks, proxy.NewAsyncSink(f, 0))
 	}
 	sinks = append(sinks, proxy.NewSocketSink(paths.SocketPath(), 0))
-	if remote.Addr != "" {
-		rs, err := proxy.NewRemoteSink(proxy.RemoteSinkConfig{
-			Addr: remote.Addr, Token: remote.Token, CAFile: remote.CAFile,
-		}, 0)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "mcpsnoop: cannot configure remote sink %q: %v (continuing without remote stream)\n", remote.Addr, err)
-		} else {
-			sinks = append(sinks, rs)
-		}
-	}
 	return proxy.NewMultiSink(sinks...)
 }
 
@@ -288,13 +254,10 @@ func traceSink(sessionID, traceFile string, noTrace bool, remote remoteSinkConfi
 func runHTTP(args []string) int {
 	fs := flag.NewFlagSet("mcpsnoop http", flag.ExitOnError)
 	var (
-		target      = fs.String("target", "", "real MCP server endpoint, e.g. http://localhost:3000/mcp (required)")
-		listen      = fs.String("listen", ":7000", "address to listen on")
-		label       = fs.String("label", "", "server label shown in the TUI (default: target host)")
-		noTrace     = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
-		remoteSink  = fs.String("remote-sink", "", "remote hub TLS address for live streaming, e.g. host:7447")
-		remoteToken = fs.String("remote-token", "", "shared token for remote live streaming")
-		remoteCA    = fs.String("remote-ca", "", "PEM CA/certificate file used to verify --remote-sink")
+		target  = fs.String("target", "", "real MCP server endpoint, e.g. http://localhost:3000/mcp (required)")
+		listen  = fs.String("listen", ":7000", "address to listen on")
+		label   = fs.String("label", "", "server label shown in the TUI (default: target host)")
+		noTrace = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
 	)
 	_ = fs.Parse(args)
 	if *target == "" {
@@ -311,9 +274,7 @@ func runHTTP(args []string) int {
 	}
 	sessionID := fmt.Sprintf("%s-%d", lbl, os.Getpid())
 
-	sink := traceSink(sessionID, "", *noTrace, remoteSinkConfig{
-		Addr: *remoteSink, Token: *remoteToken, CAFile: *remoteCA,
-	})
+	sink := traceSink(sessionID, "", *noTrace)
 	defer sink.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -334,17 +295,11 @@ func runHTTP(args []string) int {
 }
 
 // runHub runs the live TUI, collecting traffic from all shims and past sessions.
-func runHub(remote hubRemoteConfig) int {
+func runHub() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var opts []hub.Option
-	if remote.Listen != "" {
-		opts = append(opts, hub.WithRemote(hub.RemoteConfig{
-			Listen: remote.Listen, Token: remote.Token, CertFile: remote.CertFile, KeyFile: remote.KeyFile,
-		}))
-	}
-	if err := tui.Run(ctx, paths.SocketPath(), paths.SessionsDir(), 0, opts...); err != nil {
+	if err := tui.Run(ctx, paths.SocketPath(), paths.SessionsDir(), 0); err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)
 		return 1
 	}
