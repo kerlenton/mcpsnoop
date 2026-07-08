@@ -235,8 +235,13 @@ JSON object keys, so secrets in stderr text, string values under other keys, or
 non-JSON frames pass through.
 
 ```bash
+# built-in preset of common secret keys
 mcpsnoop --redact-secrets -- node build/index.js
+
+# or name your own keys
 mcpsnoop --redact-key token,api_key,password -- node build/index.js
+
+# preset plus your own keys, in http mode
 mcpsnoop http --target http://localhost:3000/mcp --redact-secrets --redact-key authorization
 ```
 
