@@ -365,13 +365,12 @@ func runOpen(args []string) int {
 	}
 
 	arg := fs.Arg(0)
+	usedStdin := arg == "-"
 	var r io.Reader
-	var f *os.File
-	if arg == "-" {
+	if usedStdin {
 		r = os.Stdin
 	} else {
-		var err error
-		f, err = os.Open(arg)
+		f, err := os.Open(arg)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
 			return 1
@@ -390,9 +389,22 @@ func runOpen(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := tui.RunOpen(ctx, st); err != nil {
-		fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
-		return 1
+	if usedStdin {
+		tty, err := openTTY()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
+			return 1
+		}
+		defer tty.Close()
+		if err := tui.RunOpenWithInput(ctx, st, tty); err != nil {
+			fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
+			return 1
+		}
+	} else {
+		if err := tui.RunOpen(ctx, st); err != nil {
+			fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
+			return 1
+		}
 	}
 
 	return 0

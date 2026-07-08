@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -41,6 +42,16 @@ func Run(ctx context.Context, socketPath, sessionsDir string, slow time.Duration
 func RunOpen(ctx context.Context, st *store.Store) error {
 	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx))
 
+	_, err := p.Run()
+	if errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
+}
+
+// RunOpenWithInput starts the TUI using a preloaded store and a custom input reader (e.g., controlling TTY).
+func RunOpenWithInput(ctx context.Context, st *store.Store, in io.Reader) error {
+	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx), tea.WithInput(in))
 	_, err := p.Run()
 	if errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, context.Canceled) {
 		return nil
