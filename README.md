@@ -235,8 +235,9 @@ JSON object keys, so secrets in stderr text, string values under other keys, or
 non-JSON frames pass through.
 
 ```bash
+mcpsnoop --redact-secrets -- node build/index.js
 mcpsnoop --redact-key token,api_key,password -- node build/index.js
-mcpsnoop http --target http://localhost:3000/mcp --redact-key authorization
+mcpsnoop http --target http://localhost:3000/mcp --redact-secrets --redact-key authorization
 ```
 
 For remote workflows, use SSH tunnelling or SSH file transfer so transport auth,

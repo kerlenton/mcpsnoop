@@ -8,14 +8,33 @@ import (
 
 const redactedValue = "[REDACTED]"
 
+var commonSecretRedactKeys = []string{
+	"token",
+	"api_key",
+	"apikey",
+	"password",
+	"passwd",
+	"secret",
+	"authorization",
+	"access_token",
+	"refresh_token",
+	"client_secret",
+}
+
 // RedactConfig configures best-effort scrubbing for observed trace copies.
 type RedactConfig struct {
+	// CommonSecrets enables a built-in preset of common secret field names.
+	CommonSecrets bool
+
 	// Keys are JSON object field names whose values should be replaced.
 	Keys []string
 }
 
 // Enabled reports whether cfg has any key-based redaction rule.
 func (cfg RedactConfig) Enabled() bool {
+	if cfg.CommonSecrets {
+		return true
+	}
 	for _, key := range cfg.Keys {
 		if strings.TrimSpace(key) != "" {
 			return true
@@ -32,13 +51,20 @@ type Redactor struct {
 // NewRedactor prepares cfg for repeated use.
 func NewRedactor(cfg RedactConfig) Redactor {
 	keys := make(map[string]struct{})
-	for _, key := range cfg.Keys {
+	if cfg.CommonSecrets {
+		addRedactKeys(keys, commonSecretRedactKeys)
+	}
+	addRedactKeys(keys, cfg.Keys)
+	return Redactor{keys: keys}
+}
+
+func addRedactKeys(keys map[string]struct{}, candidates []string) {
+	for _, key := range candidates {
 		key = strings.ToLower(strings.TrimSpace(key))
 		if key != "" {
 			keys[key] = struct{}{}
 		}
 	}
-	return Redactor{keys: keys}
 }
 
 func (r Redactor) enabled() bool { return len(r.keys) > 0 }

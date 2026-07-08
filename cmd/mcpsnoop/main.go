@@ -65,8 +65,11 @@ func (f *redactKeysFlag) Set(value string) error {
 	return nil
 }
 
-func (f redactKeysFlag) config() proxy.RedactConfig {
-	return proxy.RedactConfig{Keys: []string(f)}
+func (f redactKeysFlag) config(commonSecrets bool) proxy.RedactConfig {
+	return proxy.RedactConfig{
+		CommonSecrets: commonSecrets,
+		Keys:          []string(f),
+	}
 }
 
 func main() {
@@ -95,10 +98,11 @@ func main() {
 	fs := flag.NewFlagSet("mcpsnoop", flag.ExitOnError)
 	var redactKeys redactKeysFlag
 	var (
-		label     = fs.String("label", "", "server label shown in the TUI (default: command name)")
-		traceFile = fs.String("trace-file", "", "override the JSONL trace path (default: well-known session log)")
-		noTrace   = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
-		showVer   = fs.Bool("version", false, "print version and exit")
+		label         = fs.String("label", "", "server label shown in the TUI (default: command name)")
+		traceFile     = fs.String("trace-file", "", "override the JSONL trace path (default: well-known session log)")
+		noTrace       = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
+		redactSecrets = fs.Bool("redact-secrets", false, "scrub common secret JSON keys in trace payloads")
+		showVer       = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads (repeat or comma-separated)")
 	fs.Usage = func() {
@@ -120,7 +124,7 @@ func main() {
 	}
 
 	if command := fs.Args(); len(command) > 0 {
-		os.Exit(runShim(command, *label, *traceFile, *noTrace, redactKeys.config()))
+		os.Exit(runShim(command, *label, *traceFile, *noTrace, redactKeys.config(*redactSecrets)))
 	}
 	os.Exit(runHub())
 }
@@ -289,10 +293,11 @@ func runHTTP(args []string) int {
 	fs := flag.NewFlagSet("mcpsnoop http", flag.ExitOnError)
 	var redactKeys redactKeysFlag
 	var (
-		target  = fs.String("target", "", "real MCP server endpoint, e.g. http://localhost:3000/mcp (required)")
-		listen  = fs.String("listen", ":7000", "address to listen on")
-		label   = fs.String("label", "", "server label shown in the TUI (default: target host)")
-		noTrace = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
+		target        = fs.String("target", "", "real MCP server endpoint, e.g. http://localhost:3000/mcp (required)")
+		listen        = fs.String("listen", ":7000", "address to listen on")
+		label         = fs.String("label", "", "server label shown in the TUI (default: target host)")
+		noTrace       = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
+		redactSecrets = fs.Bool("redact-secrets", false, "scrub common secret JSON keys in trace payloads")
 	)
 	fs.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads (repeat or comma-separated)")
 	_ = fs.Parse(args)
@@ -310,7 +315,7 @@ func runHTTP(args []string) int {
 	}
 	sessionID := fmt.Sprintf("%s-%d", lbl, os.Getpid())
 
-	sink := traceSink(sessionID, "", *noTrace, redactKeys.config())
+	sink := traceSink(sessionID, "", *noTrace, redactKeys.config(*redactSecrets))
 	defer sink.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

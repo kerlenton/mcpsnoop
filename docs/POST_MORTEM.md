@@ -65,11 +65,11 @@ lives outside the sessions directory it will not show up in the backfill on a
 later start. For a session that reappears automatically, leave `--trace-file`
 off and use the default location.
 
-To keep common secret fields out of saved traces, pass one or more
-`--redact-key` values when you wrap the server.
+To keep common secret fields out of saved traces, pass `--redact-secrets` when
+you wrap the server. Add `--redact-key` for project-specific fields.
 
 ```bash
-mcpsnoop --redact-key token --redact-key api_key -- node build/index.js
+mcpsnoop --redact-secrets --redact-key tenant_api_key -- node build/index.js
 ```
 
 ## What to include in a bug report

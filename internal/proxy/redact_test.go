@@ -56,6 +56,41 @@ func TestRedactingSinkScrubsMatchingKeysRecursively(t *testing.T) {
 	}
 }
 
+func TestRedactingSinkScrubsCommonSecretPresetAndExplicitKeys(t *testing.T) {
+	sink := &captureSink{}
+	redacted := NewRedactingSink(sink, RedactConfig{
+		CommonSecrets: true,
+		Keys:          []string{"custom_secret"},
+	})
+
+	redacted.Emit(Envelope{
+		Raw: json.RawMessage(`{
+			"params":{
+				"Authorization":"Bearer secret",
+				"apiKey":"key-123",
+				"client_secret":"client-123",
+				"custom_secret":"custom-123",
+				"keep":"visible"
+			}
+		}`),
+	})
+
+	got := sink.byDir("")[0]
+	var obj map[string]any
+	if err := json.Unmarshal(got.Raw, &obj); err != nil {
+		t.Fatalf("redacted Raw is invalid JSON: %v", err)
+	}
+	params := obj["params"].(map[string]any)
+	for _, key := range []string{"Authorization", "apiKey", "client_secret", "custom_secret"} {
+		if params[key] != redactedValue {
+			t.Fatalf("%s = %v, want redacted", key, params[key])
+		}
+	}
+	if params["keep"] != "visible" {
+		t.Fatalf("keep = %v, want visible", params["keep"])
+	}
+}
+
 func TestRedactingSinkLeavesPayloadUnchangedWithoutConfig(t *testing.T) {
 	sink := &captureSink{}
 	redacted := NewRedactingSink(sink, RedactConfig{})

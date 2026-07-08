@@ -44,11 +44,30 @@ func TestRedactKeysFlagParsesCommaSeparatedAndRepeatedValues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := flag.config().Keys, []string{"token", "api_key", "password"}; !slices.Equal(got, want) {
+	cfg := flag.config(false)
+	if cfg.CommonSecrets {
+		t.Fatal("CommonSecrets = true, want false")
+	}
+	if got, want := cfg.Keys, []string{"token", "api_key", "password"}; !slices.Equal(got, want) {
 		t.Fatalf("keys = %v, want %v", got, want)
 	}
 	if got := flag.String(); got != "token,api_key,password" {
 		t.Fatalf("String() = %q, want token,api_key,password", got)
+	}
+}
+
+func TestRedactKeysFlagConfigEnablesCommonSecretsPreset(t *testing.T) {
+	var flag redactKeysFlag
+	if err := flag.Set("custom_secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := flag.config(true)
+	if !cfg.CommonSecrets {
+		t.Fatal("CommonSecrets = false, want true")
+	}
+	if got, want := cfg.Keys, []string{"custom_secret"}; !slices.Equal(got, want) {
+		t.Fatalf("keys = %v, want %v", got, want)
 	}
 }
 
