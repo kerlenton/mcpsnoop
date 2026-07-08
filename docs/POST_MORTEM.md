@@ -36,6 +36,20 @@ running ones. From there a few keys do the work.
 - Press `ctrl-d` to remove the selected session and its on-disk log, only when
   you mean to.
 
+To open one specific log that is not in the sessions directory, for example a
+`--trace-file` capture or a log a teammate sent you, pass its path to `open`.
+
+```bash
+mcpsnoop open ./session.jsonl
+```
+
+Use `-` to read from stdin, handy for streaming a remote log over SSH without
+copying it down first.
+
+```bash
+ssh remote-user@remote-host 'cat ~/.local/state/mcpsnoop/sessions/session.jsonl' | mcpsnoop open -
+```
+
 ## Review the captured stream
 
 Inside a session stream, a few more keys apply.

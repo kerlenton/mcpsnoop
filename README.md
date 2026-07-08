@@ -206,14 +206,18 @@ mcpsnoop -- node build/index.js
 
 ### Post-mortem
 
-Copy the remote session logs into your local sessions directory, then open the
-TUI as normal.
+Stream a remote session straight into the TUI over SSH, no local copy needed.
 
 ```bash
-# make your local sessions directory
-mkdir -p ~/.local/state/mcpsnoop/sessions
+ssh remote-user@remote-host 'cat ~/.local/state/mcpsnoop/sessions/session.jsonl' | mcpsnoop open -
+```
 
-# copy the remote logs into it
+To keep a local copy instead, scp the logs into your sessions directory and run
+the TUI as normal.
+
+```bash
+# copy the remote logs into your local sessions directory
+mkdir -p ~/.local/state/mcpsnoop/sessions
 scp remote-user@remote-host:'~/.local/state/mcpsnoop/sessions/*.jsonl' \
   ~/.local/state/mcpsnoop/sessions/
 
