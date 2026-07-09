@@ -195,13 +195,18 @@ mcpsnoop
 # create the remote socket directory once
 ssh remote-user@remote-host 'mkdir -p ~/.local/state/mcpsnoop'
 
-# open the tunnel and leave it running
-ssh -N -o StreamLocalBindUnlink=yes \
-  -R /home/remote-user/.local/state/mcpsnoop/hub.sock:$HOME/.local/state/mcpsnoop/hub.sock \
-  remote-user@remote-host
+# print the tunnel command, then run the printed ssh -R line
+mcpsnoop remote remote-user@remote-host
 
 # on the remote host, wrap your server as usual
 mcpsnoop -- node build/index.js
+```
+
+If the remote uses a non-default home or `MCPSNOOP_HOME`, pass it explicitly.
+
+```bash
+mcpsnoop remote --remote-home /Users/remote-user remote-user@remote-host
+mcpsnoop remote --remote-mcpsnoop-home /srv/mcpsnoop remote-user@remote-host
 ```
 
 ### Post-mortem

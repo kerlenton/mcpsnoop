@@ -86,6 +86,10 @@ func main() {
 	if args := os.Args[1:]; len(args) > 0 && args[0] == "open" {
 		os.Exit(runOpen(args[1:]))
 	}
+	// `mcpsnoop remote` prints the SSH reverse tunnel command for live remote view.
+	if args := os.Args[1:]; len(args) > 0 && args[0] == "remote" {
+		os.Exit(runRemote(args[1:]))
+	}
 	// `mcpsnoop version` mirrors the --version flag (what most CLIs expect).
 	if args := os.Args[1:]; len(args) == 1 && (args[0] == "version" || args[0] == "-v") {
 		fmt.Println("mcpsnoop", appVersion())
@@ -112,6 +116,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  mcpsnoop [flags] -- <server command> [args...]   run as transparent stdio shim\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop http --target <url> [--listen :7000]     run as transparent HTTP proxy\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop export [-T json|html|text] [-o file|-] [session-id|log.jsonl]\n")
+		fmt.Fprintf(os.Stderr, "  mcpsnoop remote [flags] <user@host>              print SSH tunnel command\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop                                          run the live TUI (collector)\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop demo                                     play a scripted session (no setup)\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
