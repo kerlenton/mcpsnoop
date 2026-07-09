@@ -196,6 +196,17 @@ func TestStreamQueryFilter(t *testing.T) {
 	}
 }
 
+// TestStatusRankInvalid checks that sorting by status surfaces invalid frames:
+// stream corruption ranks above call errors, which rank above call-less frames.
+func TestStatusRankInvalid(t *testing.T) {
+	invalid := statusRank(store.EventView{Kind: store.EventInvalid})
+	errored := statusRank(store.EventView{Kind: store.EventResponse, Call: &store.CallView{Err: &proxy.RPCError{}}})
+	none := statusRank(store.EventView{Kind: store.EventStderr})
+	if !(invalid > errored && errored > none) {
+		t.Fatalf("statusRank order wrong: invalid=%d error=%d none=%d (want invalid>error>none)", invalid, errored, none)
+	}
+}
+
 func TestSessionFilterAndCommandJump(t *testing.T) {
 	st := store.New(0)
 	seed(st) // demo

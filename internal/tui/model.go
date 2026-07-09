@@ -675,6 +675,9 @@ func callDur(e store.EventView) int64 {
 }
 
 func statusRank(e store.EventView) int {
+	if e.Kind == store.EventInvalid {
+		return 4 // stream corruption sorts above call errors when sorting by status
+	}
 	if e.Call == nil {
 		return 0
 	}
