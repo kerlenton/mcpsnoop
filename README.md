@@ -92,9 +92,7 @@ go install github.com/kerlenton/mcpsnoop/cmd/mcpsnoop@latest
 ### Homebrew
 
 ```bash
-brew tap kerlenton/mcpsnoop
-brew trust kerlenton/mcpsnoop
-brew install mcpsnoop
+brew install kerlenton/mcpsnoop/mcpsnoop
 ```
 
 Prebuilt binaries for every platform are on the [Releases](https://github.com/kerlenton/mcpsnoop/releases) page.
