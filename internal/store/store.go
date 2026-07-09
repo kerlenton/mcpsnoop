@@ -56,6 +56,10 @@ const (
 	EventNotification
 	// EventStderr is a line the server wrote to stderr.
 	EventStderr
+	// EventInvalid is a non-meta frame on the protocol channel that is not valid
+	// JSON-RPC. On stdio this usually means the server printed a stray line to
+	// stdout, which corrupts the MCP stream.
+	EventInvalid
 	// EventOther is a frame we could not classify.
 	EventOther
 )
@@ -189,7 +193,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	msg, ok := proxy.ParseRPC(e.Raw)
 	switch {
 	case !ok:
-		ev.kind = EventOther
+		ev.kind = EventInvalid
 	case msg.Method == "" && msg.IsResponse():
 		ev.kind = EventResponse
 		ev.id = string(msg.ID)

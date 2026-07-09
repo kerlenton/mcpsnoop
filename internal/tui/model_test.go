@@ -149,6 +149,8 @@ func TestStreamQueryFilter(t *testing.T) {
 	// a tool-level error call
 	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add"}}`))
 	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"not found"}],"isError":true}}`))
+	// a stray non-JSON-RPC frame on the protocol channel (stdout corruption)
+	st.Ingest(env(7, proxy.ServerToClient, `{"note":"stray line"}`))
 
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
@@ -179,6 +181,17 @@ func TestStreamQueryFilter(t *testing.T) {
 	for _, e := range ft.timeline {
 		if e.Call == nil || e.Call.ToolName != "add" {
 			t.Fatalf("tool:add returned wrong frame: %+v", e)
+		}
+	}
+
+	// kind:invalid and status:bad → only the stray non-JSON-RPC frame.
+	for _, q := range []string{"kind:invalid", "status:bad"} {
+		fb := apply(q)
+		if len(fb.timeline) != 1 {
+			t.Fatalf("%s should match exactly the invalid frame, got %d of %d", q, len(fb.timeline), total)
+		}
+		if fb.timeline[0].Kind != store.EventInvalid {
+			t.Fatalf("%s returned a non-invalid frame: %+v", q, fb.timeline[0])
 		}
 	}
 }

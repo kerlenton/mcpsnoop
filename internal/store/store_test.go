@@ -137,6 +137,37 @@ func TestNotificationAndUnmatchedResponse(t *testing.T) {
 	}
 }
 
+// TestInvalidProtocolFrame checks that a non-JSON-RPC frame on the protocol
+// channel is flagged as EventInvalid. On stdio this is the classic failure of a
+// server printing a stray line to stdout, which corrupts the stream.
+func TestInvalidProtocolFrame(t *testing.T) {
+	s := New(0)
+	t0 := time.Now()
+
+	// A stray log line printed to stdout is not JSON, so the shim carries it as
+	// text; it is still flagged as invalid rather than shown as a frame.
+	ev := s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: t0,
+		Direction: proxy.ServerToClient, Text: "Listening on port 3000"})
+	if ev.Kind != EventInvalid {
+		t.Fatalf("stray stdout line kind = %d, want EventInvalid (%d)", ev.Kind, EventInvalid)
+	}
+
+	// Well-formed JSON that carries no jsonrpc, method, result, or error travels
+	// in Raw and is not a JSON-RPC message either.
+	ev = s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0,
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"hello":"world"}`)})
+	if ev.Kind != EventInvalid {
+		t.Fatalf("non-JSON-RPC object kind = %d, want EventInvalid (%d)", ev.Kind, EventInvalid)
+	}
+
+	// stderr is a side channel, not stream corruption.
+	ev = s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: t0,
+		Direction: proxy.ServerStderr, Text: "debug: starting up"})
+	if ev.Kind != EventStderr {
+		t.Fatalf("stderr kind = %d, want EventStderr (%d)", ev.Kind, EventStderr)
+	}
+}
+
 // TestConcurrentIngest exercises the lock under -race: many goroutines ingest
 // while another reads snapshots.
 func TestConcurrentIngest(t *testing.T) {

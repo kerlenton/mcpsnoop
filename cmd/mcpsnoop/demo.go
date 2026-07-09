@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -47,10 +48,11 @@ func runDemo() int {
 // demoFrame is one scripted observed frame plus the pause to wait after it, so
 // the session animates into the TUI at a natural pace.
 type demoFrame struct {
-	dir   proxy.Direction
-	raw   string // JSON-RPC frame; empty for a stderr line
-	text  string // stderr line; empty for JSON-RPC frames
-	pause time.Duration
+	dir     proxy.Direction
+	raw     string // stdout frame, JSON-RPC or a stray non-protocol line; empty for a stderr line
+	text    string // stderr line; empty for JSON-RPC frames
+	invalid bool   // raw is deliberately not JSON-RPC, to show the invalid flag
+	pause   time.Duration
 }
 
 // playDemo streams the scripted session to the hub over the socket, then keeps
@@ -71,20 +73,7 @@ func playDemo(ctx context.Context, socket string) {
 			return
 		}
 		seq++
-		env := proxy.Envelope{
-			SessionID:   session,
-			ServerLabel: "demo",
-			Seq:         seq,
-			TS:          time.Now(),
-			Direction:   f.dir,
-			Transport:   "stdio",
-		}
-		if f.text != "" {
-			env.Text = f.text
-		} else {
-			env.Raw = []byte(f.raw)
-		}
-		sink.Emit(env)
+		sink.Emit(demoEnvelope(session, seq, f))
 		if !sleepCtx(ctx, f.pause) {
 			return
 		}
@@ -92,10 +81,34 @@ func playDemo(ctx context.Context, socket string) {
 	<-ctx.Done()
 }
 
-// demoScript is the scripted session: a handshake, a few tool calls, a slow call
-// with progress, a large payload (shows the inspector's wrapping), and a
-// tool-level error (result.isError). Pauses between the slow call and its
-// response push it past the slow threshold, so it shows up as SLOW.
+// demoEnvelope builds the observed envelope for one scripted frame. It routes a
+// stray non-JSON line to Text exactly as the real shim does, so the frame
+// survives the sink encoder; a json.RawMessage cannot carry non-JSON bytes.
+func demoEnvelope(session string, seq uint64, f demoFrame) proxy.Envelope {
+	env := proxy.Envelope{
+		SessionID:   session,
+		ServerLabel: "demo",
+		Seq:         seq,
+		TS:          time.Now(),
+		Direction:   f.dir,
+		Transport:   "stdio",
+	}
+	switch {
+	case f.text != "":
+		env.Text = f.text
+	case json.Valid([]byte(f.raw)):
+		env.Raw = []byte(f.raw)
+	default:
+		env.Text = f.raw
+	}
+	return env
+}
+
+// demoScript is the scripted session: a handshake, a few tool calls, a stray
+// stdout line (flagged as invalid), a slow call with progress, a large payload
+// (shows the inspector's wrapping), and a tool-level error (result.isError).
+// Pauses between the slow call and its response push it past the slow threshold,
+// so it shows up as SLOW.
 func demoScript() []demoFrame {
 	bigValue := strings.Repeat("ZmFrZS1iYXNlNjQtcGF5bG9hZC0", 26) // ~700 chars, no spaces
 
@@ -110,6 +123,9 @@ func demoScript() []demoFrame {
 		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Echo: hello from the demo"}]}}`, pause: 500 * time.Millisecond},
 		{dir: proxy.ClientToServer, raw: `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_sum","arguments":{"a":40,"b":2}}}`, pause: 350 * time.Millisecond},
 		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"42"}]}}`, pause: 600 * time.Millisecond},
+		// A stray debug line the server left on stdout. It is not JSON-RPC, so on
+		// stdio it corrupts the stream, and mcpsnoop flags it as invalid.
+		{dir: proxy.ServerToClient, raw: `[debug] get_sum handler done`, invalid: true, pause: 500 * time.Millisecond},
 		{dir: proxy.ClientToServer, raw: `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"slow_search","arguments":{"query":"everything"}}}`, pause: 500 * time.Millisecond},
 		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":4,"progress":1,"total":3}}`, pause: 600 * time.Millisecond},
 		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":4,"progress":2,"total":3}}`, pause: 600 * time.Millisecond},

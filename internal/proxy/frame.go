@@ -86,3 +86,16 @@ func ParseRPC(raw []byte) (msg RPCMessage, ok bool) {
 	}
 	return msg, msg.JSONRPC != "" || msg.Method != "" || len(msg.Result) > 0 || msg.Error != nil
 }
+
+// splitObserved routes an observed protocol line into an envelope's Raw or Text
+// field. Valid JSON goes to Raw, so it can be parsed, redacted, and replayed.
+// Anything else goes to Text: json.RawMessage cannot round-trip non-JSON bytes
+// through the envelope encoder (the encoder validates it and the frame would be
+// silently dropped), and a non-JSON line on the protocol channel is exactly the
+// stdout-corruption case the store flags as invalid.
+func splitObserved(line []byte) (raw json.RawMessage, text string) {
+	if json.Valid(line) {
+		return line, ""
+	}
+	return nil, string(line)
+}

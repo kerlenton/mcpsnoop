@@ -64,16 +64,21 @@ func RunHTTP(ctx context.Context, cfg HTTPConfig) error {
 // newHTTPEmitter returns an emit function bound to a session and sink.
 func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte) {
 	var seq atomic.Uint64
-	return func(dir Direction, raw []byte) {
-		sink.Emit(Envelope{
+	return func(dir Direction, body []byte) {
+		raw, text := splitObserved(body)
+		env := Envelope{
 			SessionID:   cfg.SessionID,
 			ServerLabel: cfg.Label,
 			Seq:         seq.Add(1),
 			TS:          time.Now(),
 			Direction:   dir,
 			Transport:   "http",
-			Raw:         append([]byte(nil), raw...),
-		})
+			Text:        text,
+		}
+		if raw != nil {
+			env.Raw = append([]byte(nil), raw...)
+		}
+		sink.Emit(env)
 	}
 }
 

@@ -364,6 +364,13 @@ func (m Model) streamCells(e store.EventView) streamCell {
 	case store.EventNotification:
 		c.dir, c.method = "·", "notify "+e.Method
 		c.detail = compactJSON(e.Raw)
+	case store.EventInvalid:
+		c.dir, c.method, c.status = "!", "invalid rpc", "BAD"
+		if len(e.Raw) > 0 {
+			c.detail = string(e.Raw)
+		} else {
+			c.detail = e.Text
+		}
 	default:
 		c.dir, c.method = "?", "frame"
 		c.detail = string(e.Raw)
@@ -398,6 +405,9 @@ func compactJSON(raw json.RawMessage) string {
 }
 
 func (m Model) statusStyle(e store.EventView) lipgloss.Style {
+	if e.Kind == store.EventInvalid {
+		return m.styles.invalid
+	}
 	if e.Call != nil {
 		switch {
 		case e.Call.State == store.Pending:
@@ -429,6 +439,8 @@ func (m Model) kindColor(e store.EventView) lipgloss.Color {
 		return colResp
 	case store.EventNotification:
 		return colNotif
+	case store.EventInvalid:
+		return colInvalid
 	default:
 		return colFaint
 	}
@@ -458,8 +470,8 @@ func (m Model) renderHelp(h int) string {
 		{"STREAM FILTER QUERY (/)", [][2]string{
 			{"<text>", "substring over method / tool / id / payload"},
 			{"tool:echo", "by tool name"},
-			{"status:err|slow|ok|pending", "by outcome"},
-			{"kind:req|resp|notify|stderr", "by message type"},
+			{"status:err|slow|ok|pending|bad", "by outcome"},
+			{"kind:req|resp|notify|stderr|invalid", "by message type"},
 			{"dir:c2s|s2c", "by direction (who sent it — orthogonal to kind)"},
 			{"method:tools/call  id:7", "by method / id (tokens are ANDed)"},
 		}},

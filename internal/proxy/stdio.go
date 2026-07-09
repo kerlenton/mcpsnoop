@@ -98,6 +98,15 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 		sink.Emit(env)
 	}
 
+	// observe routes a framed protocol line to Raw when it is valid JSON, or to
+	// Text otherwise, so a stray non-JSON line still reaches the hub instead of
+	// failing to encode. Forwarding is unaffected: the bytes are already written
+	// downstream before observe runs.
+	observe := func(dir Direction, line []byte) {
+		raw, text := splitObserved(line)
+		emit(dir, raw, text)
+	}
+
 	// Emit the session meta first (seq 1) so the hub can replay this server.
 	if meta, mErr := json.Marshal(SessionMeta{Command: cfg.Command, CWD: cwd()}); mErr == nil {
 		emit(DirectionMeta, meta, "")
@@ -111,13 +120,13 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 		defer wg.Done()
 		// Closing the server's stdin signals EOF so it can shut down cleanly.
 		defer srvStdin.Close()
-		pumpFrames(in, srvStdin, func(line []byte) { emit(ClientToServer, line, "") })
+		pumpFrames(in, srvStdin, func(line []byte) { observe(ClientToServer, line) })
 	}()
 
 	// server -> client
 	go func() {
 		defer wg.Done()
-		pumpFrames(srvStdout, out, func(line []byte) { emit(ServerToClient, line, "") })
+		pumpFrames(srvStdout, out, func(line []byte) { observe(ServerToClient, line) })
 	}()
 
 	// server stderr -> our stderr (forwarded) + observed line-by-line

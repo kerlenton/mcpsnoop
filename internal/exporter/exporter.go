@@ -386,6 +386,8 @@ func eventKind(k store.EventKind) string {
 		return "notification"
 	case store.EventStderr:
 		return "stderr"
+	case store.EventInvalid:
+		return "invalid"
 	default:
 		return "other"
 	}

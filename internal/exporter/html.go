@@ -12,8 +12,8 @@ var htmlTemplate = template.Must(template.New("html").Parse(`<!doctype html>
 /* Semantic colors mirror the TUI palette (internal/tui/styles.go). The dark
    theme uses the exact TUI hex values; the light theme uses readable darker
    variants of the same hues. */
-:root { color-scheme: light dark; --bg:#f8f8f5; --fg:#202124; --muted:#6b6f76; --line:#d8d9d3; --panel:#ffffff; --code:#f0f1ec; --accent:#0067c0; --req:#3b6fc4; --resp:#2e7d32; --notif:#5a51bf; --stderr:#6b6f76; --slow:#b26a00; --err:#c62828; }
-@media (prefers-color-scheme: dark) { :root { --bg:#171817; --fg:#eceee8; --muted:#aeb4ad; --line:#343832; --panel:#20221f; --code:#151714; --accent:#00afff; --req:#87afff; --resp:#87d787; --notif:#afafd7; --stderr:#8a8a8a; --slow:#ffaf5f; --err:#ff5f5f; } }
+:root { color-scheme: light dark; --bg:#f8f8f5; --fg:#202124; --muted:#6b6f76; --line:#d8d9d3; --panel:#ffffff; --code:#f0f1ec; --accent:#0067c0; --req:#3b6fc4; --resp:#2e7d32; --notif:#5a51bf; --stderr:#6b6f76; --slow:#b26a00; --err:#c62828; --invalid:#b0177e; }
+@media (prefers-color-scheme: dark) { :root { --bg:#171817; --fg:#eceee8; --muted:#aeb4ad; --line:#343832; --panel:#20221f; --code:#151714; --accent:#00afff; --req:#87afff; --resp:#87d787; --notif:#afafd7; --stderr:#8a8a8a; --slow:#ffaf5f; --err:#ff5f5f; --invalid:#ff5faf; } }
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 header { position:sticky; top:0; z-index:2; padding:18px 24px 14px; background:color-mix(in srgb, var(--bg) 92%, transparent); border-bottom:1px solid var(--line); backdrop-filter:blur(10px); }
@@ -37,6 +37,7 @@ main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
 .status.error { color:var(--err); }
 .status.slow { color:var(--slow); }
 .status.pending { color:var(--slow); }
+.status.bad { color:var(--invalid); }
 /* Per-event tone by kind/status, matching the TUI stream colors. */
 .tone-req { border-left-color:var(--req); } .tone-req .dir { color:var(--req); }
 .tone-resp { border-left-color:var(--resp); } .tone-resp .dir { color:var(--resp); }
@@ -44,6 +45,7 @@ main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
 .tone-slow { border-left-color:var(--slow); } .tone-slow .dir { color:var(--slow); }
 .tone-notif { border-left-color:var(--notif); } .tone-notif .dir { color:var(--notif); }
 .tone-stderr { border-left-color:var(--stderr); } .tone-stderr .dir { color:var(--stderr); }
+.tone-invalid { border-left-color:var(--invalid); } .tone-invalid .dir { color:var(--invalid); }
 .time { color:var(--muted); font-variant-numeric:tabular-nums; }
 details { padding:10px 12px; }
 summary { cursor:pointer; color:var(--accent); user-select:none; }
@@ -105,11 +107,13 @@ const matchKind = (kind, v) => {
   if (["resp", "response"].includes(v)) return kind === "response";
   if (["notify", "notification", "ntf"].includes(v)) return kind === "notification";
   if (v === "stderr") return kind === "stderr";
+  if (["invalid", "corrupt", "bad"].includes(v)) return kind === "invalid";
   return false;
 };
-const matchStatus = (call, v) => {
-  if (!call) return false;
+const matchStatus = (ev, call, v) => {
   v = v.toLowerCase();
+  if (v === "bad" || v === "invalid") return ev.kind === "invalid";
+  if (!call) return false;
   if (["err", "error", "fail", "failed"].includes(v)) return call.status === "error";
   if (v === "slow") return call.duration_ms != null && call.duration_ms > SLOW_MS;
   if (["pending", "pend", "inflight"].includes(v)) return call.status === "pending";
@@ -130,7 +134,7 @@ const matchToken = (ev, call, tok) => {
         case "id": return norm(ev.id) === v.toLowerCase();
         case "dir": case "d": return matchDir(ev.direction, v);
         case "kind": case "k": return matchKind(ev.kind, v);
-        case "status": case "s": return matchStatus(call, v);
+        case "status": case "s": return matchStatus(ev, call, v);
       }
     }
   }
@@ -147,6 +151,7 @@ const toneOf = (ev, call) => {
   if (ev.kind === "stderr") return "stderr";
   if (ev.kind === "notification") return "notif";
   if (ev.kind === "request") return "req";
+  if (ev.kind === "invalid") return "invalid";
   if (ev.kind === "response") {
     if (call && call.status === "error") return "error";
     if (call && call.duration_ms != null && call.duration_ms > SLOW_MS) return "slow";
@@ -155,6 +160,7 @@ const toneOf = (ev, call) => {
   return "resp";
 };
 const statusOf = (ev, call) => {
+  if (ev.kind === "invalid") return "bad";
   if (!call) return "";
   if (ev.kind === "response") {
     if (call.status === "error") return "error";

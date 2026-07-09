@@ -784,15 +784,22 @@ func matchKind(k store.EventKind, v string) bool {
 		return k == store.EventNotification
 	case "stderr":
 		return k == store.EventStderr
+	case "invalid", "corrupt", "bad":
+		return k == store.EventInvalid
 	}
 	return false
 }
 
 func (m *Model) matchStatus(e store.EventView, v string) bool {
+	v = strings.ToLower(v)
+	if v == "bad" || v == "invalid" {
+		// Invalid frames are not calls, so match them before the Call check.
+		return e.Kind == store.EventInvalid
+	}
 	if e.Call == nil {
 		return false
 	}
-	switch strings.ToLower(v) {
+	switch v {
 	case "err", "error", "fail", "failed":
 		return e.Call.Failed()
 	case "slow":

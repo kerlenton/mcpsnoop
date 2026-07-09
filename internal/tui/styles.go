@@ -5,19 +5,20 @@ import "github.com/charmbracelet/lipgloss"
 // palette — blue logo/keys, cyan crumbs & selection, with
 // per-kind accents for the frame stream. Tuned for dark terminals.
 var (
-	colAccent = lipgloss.Color("39") // dodger blue — logo, hint keys, titles
-	colCrumb  = lipgloss.Color("37") // cyan — current breadcrumb + selection bg
-	colHeadCl = lipgloss.Color("73") // cadet blue — table column headers
-	colBlack  = lipgloss.Color("16")
-	colDim    = lipgloss.Color("244") // gray
-	colFaint  = lipgloss.Color("240")
-	colReq    = lipgloss.Color("111") // soft blue — request (distinct from cyan selection)
-	colResp   = lipgloss.Color("114") // soft green — successful response
-	colErr    = lipgloss.Color("203") // red — error
-	colSlow   = lipgloss.Color("215") // warm amber — slow call
-	colNotif  = lipgloss.Color("146") // muted lavender — notification
-	colStderr = lipgloss.Color("245") // muted gray — server stderr (a side channel, not an error)
-	colHeader = lipgloss.Color("231") // near-white
+	colAccent  = lipgloss.Color("39") // dodger blue — logo, hint keys, titles
+	colCrumb   = lipgloss.Color("37") // cyan — current breadcrumb + selection bg
+	colHeadCl  = lipgloss.Color("73") // cadet blue — table column headers
+	colBlack   = lipgloss.Color("16")
+	colDim     = lipgloss.Color("244") // gray
+	colFaint   = lipgloss.Color("240")
+	colReq     = lipgloss.Color("111") // soft blue — request (distinct from cyan selection)
+	colResp    = lipgloss.Color("114") // soft green — successful response
+	colErr     = lipgloss.Color("203") // red — error
+	colSlow    = lipgloss.Color("215") // warm amber — slow call
+	colNotif   = lipgloss.Color("146") // muted lavender — notification
+	colStderr  = lipgloss.Color("245") // muted gray — server stderr (a side channel, not an error)
+	colInvalid = lipgloss.Color("205") // magenta — non-JSON-RPC on the protocol channel (stream corruption)
+	colHeader  = lipgloss.Color("231") // near-white
 )
 
 type styles struct {
@@ -42,6 +43,7 @@ type styles struct {
 	resp     lipgloss.Style
 	respErr  lipgloss.Style
 	slow     lipgloss.Style
+	invalid  lipgloss.Style
 	notif    lipgloss.Style
 	stderr   lipgloss.Style
 	pending  lipgloss.Style
@@ -71,6 +73,7 @@ func newStyles() styles {
 		resp:     lipgloss.NewStyle().Foreground(colResp),
 		respErr:  lipgloss.NewStyle().Foreground(colErr).Bold(true),
 		slow:     lipgloss.NewStyle().Foreground(colSlow),
+		invalid:  lipgloss.NewStyle().Foreground(colInvalid).Bold(true),
 		notif:    lipgloss.NewStyle().Foreground(colNotif),
 		stderr:   lipgloss.NewStyle().Foreground(colStderr),
 		pending:  lipgloss.NewStyle().Foreground(lipgloss.Color("179")), // soft gold — in-flight
