@@ -74,6 +74,7 @@ see [review past sessions from logs](docs/POST_MORTEM.md).
 | Sees your real client and server traffic | no | yes |
 | Flags slow and hung calls | no | yes |
 | Flags stray output that corrupts the stream | no | yes |
+| Flags malformed JSON-RPC frames | no | yes |
 | Interactive terminal UI | no | yes |
 | Zero-config, no flags or ordering | no | yes |
 | Capability inspector | partial | yes |
@@ -142,7 +143,7 @@ matches the method, tool, id, and payload.
 | `id:` | request id | `id:7` |
 | `dir:` | direction (`c2s`, `s2c`) | `dir:s2c` |
 | `kind:` | frame type (`req`, `resp`, `notify`, `stderr`, `invalid`) | `kind:invalid` |
-| `status:` | call outcome (`ok`, `error`, `slow`, `pending`, `bad`) | `status:slow` |
+| `status:` | call outcome (`ok`, `error`, `slow`, `pending`, `bad`, `warn`) | `status:slow` |
 
 Stack tokens to get specific.
 
@@ -240,8 +241,8 @@ results. If payloads can carry secrets, opt in to redaction to scrub the
 observed trace copies while the proxied bytes still pass through unchanged.
 Key-based redaction replaces whole values under matching JSON object keys.
 Value-based redaction applies regular expressions to observed string values,
-stderr text, and non-JSON text frames. Both modes are best effort: regexes can
-miss secrets, overmatch harmless text, or fail to see transformed/encoded
+stderr text, and non-JSON text frames. Both modes are best effort. Regexes can
+miss secrets, overmatch harmless text, or fail to see transformed or encoded
 values.
 
 ```bash

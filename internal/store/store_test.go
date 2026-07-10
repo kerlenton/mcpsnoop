@@ -55,6 +55,42 @@ func TestCorrelationAndTiming(t *testing.T) {
 	}
 }
 
+// TestDuplicateResponseDoesNotDoubleCountPending guards against a second
+// response for an already-answered id decrementing the pending counter twice.
+func TestDuplicateResponseDoesNotDoubleCountPending(t *testing.T) {
+	s := New(0)
+	t0 := time.Now()
+
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"echo"}`))
+	// First response completes the call; pending returns to zero.
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[]}`))
+	// A duplicate or late second response for the same id must not recount.
+	ev := s.Ingest(resp(3, t0.Add(2*time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[]}`))
+
+	if h := s.Sessions()[0]; h.Pending != 0 {
+		t.Fatalf("pending = %d, want 0 (duplicate response must not double-decrement)", h.Pending)
+	}
+	if ev.Call == nil || ev.Call.State != Completed {
+		t.Fatalf("duplicate response should still link to the completed call, got %+v", ev.Call)
+	}
+	if ev.Warning != "duplicate response for the same id" {
+		t.Fatalf("duplicate response should be flagged, warning = %q", ev.Warning)
+	}
+}
+
+// TestDuplicateErrorResponseDoesNotDoubleCountErrors guards the error counter
+// against a re-sent error response for the same id.
+func TestDuplicateErrorResponseDoesNotDoubleCountErrors(t *testing.T) {
+	s := New(0)
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "7", "tools/call", `{"name":"nope"}`))
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "7", `"error":{"code":-32601,"message":"no"}`))
+	s.Ingest(resp(3, t0.Add(2*time.Millisecond), proxy.ServerToClient, "7", `"error":{"code":-32601,"message":"no"}`))
+	if h := s.Sessions()[0]; h.Errors != 1 {
+		t.Fatalf("errors = %d, want 1 (duplicate error must not double-count)", h.Errors)
+	}
+}
+
 func TestErrorResponse(t *testing.T) {
 	s := New(0)
 	t0 := time.Now()

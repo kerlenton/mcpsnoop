@@ -12,8 +12,8 @@ var htmlTemplate = template.Must(template.New("html").Parse(`<!doctype html>
 /* Semantic colors mirror the TUI palette (internal/tui/styles.go). The dark
    theme uses the exact TUI hex values; the light theme uses readable darker
    variants of the same hues. */
-:root { color-scheme: light dark; --bg:#f8f8f5; --fg:#202124; --muted:#6b6f76; --line:#d8d9d3; --panel:#ffffff; --code:#f0f1ec; --accent:#0067c0; --req:#3b6fc4; --resp:#2e7d32; --notif:#5a51bf; --stderr:#6b6f76; --slow:#b26a00; --err:#c62828; --invalid:#b0177e; }
-@media (prefers-color-scheme: dark) { :root { --bg:#171817; --fg:#eceee8; --muted:#aeb4ad; --line:#343832; --panel:#20221f; --code:#151714; --accent:#00afff; --req:#87afff; --resp:#87d787; --notif:#afafd7; --stderr:#8a8a8a; --slow:#ffaf5f; --err:#ff5f5f; --invalid:#ff5faf; } }
+:root { color-scheme: light dark; --bg:#f8f8f5; --fg:#202124; --muted:#6b6f76; --line:#d8d9d3; --panel:#ffffff; --code:#f0f1ec; --accent:#0067c0; --req:#3b6fc4; --resp:#2e7d32; --notif:#5a51bf; --stderr:#6b6f76; --slow:#b26a00; --warn:#8a6d00; --err:#c62828; --invalid:#b0177e; }
+@media (prefers-color-scheme: dark) { :root { --bg:#171817; --fg:#eceee8; --muted:#aeb4ad; --line:#343832; --panel:#20221f; --code:#151714; --accent:#00afff; --req:#87afff; --resp:#87d787; --notif:#afafd7; --stderr:#8a8a8a; --slow:#ffaf5f; --warn:#d7af5f; --err:#ff5f5f; --invalid:#ff5faf; } }
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 header { position:sticky; top:0; z-index:2; padding:18px 24px 14px; background:color-mix(in srgb, var(--bg) 92%, transparent); border-bottom:1px solid var(--line); backdrop-filter:blur(10px); }
@@ -35,7 +35,7 @@ main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
 .status { text-transform:uppercase; font-size:12px; font-weight:700; color:var(--muted); }
 .status.ok { color:var(--resp); }
 .status.error { color:var(--err); }
-.status.warn { color:var(--slow); }
+.status.warn { color:var(--warn); }
 .status.slow { color:var(--slow); }
 .status.pending { color:var(--slow); }
 .status.bad { color:var(--invalid); }
@@ -44,6 +44,7 @@ main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
 .tone-resp { border-left-color:var(--resp); } .tone-resp .dir { color:var(--resp); }
 .tone-error { border-left-color:var(--err); } .tone-error .dir { color:var(--err); }
 .tone-slow { border-left-color:var(--slow); } .tone-slow .dir { color:var(--slow); }
+.tone-warn { border-left-color:var(--warn); } .tone-warn .dir { color:var(--warn); }
 .tone-notif { border-left-color:var(--notif); } .tone-notif .dir { color:var(--notif); }
 .tone-stderr { border-left-color:var(--stderr); } .tone-stderr .dir { color:var(--stderr); }
 .tone-invalid { border-left-color:var(--invalid); } .tone-invalid .dir { color:var(--invalid); }
@@ -152,7 +153,7 @@ const toneOf = (ev, call) => {
   if (ev.kind === "stderr") return "stderr";
   if (ev.kind === "notification") return "notif";
   if (ev.kind === "invalid") return "invalid";
-  if (ev.warning) return "slow";
+  if (ev.warning) return "warn";
   if (ev.kind === "request") return "req";
   if (ev.kind === "response") {
     if (call && call.status === "error") return "error";

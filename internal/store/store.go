@@ -199,13 +199,21 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.kind = EventResponse
 		ev.id = string(msg.ID)
 		ev.warning = validationWarning(msg)
-		ev.call = sess.completeCall(ev.id, e.Direction, e.TS, msg)
-		if ev.call == nil {
-			ev.warning = appendWarning(ev.warning, "response id has no matching request")
-		}
+		c, matched := sess.completeCall(ev.id, e.Direction, e.TS, msg)
+		ev.call = c
 		sess.responses++
-		if msg.Error != nil || (ev.call != nil && ev.call.toolErr) {
-			sess.errors++
+		switch {
+		case c == nil:
+			ev.warning = appendWarning(ev.warning, "response id has no matching request")
+			if msg.Error != nil {
+				sess.errors++
+			}
+		case !matched:
+			ev.warning = appendWarning(ev.warning, "duplicate response for the same id")
+		default:
+			if msg.Error != nil || c.toolErr {
+				sess.errors++
+			}
 		}
 	case msg.Method != "" && len(msg.ID) > 0:
 		ev.kind = EventRequest
@@ -271,11 +279,16 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 	return c
 }
 
-// completeCall matches a response to its pending request. Caller holds the lock.
-func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Time, msg proxy.RPCMessage) *call {
+// completeCall matches a response to its pending request. The bool reports
+// whether it completed a pending call: false means the response was unmatched or
+// a duplicate of an already-answered id. Caller holds the lock.
+func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Time, msg proxy.RPCMessage) (*call, bool) {
 	c := sess.calls[callKey{dir: opposite(respDir), id: id}]
 	if c == nil {
-		return nil // unmatched response (request missed or before backfill)
+		return nil, false // unmatched response (request missed or before backfill)
+	}
+	if c.state != Pending {
+		return c, false // already answered; a duplicate or late response must not recount
 	}
 	c.end = ts
 	c.result = msg.Result
@@ -293,7 +306,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	if c.method == "initialize" {
 		sess.caps.applyResponse(msg.Result)
 	}
-	return c
+	return c, true
 }
 
 func (c *capabilities) applyRequest(params json.RawMessage) {
