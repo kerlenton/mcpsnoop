@@ -82,7 +82,7 @@ func main() {
 	if args := os.Args[1:]; len(args) > 0 && args[0] == "export" {
 		os.Exit(runExport(args[1:]))
 	}
-	// `mcpsnoop open <session.jsonl>` opens a session file directly in the TUI.
+	// `mcpsnoop open` opens a session id or file directly in the TUI.
 	if args := os.Args[1:]; len(args) > 0 && args[0] == "open" {
 		os.Exit(runOpen(args[1:]))
 	}
@@ -116,6 +116,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  mcpsnoop [flags] -- <server command> [args...]   run as transparent stdio shim\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop http --target <url> [--listen :7000]     run as transparent HTTP proxy\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop export [-T json|html|text] [-o file|-] [session-id|log.jsonl]\n")
+		fmt.Fprintf(os.Stderr, "  mcpsnoop open [session-id|log.jsonl|-]            open a session in the TUI\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop remote [flags] <user@host>              print SSH tunnel command\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop                                          run the live TUI (collector)\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop demo                                     play a scripted session (no setup)\n\n")
@@ -358,24 +359,33 @@ func runOpen(args []string) int {
 	fs := flag.NewFlagSet("mcpsnoop open", flag.ExitOnError)
 
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: mcpsnoop open <session.jsonl>|-\n\n")
-		fmt.Fprintf(os.Stderr, "Open a persisted session log directly in the TUI. Use - to read from stdin.\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcpsnoop open [session-id|session.jsonl|-]\n\n")
+		fmt.Fprintf(os.Stderr, "If no session is provided, the newest session log is opened.\n")
+		fmt.Fprintf(os.Stderr, "Use - to read from stdin.\n")
 	}
 
 	_ = fs.Parse(args)
 
-	if fs.NArg() != 1 {
-		fs.Usage()
+	if fs.NArg() > 1 {
+		fmt.Fprintln(os.Stderr, "mcpsnoop open: expected at most one session id or log path")
 		return 2
 	}
 
-	arg := fs.Arg(0)
-	usedStdin := arg == "-"
+	var arg string
+	if fs.NArg() == 1 {
+		arg = fs.Arg(0)
+	}
+	inPath, usedStdin, err := resolveOpenSessionPath(arg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
+		return 1
+	}
+
 	var r io.Reader
 	if usedStdin {
 		r = os.Stdin
 	} else {
-		f, err := os.Open(arg)
+		f, err := os.Open(inPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
 			return 1
@@ -413,4 +423,12 @@ func runOpen(args []string) int {
 	}
 
 	return 0
+}
+
+func resolveOpenSessionPath(arg string) (string, bool, error) {
+	if arg == "-" {
+		return "", true, nil
+	}
+	path, err := exporter.ResolveSessionPath(arg)
+	return path, false, err
 }

@@ -36,12 +36,17 @@ running ones. From there a few keys do the work.
 - Press `ctrl-d` to remove the selected session and its on-disk log, only when
   you mean to.
 
-To open one specific log that is not in the sessions directory, for example a
-`--trace-file` capture or a log a teammate sent you, pass its path to `open`.
+To open one specific log, pass either its session id or a JSONL path to `open`.
+If you omit the session, `open` uses the newest saved log, matching `export`.
 
 ```bash
+mcpsnoop open
+mcpsnoop open server.py-48213
 mcpsnoop open ./session.jsonl
 ```
+
+Passing a path is useful for a `--trace-file` capture outside the sessions
+directory or a log a teammate sent you.
 
 Use `-` to read from stdin, handy for streaming a remote log over SSH without
 copying it down first.

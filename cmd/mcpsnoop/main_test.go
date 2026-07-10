@@ -71,6 +71,52 @@ func TestRedactKeysFlagConfigEnablesCommonSecretsPreset(t *testing.T) {
 	}
 }
 
+func TestResolveOpenSessionPathSupportsSessionIDNewestAndStdin(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("MCPSNOOP_HOME", stateDir)
+
+	older := paths.SessionLogPath("older")
+	newer := paths.SessionLogPath("newer")
+	if err := os.WriteFile(older, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newer, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	olderTime := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	newerTime := olderTime.Add(time.Hour)
+	if err := os.Chtimes(older, olderTime, olderTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newer, newerTime, newerTime); err != nil {
+		t.Fatal(err)
+	}
+
+	path, usedStdin, err := resolveOpenSessionPath("newer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usedStdin || path != newer {
+		t.Fatalf("resolveOpenSessionPath(\"newer\") = %q, %v; want %q, false", path, usedStdin, newer)
+	}
+
+	path, usedStdin, err = resolveOpenSessionPath("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usedStdin || path != newer {
+		t.Fatalf("resolveOpenSessionPath(\"\") = %q, %v; want newest %q, false", path, usedStdin, newer)
+	}
+
+	path, usedStdin, err = resolveOpenSessionPath("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !usedStdin || path != "" {
+		t.Fatalf("resolveOpenSessionPath(\"-\") = %q, %v; want empty path, true", path, usedStdin)
+	}
+}
+
 func TestTraceSinkRedactsFileAndLiveSocket(t *testing.T) {
 	stateDir := filepath.Join(os.TempDir(), fmt.Sprintf("mcpsnoop-test-%d", os.Getpid()))
 	if err := os.RemoveAll(stateDir); err != nil {
