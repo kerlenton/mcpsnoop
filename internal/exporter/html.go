@@ -35,6 +35,7 @@ main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
 .status { text-transform:uppercase; font-size:12px; font-weight:700; color:var(--muted); }
 .status.ok { color:var(--resp); }
 .status.error { color:var(--err); }
+.status.warn { color:var(--slow); }
 .status.slow { color:var(--slow); }
 .status.pending { color:var(--slow); }
 .status.bad { color:var(--invalid); }
@@ -150,8 +151,9 @@ const eventMatches = (ev, tokens) => {
 const toneOf = (ev, call) => {
   if (ev.kind === "stderr") return "stderr";
   if (ev.kind === "notification") return "notif";
-  if (ev.kind === "request") return "req";
   if (ev.kind === "invalid") return "invalid";
+  if (ev.warning) return "slow";
+  if (ev.kind === "request") return "req";
   if (ev.kind === "response") {
     if (call && call.status === "error") return "error";
     if (call && call.duration_ms != null && call.duration_ms > SLOW_MS) return "slow";
@@ -161,6 +163,7 @@ const toneOf = (ev, call) => {
 };
 const statusOf = (ev, call) => {
   if (ev.kind === "invalid") return "bad";
+  if (ev.warning) return "warn";
   if (!call) return "";
   if (ev.kind === "response") {
     if (call.status === "error") return "error";
@@ -174,6 +177,7 @@ const renderEvent = (ev) => {
   const tone = toneOf(ev, call);
   const st = statusOf(ev, call);
   const raw = ev.text || textOf(ev.raw);
+  const warning = ev.warning ? "<details open><summary>Warning</summary><pre>" + esc(ev.warning) + "</pre></details>" : "";
   const callBlock = call ? "<details><summary>Correlated call</summary><pre>" + esc(JSON.stringify(call, null, 2)) + "</pre></details>" : "";
   return "<article class=\"event tone-" + tone + "\">" +
     "<div class=\"head\">" +
@@ -183,6 +187,7 @@ const renderEvent = (ev) => {
       "<div class=\"status " + esc(st) + "\">" + esc(st) + "</div>" +
       "<div class=\"time\">" + esc(fmtTime(ev.timestamp)) + "</div>" +
     "</div>" +
+    warning +
     "<details open><summary>Frame</summary><pre>" + esc(raw) + "</pre></details>" +
     callBlock +
   "</article>";

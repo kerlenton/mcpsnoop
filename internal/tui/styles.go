@@ -15,6 +15,7 @@ var (
 	colResp    = lipgloss.Color("114") // soft green — successful response
 	colErr     = lipgloss.Color("203") // red — error
 	colSlow    = lipgloss.Color("215") // warm amber — slow call
+	colWarn    = lipgloss.Color("179") // soft gold — best-effort protocol warning
 	colNotif   = lipgloss.Color("146") // muted lavender — notification
 	colStderr  = lipgloss.Color("245") // muted gray — server stderr (a side channel, not an error)
 	colInvalid = lipgloss.Color("205") // magenta — non-JSON-RPC on the protocol channel (stream corruption)
@@ -43,6 +44,7 @@ type styles struct {
 	resp     lipgloss.Style
 	respErr  lipgloss.Style
 	slow     lipgloss.Style
+	warn     lipgloss.Style
 	invalid  lipgloss.Style
 	notif    lipgloss.Style
 	stderr   lipgloss.Style
@@ -73,6 +75,7 @@ func newStyles() styles {
 		resp:     lipgloss.NewStyle().Foreground(colResp),
 		respErr:  lipgloss.NewStyle().Foreground(colErr).Bold(true),
 		slow:     lipgloss.NewStyle().Foreground(colSlow),
+		warn:     lipgloss.NewStyle().Foreground(colWarn).Bold(true),
 		invalid:  lipgloss.NewStyle().Foreground(colInvalid).Bold(true),
 		notif:    lipgloss.NewStyle().Foreground(colNotif),
 		stderr:   lipgloss.NewStyle().Foreground(colStderr),

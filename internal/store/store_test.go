@@ -168,6 +168,29 @@ func TestInvalidProtocolFrame(t *testing.T) {
 	}
 }
 
+func TestValidationWarnings(t *testing.T) {
+	s := New(0)
+	t0 := time.Now()
+
+	ev := s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"id":1,"method":"tools/list"}`)})
+	if ev.Kind != EventRequest || ev.Warning != "missing jsonrpc=2.0" {
+		t.Fatalf("missing jsonrpc warning = kind %d warning %q", ev.Kind, ev.Warning)
+	}
+
+	ev = s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0,
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":99,"result":{}}`)})
+	if ev.Kind != EventResponse || ev.Call != nil || ev.Warning != "response id has no matching request" {
+		t.Fatalf("unmatched response warning = kind %d call %+v warning %q", ev.Kind, ev.Call, ev.Warning)
+	}
+
+	ev = s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: t0,
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":100}`)})
+	if ev.Kind != EventOther || ev.Warning != "response has neither result nor error" {
+		t.Fatalf("malformed response warning = kind %d warning %q", ev.Kind, ev.Warning)
+	}
+}
+
 // TestConcurrentIngest exercises the lock under -race: many goroutines ingest
 // while another reads snapshots.
 func TestConcurrentIngest(t *testing.T) {

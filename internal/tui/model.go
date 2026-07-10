@@ -676,14 +676,18 @@ func callDur(e store.EventView) int64 {
 
 func statusRank(e store.EventView) int {
 	if e.Kind == store.EventInvalid {
-		return 4 // stream corruption sorts above call errors when sorting by status
+		return 5 // stream corruption sorts above call errors when sorting by status
+	}
+	if e.Call != nil && e.Call.Failed() {
+		return 4
+	}
+	if e.Warning != "" {
+		return 3
 	}
 	if e.Call == nil {
 		return 0
 	}
 	switch {
-	case e.Call.Err != nil:
-		return 3
 	case e.Call.State == store.Pending:
 		return 1
 	default:
@@ -755,6 +759,7 @@ func eventSubstr(e store.EventView, q string) bool {
 	if strings.Contains(strings.ToLower(e.Method), q) ||
 		strings.Contains(strings.ToLower(e.ID), q) ||
 		strings.Contains(strings.ToLower(e.Text), q) ||
+		strings.Contains(strings.ToLower(e.Warning), q) ||
 		strings.Contains(strings.ToLower(string(e.Raw)), q) {
 		return true
 	}
@@ -798,6 +803,9 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 	if v == "bad" || v == "invalid" {
 		// Invalid frames are not calls, so match them before the Call check.
 		return e.Kind == store.EventInvalid
+	}
+	if v == "warn" || v == "warning" {
+		return e.Warning != ""
 	}
 	if e.Call == nil {
 		return false

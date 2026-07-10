@@ -64,6 +64,25 @@ func TestBuildCorrelatedExport(t *testing.T) {
 	}
 }
 
+func TestBuildIncludesValidationWarning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "warning.jsonl")
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"id":1,"method":"tools/list"}`),
+	})
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Events) != 1 || out.Events[0].Warning != "missing jsonrpc=2.0" {
+		t.Fatalf("warning not exported: %+v", out.Events)
+	}
+}
+
 func TestWriteFormats(t *testing.T) {
 	st, id, err := LoadFile(sampleLog(t))
 	if err != nil {

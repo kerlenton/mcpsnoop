@@ -151,6 +151,8 @@ func TestStreamQueryFilter(t *testing.T) {
 	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"not found"}],"isError":true}}`))
 	// a stray non-JSON-RPC frame on the protocol channel (stdout corruption)
 	st.Ingest(env(7, proxy.ServerToClient, `{"note":"stray line"}`))
+	// a best-effort JSON-RPC validation warning: method but no jsonrpc marker.
+	st.Ingest(env(8, proxy.ClientToServer, `{"id":4,"method":"tools/list"}`))
 
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
@@ -194,16 +196,22 @@ func TestStreamQueryFilter(t *testing.T) {
 			t.Fatalf("%s returned a non-invalid frame: %+v", q, fb.timeline[0])
 		}
 	}
+
+	fw := apply("status:warn")
+	if len(fw.timeline) != 1 || fw.timeline[0].Warning == "" {
+		t.Fatalf("status:warn should match exactly the warning frame, got %+v", fw.timeline)
+	}
 }
 
 // TestStatusRankInvalid checks that sorting by status surfaces invalid frames:
-// stream corruption ranks above call errors, which rank above call-less frames.
+// stream corruption ranks above call errors, then protocol warnings.
 func TestStatusRankInvalid(t *testing.T) {
 	invalid := statusRank(store.EventView{Kind: store.EventInvalid})
 	errored := statusRank(store.EventView{Kind: store.EventResponse, Call: &store.CallView{Err: &proxy.RPCError{}}})
+	warned := statusRank(store.EventView{Kind: store.EventRequest, Warning: "missing jsonrpc=2.0"})
 	none := statusRank(store.EventView{Kind: store.EventStderr})
-	if !(invalid > errored && errored > none) {
-		t.Fatalf("statusRank order wrong: invalid=%d error=%d none=%d (want invalid>error>none)", invalid, errored, none)
+	if !(invalid > errored && errored > warned && warned > none) {
+		t.Fatalf("statusRank order wrong: invalid=%d error=%d warning=%d none=%d", invalid, errored, warned, none)
 	}
 }
 

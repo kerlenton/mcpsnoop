@@ -375,6 +375,14 @@ func (m Model) streamCells(e store.EventView) streamCell {
 		c.dir, c.method = "?", "frame"
 		c.detail = string(e.Raw)
 	}
+	if e.Kind != store.EventInvalid && e.Warning != "" {
+		c.status = "WARN"
+		if c.detail == "" {
+			c.detail = e.Warning
+		} else {
+			c.detail = e.Warning + "; " + c.detail
+		}
+	}
 	return c
 }
 
@@ -408,6 +416,9 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 	if e.Kind == store.EventInvalid {
 		return m.styles.invalid
 	}
+	if e.Warning != "" {
+		return m.styles.warn
+	}
 	if e.Call != nil {
 		switch {
 		case e.Call.State == store.Pending:
@@ -424,6 +435,9 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 }
 
 func (m Model) kindColor(e store.EventView) lipgloss.Color {
+	if e.Kind != store.EventInvalid && e.Warning != "" {
+		return colWarn
+	}
 	switch e.Kind {
 	case store.EventStderr:
 		return colStderr
@@ -470,7 +484,7 @@ func (m Model) renderHelp(h int) string {
 		{"STREAM FILTER QUERY (/)", [][2]string{
 			{"<text>", "substring over method / tool / id / payload"},
 			{"tool:echo", "by tool name"},
-			{"status:err|slow|ok|pending|bad", "by outcome"},
+			{"status:err|warn|slow|ok|pending|bad", "by outcome"},
 			{"kind:req|resp|notify|stderr|invalid", "by message type"},
 			{"dir:c2s|s2c", "by direction (who sent it — orthogonal to kind)"},
 			{"method:tools/call  id:7", "by method / id (tokens are ANDed)"},
@@ -527,6 +541,9 @@ func (m Model) inspectorContent() string {
 	var b strings.Builder
 	b.WriteString(m.styles.panelTitle.Render(" FRAME") + "\n")
 	b.WriteString(fmt.Sprintf(" seq=%d  dir=%s  time=%s\n", e.Seq, e.Dir, e.TS.Format("15:04:05.000")))
+	if e.Warning != "" {
+		b.WriteString(" warning=" + e.Warning + "\n")
+	}
 	if e.Call != nil {
 		c := e.Call
 		b.WriteString(fmt.Sprintf(" method=%s  id=%s  state=%s  dur=%s\n",

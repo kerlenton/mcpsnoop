@@ -44,15 +44,16 @@ func (c CallView) Slow(threshold time.Duration) bool {
 
 // EventView is an immutable snapshot of one timeline entry.
 type EventView struct {
-	Seq    uint64
-	TS     time.Time
-	Dir    proxy.Direction
-	Kind   EventKind
-	Method string
-	ID     string
-	Raw    json.RawMessage
-	Text   string
-	Call   *CallView // set for request/response events
+	Seq     uint64
+	TS      time.Time
+	Dir     proxy.Direction
+	Kind    EventKind
+	Method  string
+	ID      string
+	Raw     json.RawMessage
+	Text    string
+	Warning string
+	Call    *CallView // set for request/response events
 }
 
 // SessionHeader is a lightweight per-session summary for the left panel.
@@ -81,14 +82,15 @@ type CapsView struct {
 // view builds the snapshot for an event. Caller holds at least the read lock.
 func (e *event) view(_ *session) EventView {
 	v := EventView{
-		Seq:    e.seq,
-		TS:     e.ts,
-		Dir:    e.dir,
-		Kind:   e.kind,
-		Method: e.method,
-		ID:     e.id,
-		Raw:    e.raw,
-		Text:   e.text,
+		Seq:     e.seq,
+		TS:      e.ts,
+		Dir:     e.dir,
+		Kind:    e.kind,
+		Method:  e.method,
+		ID:      e.id,
+		Raw:     e.raw,
+		Text:    e.text,
+		Warning: e.warning,
 	}
 	if e.call != nil {
 		cv := e.call.view()

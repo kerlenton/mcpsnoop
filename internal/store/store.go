@@ -89,15 +89,16 @@ type call struct {
 
 // event is the mutable internal timeline entry.
 type event struct {
-	seq    uint64
-	ts     time.Time
-	dir    proxy.Direction
-	kind   EventKind
-	method string
-	id     string
-	raw    json.RawMessage
-	text   string
-	call   *call // set for request/response events
+	seq     uint64
+	ts      time.Time
+	dir     proxy.Direction
+	kind    EventKind
+	method  string
+	id      string
+	raw     json.RawMessage
+	text    string
+	warning string
+	call    *call // set for request/response events
 }
 
 // capabilities holds what the handshake negotiated.
@@ -197,7 +198,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	case msg.Method == "" && msg.IsResponse():
 		ev.kind = EventResponse
 		ev.id = string(msg.ID)
+		ev.warning = validationWarning(msg)
 		ev.call = sess.completeCall(ev.id, e.Direction, e.TS, msg)
+		if ev.call == nil {
+			ev.warning = appendWarning(ev.warning, "response id has no matching request")
+		}
 		sess.responses++
 		if msg.Error != nil || (ev.call != nil && ev.call.toolErr) {
 			sess.errors++
@@ -206,6 +211,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.kind = EventRequest
 		ev.method = msg.Method
 		ev.id = string(msg.ID)
+		ev.warning = validationWarning(msg)
 		ev.call = sess.openCall(ev.id, msg, e)
 		sess.requests++
 		sess.pending++
@@ -215,9 +221,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	case msg.Method != "":
 		ev.kind = EventNotification
 		ev.method = msg.Method
+		ev.warning = validationWarning(msg)
 		sess.notifications++
 	default:
 		ev.kind = EventOther
+		ev.warning = validationWarning(msg)
 	}
 
 	sess.events = append(sess.events, ev)
@@ -337,6 +345,35 @@ func isToolError(result json.RawMessage) bool {
 		IsError bool `json:"isError"`
 	}
 	return json.Unmarshal(result, &r) == nil && r.IsError
+}
+
+func validationWarning(msg proxy.RPCMessage) string {
+	var warning string
+	switch {
+	case msg.JSONRPC == "":
+		warning = appendWarning(warning, "missing jsonrpc=2.0")
+	case msg.JSONRPC != "2.0":
+		warning = appendWarning(warning, "jsonrpc must be 2.0")
+	}
+	if msg.Method == "" && len(msg.ID) > 0 {
+		if len(msg.Result) == 0 && msg.Error == nil {
+			warning = appendWarning(warning, "response has neither result nor error")
+		}
+		if len(msg.Result) > 0 && msg.Error != nil {
+			warning = appendWarning(warning, "response has both result and error")
+		}
+	}
+	return warning
+}
+
+func appendWarning(existing, next string) string {
+	if next == "" {
+		return existing
+	}
+	if existing == "" {
+		return next
+	}
+	return existing + "; " + next
 }
 
 func opposite(d proxy.Direction) proxy.Direction {

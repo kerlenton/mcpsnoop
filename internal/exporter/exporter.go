@@ -83,6 +83,7 @@ type EventExport struct {
 	Kind      string          `json:"kind"`
 	Method    string          `json:"method,omitempty"`
 	ID        string          `json:"id,omitempty"`
+	Warning   string          `json:"warning,omitempty"`
 	CallIndex *int            `json:"call_index,omitempty"`
 	Raw       json.RawMessage `json:"raw,omitempty"`
 	Text      string          `json:"text,omitempty"`
@@ -302,6 +303,7 @@ func exportEvent(ev store.EventView, callIndex map[string]int) EventExport {
 		Kind:      eventKind(ev.Kind),
 		Method:    ev.Method,
 		ID:        ev.ID,
+		Warning:   ev.Warning,
 		Raw:       ev.Raw,
 		Text:      ev.Text,
 	}
@@ -330,6 +332,9 @@ func writeText(w io.Writer, data SessionExport) error {
 		}
 		if ev.ID != "" {
 			title += " id=" + ev.ID
+		}
+		if ev.Warning != "" {
+			title += " warning=" + ev.Warning
 		}
 		if ev.CallIndex != nil {
 			c := data.Calls[*ev.CallIndex]
