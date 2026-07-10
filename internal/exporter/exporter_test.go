@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
 
@@ -81,5 +82,64 @@ func TestWriteFormats(t *testing.T) {
 		if !strings.Contains(got, "echo") {
 			t.Fatalf("%s export missing tool name:\n%s", format, got)
 		}
+	}
+}
+
+// TestResolveSessionPath covers every branch of the resolver that both `export`
+// and `open` share: a session id, the newest saved log, and an existing path
+// outside the sessions directory that must pass through unchanged.
+func TestResolveSessionPath(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+
+	older := paths.SessionLogPath("older")
+	newer := paths.SessionLogPath("newer")
+	for _, p := range []string{older, newer} {
+		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(older, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newer, old.Add(time.Hour), old.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A session id resolves to its log under the sessions directory.
+	if got, err := ResolveSessionPath("older"); err != nil || got != older {
+		t.Fatalf("ResolveSessionPath(\"older\") = %q, %v; want %q", got, err, older)
+	}
+
+	// No argument resolves to the newest saved log by mtime.
+	if got, err := ResolveSessionPath(""); err != nil || got != newer {
+		t.Fatalf("ResolveSessionPath(\"\") = %q, %v; want newest %q", got, err, newer)
+	}
+
+	// An existing path outside the sessions directory (a --trace-file capture or
+	// a teammate's log) passes through unchanged.
+	external := filepath.Join(t.TempDir(), "capture.jsonl")
+	if err := os.WriteFile(external, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ResolveSessionPath(external); err != nil || got != external {
+		t.Fatalf("ResolveSessionPath(%q) = %q, %v; want it unchanged", external, got, err)
+	}
+
+	// An unknown session id and a missing path both error.
+	if _, err := ResolveSessionPath("no-such-id"); err == nil {
+		t.Fatal("ResolveSessionPath(unknown id) should error")
+	}
+	if _, err := ResolveSessionPath(filepath.Join(t.TempDir(), "missing.jsonl")); err == nil {
+		t.Fatal("ResolveSessionPath(missing path) should error")
+	}
+}
+
+// TestResolveSessionPathNoSessions checks that the empty argument errors clearly
+// when nothing has been captured yet.
+func TestResolveSessionPathNoSessions(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	if _, err := ResolveSessionPath(""); err == nil {
+		t.Fatal("ResolveSessionPath(\"\") with no saved sessions should error")
 	}
 }

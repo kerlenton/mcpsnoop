@@ -108,6 +108,19 @@ func TestResolveOpenSessionPathSupportsSessionIDNewestAndStdin(t *testing.T) {
 		t.Fatalf("resolveOpenSessionPath(\"\") = %q, %v; want newest %q, false", path, usedStdin, newer)
 	}
 
+	// An existing path outside the sessions directory passes through unchanged.
+	external := filepath.Join(t.TempDir(), "capture.jsonl")
+	if err := os.WriteFile(external, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path, usedStdin, err = resolveOpenSessionPath(external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usedStdin || path != external {
+		t.Fatalf("resolveOpenSessionPath(%q) = %q, %v; want it unchanged, false", external, path, usedStdin)
+	}
+
 	path, usedStdin, err = resolveOpenSessionPath("-")
 	if err != nil {
 		t.Fatal(err)
