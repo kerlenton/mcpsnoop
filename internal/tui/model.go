@@ -94,6 +94,7 @@ type Model struct {
 	streamSessionID string // session whose stream we drilled into
 	streamLabel     string
 	timeline        []store.EventView
+	streamSignals   streamSignalCounts
 	selEvent        int
 	query           string // stream filter
 	total           int
@@ -601,6 +602,7 @@ func (m *Model) refresh() {
 	full := m.store.Timeline(m.streamSessionID)
 	m.total = len(full)
 	m.timeline = m.filterEvents(full)
+	m.streamSignals = countStreamSignals(m.timeline, m.store.SlowThreshold())
 	m.sortStream()
 	// A non-chronological sort means we're inspecting, not tailing.
 	if m.streamSort.col != "" && m.streamSort.col != "time" {
@@ -610,6 +612,30 @@ func (m *Model) refresh() {
 		m.selEvent = len(m.timeline) - 1
 	}
 	m.selEvent = clamp(m.selEvent, 0, max(len(m.timeline)-1, 0))
+}
+
+type streamSignalCounts struct {
+	errors int
+	bad    int
+	warn   int
+	slow   int
+}
+
+func countStreamSignals(events []store.EventView, slowThreshold time.Duration) streamSignalCounts {
+	var c streamSignalCounts
+	for _, e := range events {
+		switch {
+		case e.Kind != store.EventInvalid && e.Warning != "":
+			c.warn++
+		case e.Kind == store.EventInvalid:
+			c.bad++
+		case e.Kind == store.EventResponse && e.Call != nil && e.Call.Failed():
+			c.errors++
+		case e.Kind == store.EventResponse && e.Call != nil && e.Call.Slow(slowThreshold):
+			c.slow++
+		}
+	}
+	return c
 }
 
 func sortSessions(s []store.SessionHeader, st sortState) {

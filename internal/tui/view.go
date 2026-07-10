@@ -89,7 +89,21 @@ func (m Model) renderStatus() string {
 		count = fmt.Sprintf("%d/%d frames", len(m.timeline), m.total)
 	}
 	left := live + sep + m.styles.dim.Render(count)
-	if e := m.totalErrors(); e > 0 {
+	if m.view == viewStream {
+		c := m.streamSignals
+		if c.errors > 0 {
+			left += sep + m.styles.respErr.Render(fmt.Sprintf("%d err", c.errors))
+		}
+		if c.bad > 0 {
+			left += sep + m.styles.invalid.Render(fmt.Sprintf("%d bad", c.bad))
+		}
+		if c.warn > 0 {
+			left += sep + m.styles.warn.Render(fmt.Sprintf("%d warn", c.warn))
+		}
+		if c.slow > 0 {
+			left += sep + m.styles.slow.Render(fmt.Sprintf("%d slow", c.slow))
+		}
+	} else if e := m.totalErrors(); e > 0 {
 		left += sep + m.styles.respErr.Render(fmt.Sprintf("%d err", e))
 	}
 

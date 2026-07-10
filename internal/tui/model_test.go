@@ -203,6 +203,32 @@ func TestStreamQueryFilter(t *testing.T) {
 	}
 }
 
+func TestStreamFooterShowsSignalCounts(t *testing.T) {
+	st := store.New(100 * time.Millisecond)
+	seed(st)
+	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fail"}}`))
+	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"unknown tool"}}`))
+	st.Ingest(env(7, proxy.ServerToClient, `{"note":"stray line"}`))
+	st.Ingest(env(8, proxy.ClientToServer, `{"id":4,"method":"tools/list"}`))
+
+	t0 := time.Now()
+	slowReq := env(9, proxy.ClientToServer, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"slow"}}`)
+	slowReq.TS = t0
+	st.Ingest(slowReq)
+	slowResp := env(10, proxy.ServerToClient, `{"jsonrpc":"2.0","id":5,"result":{"content":[]}}`)
+	slowResp.TS = t0.Add(200 * time.Millisecond)
+	st.Ingest(slowResp)
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
+	out := m.View()
+	for _, want := range []string{"10/10 frames", "1 err", "1 bad", "1 warn", "1 slow"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stream footer missing %q\n%s", want, out)
+		}
+	}
+}
+
 // TestStatusRankInvalid checks that sorting by status surfaces invalid frames,
 // stream corruption ranks above call errors, then protocol warnings.
 func TestStatusRankInvalid(t *testing.T) {
