@@ -91,6 +91,25 @@ func TestDuplicateErrorResponseDoesNotDoubleCountErrors(t *testing.T) {
 	}
 }
 
+// TestReusedInFlightRequestIDIsFlagged checks that a request reusing an id whose
+// earlier request is still pending is flagged, without leaking the pending count.
+func TestReusedInFlightRequestIDIsFlagged(t *testing.T) {
+	s := New(0)
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"a"}`))
+	ev := s.Ingest(req(2, t0.Add(time.Millisecond), proxy.ClientToServer, "1", "tools/call", `{"name":"b"}`))
+	if ev.Warning != "request reuses an id already in flight" {
+		t.Fatalf("reused in-flight id should be flagged, warning = %q", ev.Warning)
+	}
+	if h := s.Sessions()[0]; h.Pending != 1 {
+		t.Fatalf("pending = %d, want 1 (reused id must not leak pending)", h.Pending)
+	}
+	s.Ingest(resp(3, t0.Add(2*time.Millisecond), proxy.ServerToClient, "1", `"result":{}`))
+	if h := s.Sessions()[0]; h.Pending != 0 {
+		t.Fatalf("pending = %d, want 0 after the response clears it", h.Pending)
+	}
+}
+
 func TestErrorResponse(t *testing.T) {
 	s := New(0)
 	t0 := time.Now()

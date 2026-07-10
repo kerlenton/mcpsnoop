@@ -220,9 +220,14 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.method = msg.Method
 		ev.id = string(msg.ID)
 		ev.warning = validationWarning(msg)
-		ev.call = sess.openCall(ev.id, msg, e)
+		var reused bool
+		ev.call, reused = sess.openCall(ev.id, msg, e)
 		sess.requests++
-		sess.pending++
+		if reused {
+			ev.warning = appendWarning(ev.warning, "request reuses an id already in flight")
+		} else {
+			sess.pending++
+		}
 		if msg.Method == "initialize" {
 			sess.caps.applyRequest(msg.Params)
 		}
@@ -261,8 +266,13 @@ func (s *Store) sessionFor(e proxy.Envelope) *session {
 	return sess
 }
 
-// openCall records a new pending request. Caller holds the write lock.
-func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope) *call {
+// openCall records a new pending request. The bool reports whether it displaced
+// a still-pending call for the same id and direction, meaning the client reused
+// an id while its earlier request was in flight. Caller holds the write lock.
+func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope) (*call, bool) {
+	key := callKey{dir: e.Direction, id: id}
+	prev, ok := sess.calls[key]
+	reused := ok && prev.state == Pending
 	c := &call{
 		id:     id,
 		method: msg.Method,
@@ -275,8 +285,8 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 		c.isTool = true
 		c.toolName = toolName(msg.Params)
 	}
-	sess.calls[callKey{dir: e.Direction, id: id}] = c
-	return c
+	sess.calls[key] = c
+	return c, reused
 }
 
 // completeCall matches a response to its pending request. The bool reports

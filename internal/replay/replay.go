@@ -128,8 +128,13 @@ func readResponse(r *bufio.Reader, wantID string) (json.RawMessage, error) {
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(line) > 0 {
-			msg, ok := proxy.ParseRPC(line)
-			if ok && msg.IsResponse() && string(msg.ID) == wantID {
+			// A response for our id has an empty method and a matching id.
+			// Everything else (notifications, log lines, unrelated responses)
+			// is skipped rather than treated as ours.
+			if msg, ok := proxy.ParseRPC(line); ok && msg.Method == "" && string(msg.ID) == wantID {
+				if !msg.IsResponse() {
+					return nil, fmt.Errorf("malformed response for id %s: neither result nor error", wantID)
+				}
 				return append(json.RawMessage(nil), trimNewline(line)...), nil
 			}
 		}

@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"os"
@@ -117,5 +118,27 @@ func TestReplayToolError(t *testing.T) {
 func TestReplayEmptyCommand(t *testing.T) {
 	if _, err := Replay(context.Background(), nil, "", "tools/list", nil, time.Second); err == nil {
 		t.Fatal("expected error for empty command")
+	}
+}
+
+func TestReadResponseSkipsIntermediateAndMatchesByID(t *testing.T) {
+	stream := `{"jsonrpc":"2.0","method":"notifications/progress","params":{}}` + "\n" +
+		`{"jsonrpc":"2.0","id":1,"result":{"other":true}}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"result":{"ok":true}}` + "\n"
+	resp, err := readResponse(bufio.NewReader(strings.NewReader(stream)), "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(resp), `"ok":true`) {
+		t.Fatalf("matched the wrong response: %s", resp)
+	}
+}
+
+func TestReadResponseRejectsMalformedResponse(t *testing.T) {
+	// A response for our id with neither result nor error must error promptly,
+	// not spin until the reader hits EOF or the deadline.
+	stream := `{"jsonrpc":"2.0","id":2}` + "\n"
+	if _, err := readResponse(bufio.NewReader(strings.NewReader(stream)), "2"); err == nil {
+		t.Fatal("malformed response should error")
 	}
 }
