@@ -162,3 +162,61 @@ func TestResolveSessionPathNoSessions(t *testing.T) {
 		t.Fatal("ResolveSessionPath(\"\") with no saved sessions should error")
 	}
 }
+
+func TestWriteOTLP(t *testing.T) {
+	st, id, err := LoadFile(sampleLog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatOTLP}); err != nil {
+		t.Fatal(err)
+	}
+
+	var payload struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []struct {
+					TraceID           string `json:"traceId"`
+					SpanID            string `json:"spanId"`
+					Name              string `json:"name"`
+					StartTimeUnixNano string `json:"startTimeUnixNano"`
+					EndTimeUnixNano   string `json:"endTimeUnixNano"`
+					Status            struct {
+						Code string `json:"code"`
+					} `json:"status"`
+					Attributes []struct {
+						Key string `json:"key"`
+					} `json:"attributes"`
+				} `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid OTLP JSON: %v\n%s", err, buf.String())
+	}
+	if len(payload.ResourceSpans) != 1 || len(payload.ResourceSpans[0].ScopeSpans) != 1 {
+		t.Fatalf("unexpected OTLP hierarchy: %s", buf.String())
+	}
+	spans := payload.ResourceSpans[0].ScopeSpans[0].Spans
+	if len(spans) != 1 {
+		t.Fatalf("spans = %d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Name != "tools/call" || len(span.TraceID) != 32 || len(span.SpanID) != 16 || span.StartTimeUnixNano == "" || span.EndTimeUnixNano == "" || span.Status.Code != "STATUS_CODE_OK" {
+		t.Fatalf("bad OTLP span: %+v", span)
+	}
+	keys := make(map[string]bool, len(span.Attributes))
+	for _, attr := range span.Attributes {
+		keys[attr.Key] = true
+	}
+	for _, key := range []string{"rpc.system", "rpc.method", "mcpsnoop.call.duration_ms", "mcpsnoop.call.is_error", "mcpsnoop.call.tool_name"} {
+		if !keys[key] {
+			t.Errorf("OTLP span missing %q", key)
+		}
+	}
+}

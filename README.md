@@ -158,7 +158,7 @@ dir:s2c kind:req                  # server-initiated requests (sampling, roots)
 Turn any captured session into a portable file.
 
 ```bash
-mcpsnoop export -T json|html|text [-o file|-] [session-id|log.jsonl]
+mcpsnoop export -T json|html|text|otlp [-o file|-] [session-id|log.jsonl]
 ```
 
 | Format | What you get |
@@ -166,16 +166,18 @@ mcpsnoop export -T json|html|text [-o file|-] [session-id|log.jsonl]
 | `json` | correlated calls, durations, status, tool-level `isError`, capabilities, and raw frames |
 | `html` | a self-contained browser file with search and collapsible JSON |
 | `text` | a pretty plain-text dump |
+| `otlp` | OTLP JSON with a trace per session and a span per correlated call |
 
 ```bash
 mcpsnoop export -T html -o out.html       # an HTML file to open in a browser
 mcpsnoop export -T text server.py-48213   # a specific session, as text
 mcpsnoop export -T json | jq              # the newest session, piped to jq
+mcpsnoop export -T otlp -o trace.json     # import into an OTLP-compatible tracing backend
 ```
 
 Omit `-o` to write to stdout, and omit the session to take the newest. In the
 TUI, press `e` to export the selected session as HTML, or run
-`:export json|html|text [path]` from command mode.
+`:export json|html|text|otlp [path]` from command mode.
 
 ## Watching from another machine
 

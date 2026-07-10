@@ -101,7 +101,7 @@ func main() {
 	if args := os.Args[1:]; len(args) > 0 && args[0] == "http" {
 		os.Exit(runHTTP(args[1:]))
 	}
-	// `mcpsnoop export` renders a captured JSONL session to json/html/text.
+	// `mcpsnoop export` renders a captured JSONL session to json/html/text/otlp.
 	if args := os.Args[1:]; len(args) > 0 && args[0] == "export" {
 		os.Exit(runExport(args[1:]))
 	}
@@ -140,7 +140,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop [flags] -- <server command> [args...]   run as transparent stdio shim\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop http --target <url> [--listen :7000]     run as transparent HTTP proxy\n")
-		fmt.Fprintf(os.Stderr, "  mcpsnoop export [-T json|html|text] [-o file|-] [session-id|log.jsonl]\n")
+		fmt.Fprintf(os.Stderr, "  mcpsnoop export [-T json|html|text|otlp] [-o file|-] [session-id|log.jsonl]\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop open [session-id|log.jsonl|-]            open a session in the TUI\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop remote [flags] <user@host>              print SSH tunnel command\n")
 		fmt.Fprintf(os.Stderr, "  mcpsnoop                                          run the live TUI (collector)\n")
@@ -213,11 +213,11 @@ func labelFor(command []string) string {
 func runExport(args []string) int {
 	fs := flag.NewFlagSet("mcpsnoop export", flag.ExitOnError)
 	var (
-		formatFlag = fs.String("T", "json", "output format: json, html, or text")
+		formatFlag = fs.String("T", "json", "output format: json, html, text, or otlp")
 		outFlag    = fs.String("o", "-", "output path, or - for stdout")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: mcpsnoop export [-T json|html|text] [-o file|-] [session-id|log.jsonl]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcpsnoop export [-T json|html|text|otlp] [-o file|-] [session-id|log.jsonl]\n\n")
 		fmt.Fprintf(os.Stderr, "If no session is provided, the newest session log is exported.\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fs.PrintDefaults()

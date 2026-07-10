@@ -2,6 +2,7 @@ package exporter
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ const (
 	FormatJSON Format = "json"
 	FormatHTML Format = "html"
 	FormatText Format = "text"
+	FormatOTLP Format = "otlp"
 )
 
 type Options struct {
@@ -97,8 +99,10 @@ func ParseFormat(s string) (Format, error) {
 		return FormatHTML, nil
 	case FormatText:
 		return FormatText, nil
+	case FormatOTLP:
+		return FormatOTLP, nil
 	default:
-		return "", fmt.Errorf("unknown export format %q (want json, html, or text)", s)
+		return "", fmt.Errorf("unknown export format %q (want json, html, text, or otlp)", s)
 	}
 }
 
@@ -246,9 +250,141 @@ func Write(w io.Writer, data SessionExport, opts Options) error {
 		return writeHTML(w, data)
 	case FormatText:
 		return writeText(w, data)
+	case FormatOTLP:
+		return writeOTLP(w, data)
 	default:
 		return fmt.Errorf("unknown export format %q", format)
 	}
+}
+
+// otlpExport follows the OTLP JSON encoding. Each correlated MCP call becomes
+// a span in one trace, making a session importable into tracing backends.
+type otlpExport struct {
+	ResourceSpans []otlpResourceSpans `json:"resourceSpans"`
+}
+
+type otlpResourceSpans struct {
+	Resource   otlpResource     `json:"resource"`
+	ScopeSpans []otlpScopeSpans `json:"scopeSpans"`
+}
+
+type otlpResource struct {
+	Attributes []otlpAttribute `json:"attributes"`
+}
+
+type otlpScopeSpans struct {
+	Scope otlpScope  `json:"scope"`
+	Spans []otlpSpan `json:"spans"`
+}
+
+type otlpScope struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+}
+
+type otlpSpan struct {
+	TraceID           string          `json:"traceId"`
+	SpanID            string          `json:"spanId"`
+	Name              string          `json:"name"`
+	Kind              string          `json:"kind"`
+	StartTimeUnixNano string          `json:"startTimeUnixNano"`
+	EndTimeUnixNano   string          `json:"endTimeUnixNano"`
+	Attributes        []otlpAttribute `json:"attributes"`
+	Status            otlpStatus      `json:"status"`
+}
+
+type otlpStatus struct {
+	Code string `json:"code"`
+}
+
+type otlpAttribute struct {
+	Key   string       `json:"key"`
+	Value otlpAnyValue `json:"value"`
+}
+
+type otlpAnyValue struct {
+	StringValue *string  `json:"stringValue,omitempty"`
+	BoolValue   *bool    `json:"boolValue,omitempty"`
+	DoubleValue *float64 `json:"doubleValue,omitempty"`
+}
+
+func writeOTLP(w io.Writer, data SessionExport) error {
+	traceID := otlpID(16, "trace", data.Session.ID)
+	spans := make([]otlpSpan, 0, len(data.Calls))
+	for _, call := range data.Calls {
+		end := call.StartedAt
+		if call.EndedAt != nil {
+			end = *call.EndedAt
+		}
+		attrs := []otlpAttribute{
+			otlpString("rpc.system", "mcp"),
+			otlpString("rpc.method", call.Method),
+			otlpString("mcpsnoop.call.id", call.ID),
+			otlpString("mcpsnoop.call.status", call.Status),
+			otlpString("mcpsnoop.call.state", call.State),
+			otlpBool("mcpsnoop.call.is_tool", call.IsTool),
+			otlpBool("mcpsnoop.call.is_error", call.IsError),
+			otlpBool("mcpsnoop.call.tool_error", call.ToolError),
+		}
+		if call.ToolName != "" {
+			attrs = append(attrs, otlpString("mcpsnoop.call.tool_name", call.ToolName))
+		}
+		if call.DurationMS != nil {
+			attrs = append(attrs, otlpDouble("mcpsnoop.call.duration_ms", *call.DurationMS))
+		}
+		status := "STATUS_CODE_OK"
+		if call.State == "pending" {
+			status = "STATUS_CODE_UNSET"
+		}
+		if call.IsError {
+			status = "STATUS_CODE_ERROR"
+		}
+		kind := "SPAN_KIND_CLIENT"
+		if call.Direction == proxy.ServerToClient {
+			kind = "SPAN_KIND_SERVER"
+		}
+		spans = append(spans, otlpSpan{
+			TraceID:           traceID,
+			SpanID:            otlpID(8, "span", data.Session.ID, call.ID, string(call.Direction)),
+			Name:              call.Method,
+			Kind:              kind,
+			StartTimeUnixNano: fmt.Sprint(call.StartedAt.UnixNano()),
+			EndTimeUnixNano:   fmt.Sprint(end.UnixNano()),
+			Attributes:        attrs,
+			Status:            otlpStatus{Code: status},
+		})
+	}
+	payload := otlpExport{ResourceSpans: []otlpResourceSpans{{
+		Resource: otlpResource{Attributes: []otlpAttribute{
+			otlpString("service.name", "mcpsnoop"),
+			otlpString("mcpsnoop.session.id", data.Session.ID),
+			otlpString("mcpsnoop.session.label", data.Session.Label),
+		}},
+		ScopeSpans: []otlpScopeSpans{{Scope: otlpScope{Name: "mcpsnoop"}, Spans: spans}},
+	}}}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(payload)
+}
+
+func otlpID(length int, parts ...string) string {
+	h := sha256.New()
+	for _, part := range parts {
+		_, _ = fmt.Fprint(h, part, "\x00")
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)[:length])
+}
+
+func otlpString(key, value string) otlpAttribute {
+	return otlpAttribute{Key: key, Value: otlpAnyValue{StringValue: &value}}
+}
+
+func otlpBool(key string, value bool) otlpAttribute {
+	return otlpAttribute{Key: key, Value: otlpAnyValue{BoolValue: &value}}
+}
+
+func otlpDouble(key string, value float64) otlpAttribute {
+	return otlpAttribute{Key: key, Value: otlpAnyValue{DoubleValue: &value}}
 }
 
 func ExportFile(inputPath string, w io.Writer, opts Options) error {
