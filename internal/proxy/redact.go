@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
@@ -28,6 +29,10 @@ type RedactConfig struct {
 
 	// Keys are JSON object field names whose values should be replaced.
 	Keys []string
+
+	// ValuePatterns are regular expressions whose matches inside observed
+	// string payloads should be replaced.
+	ValuePatterns []string
 }
 
 // Enabled reports whether cfg has any key-based redaction rule.
@@ -40,12 +45,18 @@ func (cfg RedactConfig) Enabled() bool {
 			return true
 		}
 	}
+	for _, pattern := range cfg.ValuePatterns {
+		if strings.TrimSpace(pattern) != "" {
+			return true
+		}
+	}
 	return false
 }
 
 // Redactor redacts JSON payloads according to a prepared config.
 type Redactor struct {
-	keys map[string]struct{}
+	keys          map[string]struct{}
+	valuePatterns []*regexp.Regexp
 }
 
 // NewRedactor prepares cfg for repeated use.
@@ -55,7 +66,7 @@ func NewRedactor(cfg RedactConfig) Redactor {
 		addRedactKeys(keys, commonSecretRedactKeys)
 	}
 	addRedactKeys(keys, cfg.Keys)
-	return Redactor{keys: keys}
+	return Redactor{keys: keys, valuePatterns: compileRedactPatterns(cfg.ValuePatterns)}
 }
 
 func addRedactKeys(keys map[string]struct{}, candidates []string) {
@@ -67,18 +78,35 @@ func addRedactKeys(keys map[string]struct{}, candidates []string) {
 	}
 }
 
-func (r Redactor) enabled() bool { return len(r.keys) > 0 }
+func compileRedactPatterns(candidates []string) []*regexp.Regexp {
+	var patterns []*regexp.Regexp
+	for _, pattern := range candidates {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if re, err := regexp.Compile(pattern); err == nil {
+			patterns = append(patterns, re)
+		}
+	}
+	return patterns
+}
+
+func (r Redactor) enabled() bool { return len(r.keys) > 0 || len(r.valuePatterns) > 0 }
 
 // RedactEnvelope returns a copy of env with matching JSON Raw fields scrubbed.
 func (r Redactor) RedactEnvelope(env Envelope) Envelope {
-	if !r.enabled() || len(env.Raw) == 0 {
+	if !r.enabled() {
 		return env
 	}
-	redacted, ok := r.redactRaw(env.Raw)
-	if !ok {
-		return env
+	if len(env.Raw) > 0 {
+		if redacted, ok := r.redactRaw(env.Raw); ok {
+			env.Raw = redacted
+		}
 	}
-	env.Raw = redacted
+	if env.Text != "" && len(r.valuePatterns) > 0 {
+		env.Text = r.redactString(env.Text)
+	}
 	return env
 }
 
@@ -109,6 +137,14 @@ func (r Redactor) redactValue(v any) bool {
 				changed = true
 				continue
 			}
+			if s, ok := child.(string); ok {
+				redacted := r.redactString(s)
+				if redacted != s {
+					x[key] = redacted
+					changed = true
+				}
+				continue
+			}
 			if r.redactValue(child) {
 				changed = true
 			}
@@ -116,7 +152,15 @@ func (r Redactor) redactValue(v any) bool {
 		return changed
 	case []any:
 		changed := false
-		for _, child := range x {
+		for i, child := range x {
+			if s, ok := child.(string); ok {
+				redacted := r.redactString(s)
+				if redacted != s {
+					x[i] = redacted
+					changed = true
+				}
+				continue
+			}
 			if r.redactValue(child) {
 				changed = true
 			}
@@ -125,6 +169,13 @@ func (r Redactor) redactValue(v any) bool {
 	default:
 		return false
 	}
+}
+
+func (r Redactor) redactString(s string) string {
+	for _, re := range r.valuePatterns {
+		s = re.ReplaceAllString(s, redactedValue)
+	}
+	return s
 }
 
 type redactingSink struct {

@@ -44,7 +44,7 @@ func TestRedactKeysFlagParsesCommaSeparatedAndRepeatedValues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := flag.config(false)
+	cfg := redactConfig(false, flag, nil)
 	if cfg.CommonSecrets {
 		t.Fatal("CommonSecrets = true, want false")
 	}
@@ -62,7 +62,7 @@ func TestRedactKeysFlagConfigEnablesCommonSecretsPreset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := flag.config(true)
+	cfg := redactConfig(true, flag, nil)
 	if !cfg.CommonSecrets {
 		t.Fatal("CommonSecrets = false, want true")
 	}
@@ -127,6 +127,31 @@ func TestResolveOpenSessionPathSupportsSessionIDNewestAndStdin(t *testing.T) {
 	}
 	if !usedStdin || path != "" {
 		t.Fatalf("resolveOpenSessionPath(\"-\") = %q, %v; want empty path, true", path, usedStdin)
+	}
+}
+
+func TestRedactValuesFlagParsesRepeatedRegexes(t *testing.T) {
+	var flag redactValuesFlag
+	if err := flag.Set(`sk-[A-Za-z0-9]+`); err != nil {
+		t.Fatal(err)
+	}
+	if err := flag.Set(`Bearer\s+\S+`); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := redactConfig(false, nil, flag)
+	if got, want := cfg.ValuePatterns, []string{`sk-[A-Za-z0-9]+`, `Bearer\s+\S+`}; !slices.Equal(got, want) {
+		t.Fatalf("ValuePatterns = %v, want %v", got, want)
+	}
+	if got := flag.String(); got != `sk-[A-Za-z0-9]+,Bearer\s+\S+` {
+		t.Fatalf("String() = %q, want repeated regexes", got)
+	}
+}
+
+func TestRedactValuesFlagRejectsInvalidRegex(t *testing.T) {
+	var flag redactValuesFlag
+	if err := flag.Set(`[`); err == nil {
+		t.Fatal("Set returned nil, want invalid regex error")
 	}
 }
 

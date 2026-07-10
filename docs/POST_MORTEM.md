@@ -85,10 +85,14 @@ later start. For a session that reappears automatically, leave `--trace-file`
 off and use the default location.
 
 To keep common secret fields out of saved traces, pass `--redact-secrets` when
-you wrap the server. Add `--redact-key` for project-specific fields.
+you wrap the server. Add `--redact-key` for project-specific fields, and
+`--redact-value` for best-effort regular expression scrubbing inside observed
+string values, stderr text, and non-JSON text frames. Regex redaction can miss
+encoded or transformed secrets and can overmatch harmless text, so review
+anything you plan to share.
 
 ```bash
-mcpsnoop --redact-secrets --redact-key tenant_api_key -- node build/index.js
+mcpsnoop --redact-secrets --redact-key tenant_api_key --redact-value 'sk-[A-Za-z0-9]+' -- node build/index.js
 ```
 
 ## What to include in a bug report

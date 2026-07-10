@@ -236,11 +236,13 @@ run untrusted ones in a container. It never executes anything you didn't put in
 your client config.
 
 Captured frames can include prompts, tool arguments, credentials, and tool
-results. If payloads can carry secrets, opt in to key-based redaction to scrub
-matching JSON fields from the observed trace copies while the proxied bytes still
-pass through unchanged. It is best effort and only scrubs values under matching
-JSON object keys, so secrets in stderr text, string values under other keys, or
-non-JSON frames pass through.
+results. If payloads can carry secrets, opt in to redaction to scrub the
+observed trace copies while the proxied bytes still pass through unchanged.
+Key-based redaction replaces whole values under matching JSON object keys.
+Value-based redaction applies regular expressions to observed string values,
+stderr text, and non-JSON text frames. Both modes are best effort: regexes can
+miss secrets, overmatch harmless text, or fail to see transformed/encoded
+values.
 
 ```bash
 # built-in preset of common secret keys
@@ -249,8 +251,11 @@ mcpsnoop --redact-secrets -- node build/index.js
 # or name your own keys
 mcpsnoop --redact-key token,api_key,password -- node build/index.js
 
-# preset plus your own keys, in http mode
-mcpsnoop http --target http://localhost:3000/mcp --redact-secrets --redact-key authorization
+# scrub obvious token-shaped values outside known keys
+mcpsnoop --redact-value 'sk-[A-Za-z0-9]+' -- node build/index.js
+
+# combine the layers in http mode
+mcpsnoop http --target http://localhost:3000/mcp --redact-secrets --redact-value 'Bearer\s+\S+'
 ```
 
 For remote workflows, use SSH tunnelling or SSH file transfer so transport auth,

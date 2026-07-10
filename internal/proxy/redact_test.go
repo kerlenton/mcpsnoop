@@ -91,6 +91,47 @@ func TestRedactingSinkScrubsCommonSecretPresetAndExplicitKeys(t *testing.T) {
 	}
 }
 
+func TestRedactingSinkScrubsValuePatternMatches(t *testing.T) {
+	sink := &captureSink{}
+	redacted := NewRedactingSink(sink, RedactConfig{
+		ValuePatterns: []string{`sk-[A-Za-z0-9]+`, `Bearer\s+\S+`},
+	})
+
+	redacted.Emit(Envelope{
+		Raw: json.RawMessage(`{
+			"params":{
+				"message":"use sk-abc123 in this text",
+				"headers":["Bearer token-123", "keep visible"],
+				"count":42
+			}
+		}`),
+		Text: "stderr leaked sk-stderr123",
+	})
+
+	got := sink.byDir("")[0]
+	if got.Text != "stderr leaked [REDACTED]" {
+		t.Fatalf("Text = %q, want stderr leaked [REDACTED]", got.Text)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(got.Raw, &obj); err != nil {
+		t.Fatalf("redacted Raw is invalid JSON: %v", err)
+	}
+	params := obj["params"].(map[string]any)
+	if params["message"] != "use [REDACTED] in this text" {
+		t.Fatalf("message = %v, want value pattern redacted", params["message"])
+	}
+	headers := params["headers"].([]any)
+	if headers[0] != redactedValue {
+		t.Fatalf("headers[0] = %v, want redacted", headers[0])
+	}
+	if headers[1] != "keep visible" {
+		t.Fatalf("headers[1] = %v, want visible", headers[1])
+	}
+	if params["count"] != float64(42) {
+		t.Fatalf("count = %v, want unchanged number", params["count"])
+	}
+}
+
 func TestRedactingSinkLeavesPayloadUnchangedWithoutConfig(t *testing.T) {
 	sink := &captureSink{}
 	redacted := NewRedactingSink(sink, RedactConfig{})
