@@ -220,3 +220,18 @@ func TestWriteOTLP(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultOutputPathExtensions(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	cases := map[Format]string{
+		FormatJSON: "s1.json",
+		FormatHTML: "s1.html",
+		FormatText: "s1.txt",
+		FormatOTLP: "s1.otlp.json",
+	}
+	for format, suffix := range cases {
+		if got := DefaultOutputPath("s1", format); !strings.HasSuffix(got, suffix) {
+			t.Errorf("DefaultOutputPath(%q) = %q, want suffix %q", format, got, suffix)
+		}
+	}
+}

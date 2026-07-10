@@ -79,7 +79,7 @@ see [review past sessions from logs](docs/POST_MORTEM.md).
 | Zero-config, no flags or ordering | no | yes |
 | Capability inspector | partial | yes |
 | Replay a captured call | no | yes |
-| Session export (json / html / text) | no | yes |
+| Session export (json / html / text / otlp) | no | yes |
 | Single binary, no runtime deps | no | yes |
 
 ## Install

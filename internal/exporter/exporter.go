@@ -145,8 +145,11 @@ func ResolveSessionPath(arg string) (string, error) {
 
 func DefaultOutputPath(sessionID string, format Format) string {
 	ext := string(format)
-	if format == FormatText {
+	switch format {
+	case FormatText:
 		ext = "txt"
+	case FormatOTLP:
+		ext = "otlp.json" // OTLP payload is JSON; keep it distinct from the json export
 	}
 	return filepath.Join(paths.ExportsDir(), safeFileName(sessionID)+"."+ext)
 }
