@@ -160,17 +160,21 @@ func LoadFile(path string) (*store.Store, string, error) {
 		return nil, "", err
 	}
 	defer f.Close()
+	return Load(f, path)
+}
 
+// Load reads a JSONL envelope stream into a store and returns its first session.
+func Load(r io.Reader, source string) (*store.Store, string, error) {
 	st := store.New(0)
 	var firstSession string
-	dec := json.NewDecoder(f)
+	dec := json.NewDecoder(r)
 	for {
 		var env proxy.Envelope
 		if err := dec.Decode(&env); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return nil, "", fmt.Errorf("%s: invalid JSONL envelope: %w", path, err)
+			return nil, "", fmt.Errorf("%s: invalid JSONL envelope: %w", source, err)
 		}
 		if firstSession == "" {
 			firstSession = env.SessionID
@@ -178,7 +182,7 @@ func LoadFile(path string) (*store.Store, string, error) {
 		st.Ingest(env)
 	}
 	if firstSession == "" {
-		return nil, "", fmt.Errorf("%s: no envelopes found", path)
+		return nil, "", fmt.Errorf("%s: no envelopes found", source)
 	}
 	return st, firstSession, nil
 }

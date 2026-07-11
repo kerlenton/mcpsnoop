@@ -95,6 +95,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop` | open the live TUI |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, or otlp |
+| `mcpsnoop check` | fail CI on errors, invalid frames, or warnings |
 | `mcpsnoop open` | open a saved session in the TUI |
 | `mcpsnoop remote <user@host>` | print the SSH tunnel command |
 | `mcpsnoop demo` | play a scripted session |
@@ -218,6 +219,24 @@ mcpsnoop export -T otlp -o trace.json     # import into an OTLP-compatible traci
 Omit `-o` to write to stdout, and omit the session to take the newest. In the
 TUI, press `e` to export the selected session as HTML, or run
 `:export json|html|text|otlp [path]` from command mode.
+
+## Checking sessions in CI
+
+Gate a recorded agent run on errors, stream corruption, or protocol warnings.
+
+```bash
+mcpsnoop check [--fail-on error,invalid,warn] [session-id|log.jsonl|-]
+```
+
+All three signals fail the check by default. Pass a comma-separated subset to
+select only the conditions relevant to a job. Omit the session to check the
+newest capture, or use `-` to read JSONL from stdin.
+
+```bash
+mcpsnoop check build-agent
+mcpsnoop check --fail-on error,invalid artifacts/session.jsonl
+mcpsnoop check --fail-on warn - < trace.jsonl
+```
 
 ## Watching from another machine
 
