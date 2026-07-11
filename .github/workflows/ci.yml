@@ -29,9 +29,9 @@ jobs:
       - name: build
         run: go build ./...
 
-  # Keep the Windows and macOS binaries honest: the release ships both, but the
+  # Keep the Windows and macOS binaries honest. The release ships both, but the
   # gate above only runs on Linux. macOS is Unix-like, so it runs the full race
-  # suite; Windows runs vet and build to catch the platform-tagged code (the
+  # suite. Windows runs vet and build to catch the platform-tagged code (the
   # console shim, socket paths) compiling, without depending on the exec-based
   # test helpers being portable.
   cross-platform:

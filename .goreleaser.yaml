@@ -1,6 +1,6 @@
-# GoReleaser v2 — on a pushed tag, cross-compiles the binaries, builds the
+# GoReleaser v2, on a pushed tag it cross-compiles the binaries, builds the
 # archives and checksums, and publishes a GitHub Release with a generated
-# changelog. Run locally: goreleaser release --snapshot --clean
+# changelog. Run locally with goreleaser release --snapshot --clean
 version: 2
 
 project_name: mcpsnoop
@@ -52,7 +52,7 @@ brews:
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
-# Use GitHub's own release-notes generator: each entry is the PR title, linked,
-# credited to its author (by @user in #N) — instead of a raw commit + email dump.
+# Use GitHub's own release-notes generator, so each entry is the PR title, linked,
+# credited to its author (by @user in #N), instead of a raw commit + email dump.
 changelog:
   use: github-native

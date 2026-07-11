@@ -1,13 +1,13 @@
-mcpsnoop — brand assets
+mcpsnoop brand assets
 =======================
 
-Accent   : signal blue   #1FB6FF
-Base     : near-black     #0B0E14
-Wordmark : JetBrains Mono, weight 500, lowercase
+Accent     signal blue   #1FB6FF
+Base       near-black     #0B0E14
+Wordmark   JetBrains Mono, weight 500, lowercase
 
 FILES
 -----
-SVG (vector, scalable — prefer these)
+SVG (vector, scalable, prefer these)
   mcpsnoop-mark.svg           mark · blue · transparent
   mcpsnoop-mark-white.svg     mark · white (dark / photo backgrounds)
   mcpsnoop-mark-black.svg     mark · near-black (light backgrounds)

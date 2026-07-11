@@ -1,5 +1,5 @@
 # Configures GitHub's native release-notes generator, which goreleaser uses via
-# `changelog: use: github-native`. PRs are grouped into sections by label; the
+# `changelog: use: github-native`. PRs are grouped into sections by label, and the
 # label.yml workflow applies those labels automatically from the Conventional
 # Commit prefix in each PR title. Empty sections are omitted.
 changelog:
