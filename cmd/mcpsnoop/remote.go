@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"path"
@@ -9,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"unicode"
+
+	"github.com/spf13/cobra"
 
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 )
@@ -20,44 +21,42 @@ type remoteTunnelOptions struct {
 	RemoteXDGStateHome string
 }
 
-// runRemote prints the SSH reverse tunnel command for live remote viewing. It
+// newRemoteCmd prints the SSH reverse tunnel command for live remote viewing. It
 // deliberately does not exec SSH, so users keep full control over credentials,
 // host verification, jump hosts, and local SSH policy.
-func runRemote(args []string) int {
-	fs := flag.NewFlagSet("mcpsnoop remote", flag.ExitOnError)
+func newRemoteCmd() *cobra.Command {
 	var opts remoteTunnelOptions
-	fs.StringVar(&opts.RemoteHome, "remote-home", "", "remote home directory. The default is the Linux /home/<user> from user@host, so set this for macOS, root, or a custom home")
-	fs.StringVar(&opts.RemoteMCPSnoopHome, "remote-mcpsnoop-home", "", "remote MCPSNOOP_HOME directory, when it is set on the remote")
-	fs.StringVar(&opts.RemoteXDGStateHome, "remote-xdg-state-home", "", "remote XDG_STATE_HOME directory, when it is set on the remote")
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: mcpsnoop remote [--remote-home DIR | --remote-mcpsnoop-home DIR | --remote-xdg-state-home DIR] <user@host>\n\n")
-		fmt.Fprintf(os.Stderr, "Print the ssh -R command that forwards the remote mcpsnoop socket to this workstation.\n")
-		fmt.Fprintf(os.Stderr, "The remote must be Unix (Linux or macOS). SSH Unix-socket forwarding does not work to a Windows remote.\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
-	}
-	_ = fs.Parse(args)
-	if fs.NArg() != 1 {
-		fs.Usage()
-		return 2
-	}
-	opts.Target = fs.Arg(0)
+	cmd := &cobra.Command{
+		Use:   "remote [flags] <user@host>",
+		Short: "Print the ssh -R command that forwards the remote mcpsnoop socket here",
+		Long:  "Print the ssh -R command that forwards the remote mcpsnoop socket to this workstation. The remote must be Unix (Linux or macOS). SSH Unix-socket forwarding does not work to a Windows remote.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			opts.Target = args[0]
 
-	if msg, unsupported := remoteUnsupportedOS(runtime.GOOS); unsupported {
-		fmt.Fprintln(os.Stderr, "mcpsnoop remote:", msg)
-		return 2
-	}
+			if msg, unsupported := remoteUnsupportedOS(runtime.GOOS); unsupported {
+				fmt.Fprintln(os.Stderr, "mcpsnoop remote:", msg)
+				return exitCode(2)
+			}
 
-	cmd, assumedHome, err := remoteSSHCommand(opts)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mcpsnoop remote:", err)
-		return 2
+			sshCmd, assumedHome, err := remoteSSHCommand(opts)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "mcpsnoop remote:", err)
+				return exitCode(2)
+			}
+			if assumedHome != "" {
+				fmt.Fprintf(os.Stderr, "mcpsnoop remote: assuming remote home %s, pass --remote-home for macOS, root, or a custom home\n", assumedHome)
+			}
+			fmt.Println(sshCmd)
+			return nil
+		},
 	}
-	if assumedHome != "" {
-		fmt.Fprintf(os.Stderr, "mcpsnoop remote: assuming remote home %s, pass --remote-home for macOS, root, or a custom home\n", assumedHome)
-	}
-	fmt.Println(cmd)
-	return 0
+	f := cmd.Flags()
+	f.SortFlags = false
+	f.StringVar(&opts.RemoteHome, "remote-home", "", "remote home directory. The default is the Linux /home/<user> from user@host, so set this for macOS, root, or a custom home")
+	f.StringVar(&opts.RemoteMCPSnoopHome, "remote-mcpsnoop-home", "", "remote MCPSNOOP_HOME directory, when it is set on the remote")
+	f.StringVar(&opts.RemoteXDGStateHome, "remote-xdg-state-home", "", "remote XDG_STATE_HOME directory, when it is set on the remote")
+	return cmd
 }
 
 // remoteUnsupportedOS reports whether the workstation OS can originate the SSH

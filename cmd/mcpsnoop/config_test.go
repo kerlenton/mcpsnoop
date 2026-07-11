@@ -1,9 +1,10 @@
 package main
 
 import (
-	"flag"
 	"strings"
 	"testing"
+
+	"github.com/spf13/pflag"
 )
 
 func TestParseConfigEmpty(t *testing.T) {
@@ -111,7 +112,7 @@ func TestParseConfigMissingEquals(t *testing.T) {
 }
 
 func TestApplyConfigUsesConfigWhenFlagNotSet(t *testing.T) {
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 
 	label := fs.String("label", "", "")
 	traceFile := fs.String("trace-file", "", "")
@@ -160,7 +161,7 @@ func TestApplyConfigUsesConfigWhenFlagNotSet(t *testing.T) {
 }
 
 func TestApplyConfigExplicitFlagOverridesConfig(t *testing.T) {
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 
 	label := fs.String("label", "", "")
 	traceFile := fs.String("trace-file", "", "")
@@ -185,7 +186,7 @@ func TestApplyConfigExplicitFlagOverridesConfig(t *testing.T) {
 }
 
 func TestApplyConfigNoConfigFile(t *testing.T) {
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 
 	label := fs.String("label", "", "")
 	traceFile := fs.String("trace-file", "", "")
@@ -226,7 +227,7 @@ func TestApplyConfigNoConfigFile(t *testing.T) {
 }
 
 func TestApplyConfigExplicitFalseBoolOverridesConfig(t *testing.T) {
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 
 	label := fs.String("label", "", "")
 	traceFile := fs.String("trace-file", "", "")
@@ -251,7 +252,7 @@ func TestApplyConfigExplicitFalseBoolOverridesConfig(t *testing.T) {
 }
 
 func TestApplyConfigExplicitRedactKeyOverridesConfig(t *testing.T) {
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	label := fs.String("label", "", "")
 	traceFile := fs.String("trace-file", "", "")
 	noTrace := fs.Bool("no-trace", false, "")

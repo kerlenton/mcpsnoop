@@ -2,12 +2,13 @@ package main
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/spf13/pflag"
 )
 
 type config struct {
@@ -134,7 +135,7 @@ func parseConfig(r io.Reader) (config, error) {
 }
 
 func applyConfig(
-	fs *flag.FlagSet,
+	fs *pflag.FlagSet,
 	cfg config,
 	ok bool,
 	label, traceFile *string,
@@ -145,29 +146,23 @@ func applyConfig(
 		return
 	}
 
-	visited := map[string]bool{}
-
-	fs.Visit(func(f *flag.Flag) {
-		visited[f.Name] = true
-	})
-
-	if !visited["label"] {
+	if !fs.Changed("label") {
 		*label = cfg.Label
 	}
 
-	if traceFile != nil && !visited["trace-file"] {
+	if traceFile != nil && !fs.Changed("trace-file") {
 		*traceFile = cfg.TraceFile
 	}
 
-	if !visited["no-trace"] {
+	if !fs.Changed("no-trace") {
 		*noTrace = cfg.NoTrace
 	}
 
-	if !visited["redact-secrets"] {
+	if !fs.Changed("redact-secrets") {
 		*redactSecrets = cfg.RedactSecrets
 	}
 
-	if !visited["redact-key"] {
+	if !fs.Changed("redact-key") {
 		*redactKeys = redactKeysFlag(cfg.RedactKeys)
 	}
 }

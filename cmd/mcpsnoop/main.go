@@ -11,7 +11,7 @@ package main
 
 import (
 	"context"
-	"flag"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -20,9 +20,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
-	"slices"
 	"strings"
 	"syscall"
+
+	"github.com/spf13/cobra"
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
@@ -68,6 +69,8 @@ func (f *redactKeysFlag) Set(value string) error {
 	return nil
 }
 
+func (f *redactKeysFlag) Type() string { return "strings" }
+
 type redactValuesFlag []string
 
 func (f *redactValuesFlag) String() string {
@@ -89,6 +92,8 @@ func (f *redactValuesFlag) Set(value string) error {
 	return nil
 }
 
+func (f *redactValuesFlag) Type() string { return "regexp" }
+
 func redactConfig(commonSecrets bool, keys redactKeysFlag, values redactValuesFlag) proxy.RedactConfig {
 	return proxy.RedactConfig{
 		CommonSecrets: commonSecrets,
@@ -97,131 +102,109 @@ func redactConfig(commonSecrets bool, keys redactKeysFlag, values redactValuesFl
 	}
 }
 
-func main() {
-	// `mcpsnoop http ...` is a separate subcommand with its own flags.
-	if args := os.Args[1:]; len(args) > 0 && args[0] == "http" {
-		os.Exit(runHTTP(args[1:]))
-	}
-	// `mcpsnoop export` renders a captured JSONL session to json/html/text/otlp.
-	if args := os.Args[1:]; len(args) > 0 && args[0] == "export" {
-		os.Exit(runExport(args[1:]))
-	}
-	// `mcpsnoop open` opens a session id or file directly in the TUI.
-	if args := os.Args[1:]; len(args) > 0 && args[0] == "open" {
-		os.Exit(runOpen(args[1:]))
-	}
-	// `mcpsnoop remote` prints the SSH reverse tunnel command for live remote view.
-	if args := os.Args[1:]; len(args) > 0 && args[0] == "remote" {
-		os.Exit(runRemote(args[1:]))
-	}
-	// `mcpsnoop version` mirrors the --version flag (what most CLIs expect).
-	if args := os.Args[1:]; len(args) == 1 && (args[0] == "version" || args[0] == "-v") {
-		fmt.Println("mcpsnoop", appVersion())
-		return
-	}
-	// `mcpsnoop demo` plays a scripted session, no client or server to set up.
-	if args := os.Args[1:]; len(args) == 1 && args[0] == "demo" {
-		os.Exit(runDemo())
-	}
+func main() { os.Exit(execute(os.Args[1:])) }
 
-	fs := flag.NewFlagSet("mcpsnoop", flag.ExitOnError)
-	var redactKeys redactKeysFlag
-	var redactValues redactValuesFlag
+// runShimFn and runHubFn are indirected so tests can check how the root command
+// routes the wrapped command without spawning a server or launching the TUI.
+var (
+	runShimFn = runShim
+	runHubFn  = runHub
+)
+
+// exitCode carries a command's process exit code out through cobra's error
+// return so main can hand it to os.Exit unchanged.
+type exitCode int
+
+func (c exitCode) Error() string { return fmt.Sprintf("exit status %d", int(c)) }
+
+func codeOf(code int) error {
+	if code == 0 {
+		return nil
+	}
+	return exitCode(code)
+}
+
+func execute(args []string) int {
+	root := newRootCmd()
+	root.SetArgs(args)
+	root.SilenceErrors = true
+	err := root.Execute()
+	var code exitCode
+	if errors.As(err, &code) {
+		return int(code)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mcpsnoop:", err)
+		return 2
+	}
+	return 0
+}
+
+func newRootCmd() *cobra.Command {
 	var (
-		label         = fs.String("label", "", "server label shown in the TUI (default: command name)")
-		traceFile     = fs.String("trace-file", "", "override the JSONL trace path (default: well-known session log)")
-		noTrace       = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
-		redactSecrets = fs.Bool("redact-secrets", false, "scrub common secret JSON keys in trace payloads")
-		showVer       = fs.Bool("version", false, "print version and exit")
+		label, traceFile       string
+		noTrace, redactSecrets bool
+		redactKeys             redactKeysFlag
+		redactValues           redactValuesFlag
 	)
-	fs.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads (repeat or comma-separated)")
-	fs.Var(&redactValues, "redact-value", "regular expression to scrub inside observed string values, stderr, and non-JSON text (repeatable)")
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "mcpsnoop %s · Wireshark for MCP\n\n", appVersion())
-		fmt.Fprintf(os.Stderr, "Usage:\n")
-		cmds := []struct{ use, desc string }{
-			{"mcpsnoop [flags] -- <server command> [args...]", "run as a transparent stdio shim"},
-			{"mcpsnoop http --target <url> [--listen :7000]", "run as a transparent HTTP proxy"},
-			{"mcpsnoop export [-T json|html|text|otlp] [-o file|-] [session-id|log.jsonl]", ""},
-			{"mcpsnoop open [session-id|log.jsonl|-]", "open a session in the TUI"},
-			{"mcpsnoop remote [flags] <user@host>", "print the SSH tunnel command"},
-			{"mcpsnoop", "run the live TUI (collector)"},
-			{"mcpsnoop demo", "play a scripted session (no setup)"},
-			{"mcpsnoop version", "print the version"},
-			{"mcpsnoop help [command]", "show help for mcpsnoop or a command"},
-		}
-		col := 0
-		for _, c := range cmds {
-			if c.desc != "" && len(c.use) > col {
-				col = len(c.use)
+	cmd := &cobra.Command{
+		Use:   "mcpsnoop [flags] -- <server command> [args...]",
+		Short: "Wireshark for MCP, a transparent proxy and TUI for debugging MCP traffic",
+		Long: `mcpsnoop is a transparent proxy debugger for MCP traffic.
+
+Wrap your server with "mcpsnoop -- <server command>" and it forwards stdio byte
+for byte while tracing every JSON-RPC frame. Run "mcpsnoop" with no arguments to
+open the live TUI that collects traffic from every shim and past sessions.
+
+Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`,
+		Version:      appVersion(),
+		Args:         cobra.ArbitraryArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return codeOf(runHubFn())
 			}
-		}
-		for _, c := range cmds {
-			if c.desc == "" {
-				fmt.Fprintf(os.Stderr, "  %s\n", c.use)
-				continue
+			cfg, ok, err := loadConfig()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "mcpsnoop:", err)
+				return exitCode(1)
 			}
-			fmt.Fprintf(os.Stderr, "  %-*s   %s\n", col, c.use, c.desc)
-		}
-		fmt.Fprintf(os.Stderr, "\nFlags:\n")
-		fs.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nThe shim flags above can also be set in a .mcpsnoop.toml file in the\ncurrent directory. See the README for details.\n")
+			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys)
+			return codeOf(runShimFn(args, label, traceFile, noTrace, redactConfig(redactSecrets, redactKeys, redactValues)))
+		},
 	}
-	_ = fs.Parse(os.Args[1:])
+	flags := cmd.Flags()
+	flags.SortFlags = false
+	flags.StringVar(&label, "label", "", "server label shown in the TUI, defaults to the command name")
+	flags.StringVar(&traceFile, "trace-file", "", "override the JSONL trace path, defaults to the well-known session log")
+	flags.BoolVar(&noTrace, "no-trace", false, "disable tracing, pure passthrough")
+	flags.BoolVar(&redactSecrets, "redact-secrets", false, "scrub common secret JSON keys in trace payloads")
+	flags.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")
+	flags.Var(&redactValues, "redact-value", "regular expression to scrub inside observed string values, stderr, and non-JSON text, repeatable")
+	// Stop parsing at the first positional so the wrapped command keeps its flags.
+	flags.SetInterspersed(false)
 
-	if *showVer {
-		fmt.Println("mcpsnoop", appVersion())
-		return
+	cmd.SetVersionTemplate("mcpsnoop {{.Version}}\n")
+	cmd.AddCommand(newHTTPCmd(), newExportCmd(), newOpenCmd(), newRemoteCmd(), newDemoCmd(), newVersionCmd())
+	return cmd
+}
+
+func newDemoCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "demo",
+		Short: "Play a scripted session in the TUI, no setup",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return codeOf(runDemo()) },
 	}
+}
 
-	// `mcpsnoop help [command]` prints usage, so help is discoverable without -h
-	// and "help" is never mistaken for a server command to run. A `--` means the
-	// user is explicitly wrapping a command, so `mcpsnoop -- help` still runs it.
-	if rest := fs.Args(); len(rest) > 0 && rest[0] == "help" && !slices.Contains(os.Args[1:], "--") {
-		switch {
-		case len(rest) < 2:
-			fs.Usage()
-		case rest[1] == "http":
-			runHTTP([]string{"-h"})
-		case rest[1] == "export":
-			runExport([]string{"-h"})
-		case rest[1] == "open":
-			runOpen([]string{"-h"})
-		case rest[1] == "remote":
-			runRemote([]string{"-h"})
-		default:
-			fs.Usage()
-		}
-		return
+func newVersionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the version",
+		Args:  cobra.NoArgs,
+		Run:   func(cmd *cobra.Command, args []string) { fmt.Println("mcpsnoop", appVersion()) },
 	}
-
-	if command := fs.Args(); len(command) > 0 {
-		cfg, ok, err := loadConfig()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "mcpsnoop:", err)
-			os.Exit(1)
-		}
-
-		applyConfig(
-			fs,
-			cfg,
-			ok,
-			label,
-			traceFile,
-			noTrace,
-			redactSecrets,
-			&redactKeys,
-		)
-
-		os.Exit(runShim(
-			command,
-			*label,
-			*traceFile,
-			*noTrace,
-			redactConfig(*redactSecrets, redactKeys, redactValues),
-		))
-	}
-	os.Exit(runHub())
 }
 
 // runnerNames are launchers we skip when guessing a session label, so wrapping
@@ -272,60 +255,55 @@ func labelFor(command []string) string {
 	return pick
 }
 
-// runExport reads a persisted JSONL session and writes a portable export.
-func runExport(args []string) int {
-	fs := flag.NewFlagSet("mcpsnoop export", flag.ExitOnError)
-	var (
-		formatFlag = fs.String("T", "json", "output format: json, html, text, or otlp")
-		outFlag    = fs.String("o", "-", "output path, or - for stdout")
-	)
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: mcpsnoop export [-T json|html|text|otlp] [-o file|-] [session-id|log.jsonl]\n\n")
-		fmt.Fprintf(os.Stderr, "If no session is provided, the newest session log is exported.\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
-	}
-	_ = fs.Parse(args)
-	if fs.NArg() > 1 {
-		fmt.Fprintln(os.Stderr, "mcpsnoop export: expected at most one session id or log path")
-		return 2
-	}
-	format, err := exporter.ParseFormat(*formatFlag)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
-		return 2
-	}
-	var arg string
-	if fs.NArg() == 1 {
-		arg = fs.Arg(0)
-	}
-	inPath, err := exporter.ResolveSessionPath(arg)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
-		return 1
-	}
+// newExportCmd reads a persisted JSONL session and writes a portable export.
+func newExportCmd() *cobra.Command {
+	var formatFlag, outFlag string
+	cmd := &cobra.Command{
+		Use:   "export [session-id|log.jsonl]",
+		Short: "Render a captured session to json, html, text, or otlp",
+		Long:  "Render a captured session to a portable file. With no session, the newest session log is exported.",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			format, err := exporter.ParseFormat(formatFlag)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
+				return exitCode(2)
+			}
+			var arg string
+			if len(args) == 1 {
+				arg = args[0]
+			}
+			inPath, err := exporter.ResolveSessionPath(arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
+				return exitCode(1)
+			}
 
-	var out *os.File
-	if *outFlag == "-" {
-		out = os.Stdout
-	} else {
-		if err := os.MkdirAll(filepath.Dir(*outFlag), 0o700); err != nil {
-			fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
-			return 1
-		}
-		f, err := os.OpenFile(*outFlag, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
-			return 1
-		}
-		defer f.Close()
-		out = f
+			out := os.Stdout
+			if outFlag != "-" {
+				if err := os.MkdirAll(filepath.Dir(outFlag), 0o700); err != nil {
+					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
+					return exitCode(1)
+				}
+				f, err := os.OpenFile(outFlag, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
+					return exitCode(1)
+				}
+				defer f.Close()
+				out = f
+			}
+			if err := exporter.ExportFile(inPath, out, exporter.Options{Format: format}); err != nil {
+				fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
+				return exitCode(1)
+			}
+			return nil
+		},
 	}
-	if err := exporter.ExportFile(inPath, out, exporter.Options{Format: format}); err != nil {
-		fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
-		return 1
-	}
-	return 0
+	cmd.Flags().SortFlags = false
+	cmd.Flags().StringVarP(&formatFlag, "format", "T", "json", "output format, one of json, html, text, otlp")
+	cmd.Flags().StringVarP(&outFlag, "output", "o", "-", "output path, or - for stdout")
+	return cmd
 }
 
 // runShim runs the transparent stdio proxy. It writes the durable session log
@@ -383,69 +361,69 @@ func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.Redact
 	return sink
 }
 
-// runHTTP runs the transparent HTTP proxy subcommand.
-func runHTTP(args []string) int {
-	fs := flag.NewFlagSet("mcpsnoop http", flag.ExitOnError)
-	var redactKeys redactKeysFlag
-	var redactValues redactValuesFlag
+// newHTTPCmd runs the transparent HTTP proxy for a streamable-HTTP MCP server.
+func newHTTPCmd() *cobra.Command {
 	var (
-		target        = fs.String("target", "", "real MCP server endpoint, e.g. http://localhost:3000/mcp (required)")
-		listen        = fs.String("listen", ":7000", "address to listen on")
-		label         = fs.String("label", "", "server label shown in the TUI (default: target host)")
-		noTrace       = fs.Bool("no-trace", false, "disable tracing; pure passthrough")
-		redactSecrets = fs.Bool("redact-secrets", false, "scrub common secret JSON keys in trace payloads")
+		target, listen, label  string
+		noTrace, redactSecrets bool
+		redactKeys             redactKeysFlag
+		redactValues           redactValuesFlag
 	)
-	fs.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads (repeat or comma-separated)")
-	fs.Var(&redactValues, "redact-value", "regular expression to scrub inside observed string values, stderr, and non-JSON text (repeatable)")
-	_ = fs.Parse(args)
-	cfg, ok, err := loadConfig()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mcpsnoop http:", err)
-		return 1
-	}
+	cmd := &cobra.Command{
+		Use:   "http --target <url> [--listen :7000]",
+		Short: "Run as a transparent HTTP proxy for a streamable-HTTP MCP server",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, ok, err := loadConfig()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "mcpsnoop http:", err)
+				return exitCode(1)
+			}
+			applyConfig(cmd.Flags(), cfg, ok, &label, nil, &noTrace, &redactSecrets, &redactKeys)
+			if target == "" {
+				fmt.Fprintln(os.Stderr, "mcpsnoop http: --target is required")
+				return exitCode(2)
+			}
+			lbl := label
+			if lbl == "" {
+				if u, err := url.Parse(target); err == nil && u.Host != "" {
+					lbl = u.Host
+				} else {
+					lbl = "http"
+				}
+			}
+			sessionID := fmt.Sprintf("%s-%d", lbl, os.Getpid())
 
-	applyConfig(
-		fs,
-		cfg,
-		ok,
-		label,
-		nil,
-		noTrace,
-		redactSecrets,
-		&redactKeys,
-	)
-	if *target == "" {
-		fmt.Fprintln(os.Stderr, "mcpsnoop http: --target is required")
-		return 2
-	}
-	lbl := *label
-	if lbl == "" {
-		if u, err := url.Parse(*target); err == nil && u.Host != "" {
-			lbl = u.Host
-		} else {
-			lbl = "http"
-		}
-	}
-	sessionID := fmt.Sprintf("%s-%d", lbl, os.Getpid())
+			sink := traceSink(sessionID, "", noTrace, redactConfig(redactSecrets, redactKeys, redactValues))
+			defer sink.Close()
 
-	sink := traceSink(sessionID, "", *noTrace, redactConfig(*redactSecrets, redactKeys, redactValues))
-	defer sink.Close()
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	fmt.Fprintf(os.Stderr, "mcpsnoop: proxying %s → %s (session %s)\n", *listen, *target, sessionID)
-	if err := proxy.RunHTTP(ctx, proxy.HTTPConfig{
-		Listen:    *listen,
-		Target:    *target,
-		Label:     lbl,
-		SessionID: sessionID,
-		Sink:      sink,
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)
-		return 1
+			fmt.Fprintf(os.Stderr, "mcpsnoop: proxying %s → %s (session %s)\n", listen, target, sessionID)
+			if err := proxy.RunHTTP(ctx, proxy.HTTPConfig{
+				Listen:    listen,
+				Target:    target,
+				Label:     lbl,
+				SessionID: sessionID,
+				Sink:      sink,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)
+				return exitCode(1)
+			}
+			return nil
+		},
 	}
-	return 0
+	f := cmd.Flags()
+	f.SortFlags = false
+	f.StringVar(&target, "target", "", "real MCP server endpoint, for example http://localhost:3000/mcp (required)")
+	f.StringVar(&listen, "listen", ":7000", "address to listen on")
+	f.StringVar(&label, "label", "", "server label shown in the TUI, defaults to the target host")
+	f.BoolVar(&noTrace, "no-trace", false, "disable tracing, pure passthrough")
+	f.BoolVar(&redactSecrets, "redact-secrets", false, "scrub common secret JSON keys in trace payloads")
+	f.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")
+	f.Var(&redactValues, "redact-value", "regular expression to scrub inside observed string values, stderr, and non-JSON text, repeatable")
+	return cmd
 }
 
 // runHub runs the live TUI, collecting traffic from all shims and past sessions.
@@ -460,27 +438,25 @@ func runHub() int {
 	return 0
 }
 
-// runOpen opens a persisted JSONL session directly in the TUI.
-func runOpen(args []string) int {
-	fs := flag.NewFlagSet("mcpsnoop open", flag.ExitOnError)
-
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: mcpsnoop open [session-id|session.jsonl|-]\n\n")
-		fmt.Fprintf(os.Stderr, "If no session is provided, the newest session log is opened.\n")
-		fmt.Fprintf(os.Stderr, "Use - to read from stdin.\n")
+// newOpenCmd opens a persisted JSONL session directly in the TUI.
+func newOpenCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "open [session-id|session.jsonl|-]",
+		Short: "Open a captured session in the TUI, or - to read from stdin",
+		Long:  "Open a captured session in the TUI. With no session, the newest session log is opened. Use - to read from stdin.",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var arg string
+			if len(args) == 1 {
+				arg = args[0]
+			}
+			return codeOf(runOpen(arg))
+		},
 	}
+}
 
-	_ = fs.Parse(args)
-
-	if fs.NArg() > 1 {
-		fmt.Fprintln(os.Stderr, "mcpsnoop open: expected at most one session id or log path")
-		return 2
-	}
-
-	var arg string
-	if fs.NArg() == 1 {
-		arg = fs.Arg(0)
-	}
+// runOpen loads a session (id, path, or - for stdin) and shows it in the TUI.
+func runOpen(arg string) int {
 	inPath, usedStdin, err := resolveOpenSessionPath(arg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)

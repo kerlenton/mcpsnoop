@@ -35,6 +35,78 @@ func TestLabelFor(t *testing.T) {
 	}
 }
 
+// stubShim replaces the shim runner so routing tests can capture the wrapped
+// command without spawning a process, and returns a restore func.
+func stubShim(capture *[]string) func() {
+	orig := runShimFn
+	runShimFn = func(command []string, _, _ string, _ bool, _ proxy.RedactConfig) int {
+		*capture = command
+		return 0
+	}
+	return func() { runShimFn = orig }
+}
+
+func TestRootPassesWrappedCommandThroughUntouched(t *testing.T) {
+	var got []string
+	defer stubShim(&got)()
+
+	if code := execute([]string{"--label", "x", "--", "node", "server.js", "--inspect"}); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	want := []string{"node", "server.js", "--inspect"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("wrapped command = %v, want %v", got, want)
+	}
+}
+
+func TestRootDashDashDoesNotDispatchSubcommand(t *testing.T) {
+	// `mcpsnoop -- http` must run a server named http, not the http subcommand.
+	var got []string
+	defer stubShim(&got)()
+
+	if code := execute([]string{"--", "http"}); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !slices.Equal(got, []string{"http"}) {
+		t.Fatalf("wrapped command = %v, want [http]", got)
+	}
+}
+
+func TestRootWithoutDashDashStopsAtFirstPositional(t *testing.T) {
+	// Without `--`, the wrapped command's own flags must not be parsed by mcpsnoop.
+	var got []string
+	defer stubShim(&got)()
+
+	if code := execute([]string{"node", "server.js", "--inspect"}); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	want := []string{"node", "server.js", "--inspect"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("wrapped command = %v, want %v", got, want)
+	}
+}
+
+func TestRootNoArgsRunsHubNotShim(t *testing.T) {
+	hub := false
+	origHub := runHubFn
+	runHubFn = func() int { hub = true; return 0 }
+	defer func() { runHubFn = origHub }()
+
+	origShim := runShimFn
+	runShimFn = func([]string, string, string, bool, proxy.RedactConfig) int {
+		t.Fatal("shim ran for bare mcpsnoop, want hub")
+		return 0
+	}
+	defer func() { runShimFn = origShim }()
+
+	if code := execute(nil); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !hub {
+		t.Fatal("bare mcpsnoop did not launch the hub")
+	}
+}
+
 func TestRedactKeysFlagParsesCommaSeparatedAndRepeatedValues(t *testing.T) {
 	var flag redactKeysFlag
 	if err := flag.Set("token, api_key"); err != nil {
