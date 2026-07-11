@@ -57,6 +57,16 @@ mcpsnoop
 No flags, no socket paths, no startup order to remember. The shim and the UI find
 each other on their own, and the UI backfills past sessions from disk.
 
+For a streamable-HTTP server, run mcpsnoop as a reverse proxy.
+
+```bash
+mcpsnoop http --target http://localhost:3000/mcp --listen :7000
+```
+
+No server of your own? [Try it for real](docs/TRY_IT.md) against a published
+test server, driven by your own client. To inspect a session after it happened,
+see [review past sessions from logs](docs/POST_MORTEM.md).
+
 ### Config file
 
 If you reuse the same shim flags across a project, put them in a
@@ -77,16 +87,6 @@ The file is only looked up in the current working directory. Parent
 directories are not searched.
 
 Explicit command-line flags override values from the config file.
-
-For a streamable-HTTP server, run mcpsnoop as a reverse proxy.
-
-```bash
-mcpsnoop http --target http://localhost:3000/mcp --listen :7000
-```
-
-No server of your own? [Try it for real](docs/TRY_IT.md) against a published
-test server, driven by your own client. To inspect a session after it happened,
-see [review past sessions from logs](docs/POST_MORTEM.md).
 
 ## Commands
 
