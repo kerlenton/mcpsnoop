@@ -165,7 +165,7 @@ server is written in.
 | `j` / `k` | move | | `r` | replay a call |
 | `g` / `G` | top / bottom | | `c` | capabilities |
 | `ctrl-f` / `ctrl-b` | page | | `y` | copy |
-| `shift`+column | sort | | `e` | export |
+| `shift`+`<key>` | sort by column | | `e` | export |
 | `p` | pause | | `ctrl-d` | delete session |
 | `f` | follow | | `?` | help |
 
