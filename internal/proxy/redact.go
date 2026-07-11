@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+
+	"github.com/ohler55/ojg/jp"
 )
 
 const redactedValue = "[REDACTED]"
@@ -33,9 +35,33 @@ type RedactConfig struct {
 	// ValuePatterns are regular expressions whose matches inside observed
 	// string payloads should be replaced.
 	ValuePatterns []string
+
+	// Paths identify JSON values that should be replaced.
+	Paths []RedactPath
 }
 
-// Enabled reports whether cfg has any key-based redaction rule.
+// RedactPath is a validated JSONPath expression used for trace redaction.
+type RedactPath struct {
+	raw  string
+	expr jp.Expr
+}
+
+// ParseRedactPath validates path for use as a modifying JSONPath expression.
+func ParseRedactPath(path string) (RedactPath, error) {
+	path = strings.TrimSpace(path)
+	expr, err := jp.ParseString(path)
+	if err != nil {
+		return RedactPath{}, err
+	}
+	if _, err := expr.Modify(nil, func(value any) (any, bool) { return value, false }); err != nil {
+		return RedactPath{}, err
+	}
+	return RedactPath{raw: path, expr: expr}, nil
+}
+
+func (p RedactPath) String() string { return p.raw }
+
+// Enabled reports whether cfg has any redaction rule.
 func (cfg RedactConfig) Enabled() bool {
 	if cfg.CommonSecrets {
 		return true
@@ -50,13 +76,14 @@ func (cfg RedactConfig) Enabled() bool {
 			return true
 		}
 	}
-	return false
+	return len(cfg.Paths) > 0
 }
 
 // Redactor redacts JSON payloads according to a prepared config.
 type Redactor struct {
 	keys          map[string]struct{}
 	valuePatterns []*regexp.Regexp
+	paths         []RedactPath
 }
 
 // NewRedactor prepares cfg for repeated use.
@@ -66,7 +93,11 @@ func NewRedactor(cfg RedactConfig) Redactor {
 		addRedactKeys(keys, commonSecretRedactKeys)
 	}
 	addRedactKeys(keys, cfg.Keys)
-	return Redactor{keys: keys, valuePatterns: compileRedactPatterns(cfg.ValuePatterns)}
+	return Redactor{
+		keys:          keys,
+		valuePatterns: compileRedactPatterns(cfg.ValuePatterns),
+		paths:         cfg.Paths,
+	}
 }
 
 func addRedactKeys(keys map[string]struct{}, candidates []string) {
@@ -92,7 +123,9 @@ func compileRedactPatterns(candidates []string) []*regexp.Regexp {
 	return patterns
 }
 
-func (r Redactor) enabled() bool { return len(r.keys) > 0 || len(r.valuePatterns) > 0 }
+func (r Redactor) enabled() bool {
+	return len(r.keys) > 0 || len(r.valuePatterns) > 0 || len(r.paths) > 0
+}
 
 // RedactEnvelope returns a copy of env with matching JSON Raw fields scrubbed.
 func (r Redactor) RedactEnvelope(env Envelope) Envelope {
@@ -117,7 +150,11 @@ func (r Redactor) redactRaw(raw json.RawMessage) (json.RawMessage, bool) {
 	if err := dec.Decode(&v); err != nil {
 		return nil, false
 	}
-	if !r.redactValue(v) {
+	changed := r.redactPaths(&v)
+	if r.redactValue(v) {
+		changed = true
+	}
+	if !changed {
 		return nil, false
 	}
 	b, err := json.Marshal(v)
@@ -125,6 +162,23 @@ func (r Redactor) redactRaw(raw json.RawMessage) (json.RawMessage, bool) {
 		return nil, false
 	}
 	return b, true
+}
+
+func (r Redactor) redactPaths(value *any) bool {
+	changed := false
+	for _, path := range r.paths {
+		pathChanged := false
+		modified, err := path.expr.Modify(*value, func(any) (any, bool) {
+			pathChanged = true
+			return redactedValue, true
+		})
+		if err != nil {
+			continue
+		}
+		*value = modified
+		changed = changed || pathChanged
+	}
+	return changed
 }
 
 func (r Redactor) redactValue(v any) bool {

@@ -116,7 +116,7 @@ func TestRedactKeysFlagParsesCommaSeparatedAndRepeatedValues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := redactConfig(false, flag, nil)
+	cfg := redactConfig(false, flag, nil, nil)
 	if cfg.CommonSecrets {
 		t.Fatal("CommonSecrets = true, want false")
 	}
@@ -134,7 +134,7 @@ func TestRedactKeysFlagConfigEnablesCommonSecretsPreset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := redactConfig(true, flag, nil)
+	cfg := redactConfig(true, flag, nil, nil)
 	if !cfg.CommonSecrets {
 		t.Fatal("CommonSecrets = false, want true")
 	}
@@ -211,7 +211,7 @@ func TestRedactValuesFlagParsesRepeatedRegexes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := redactConfig(false, nil, flag)
+	cfg := redactConfig(false, nil, flag, nil)
 	if got, want := cfg.ValuePatterns, []string{`sk-[A-Za-z0-9]+`, `Bearer\s+\S+`}; !slices.Equal(got, want) {
 		t.Fatalf("ValuePatterns = %v, want %v", got, want)
 	}
@@ -224,6 +224,31 @@ func TestRedactValuesFlagRejectsInvalidRegex(t *testing.T) {
 	var flag redactValuesFlag
 	if err := flag.Set(`[`); err == nil {
 		t.Fatal("Set returned nil, want invalid regex error")
+	}
+}
+
+func TestRedactPathsFlagParsesRepeatedJSONPaths(t *testing.T) {
+	var flag redactPathsFlag
+	if err := flag.Set("$.params.arguments.password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := flag.Set("$.result.token"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := flag.String(), "$.params.arguments.password,$.result.token"; got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
+	}
+	cfg := redactConfig(false, nil, nil, flag)
+	if len(cfg.Paths) != 2 {
+		t.Fatalf("len(Paths) = %d, want 2", len(cfg.Paths))
+	}
+}
+
+func TestRedactPathsFlagRejectsInvalidJSONPath(t *testing.T) {
+	var flag redactPathsFlag
+	if err := flag.Set("$.["); err == nil {
+		t.Fatal("Set returned nil, want invalid JSONPath error")
 	}
 }
 
@@ -260,7 +285,11 @@ func TestTraceSinkRedactsFileAndLiveSocket(t *testing.T) {
 	}()
 
 	traceFile := filepath.Join(t.TempDir(), "session.jsonl")
-	sink := traceSink("s1", traceFile, false, proxy.RedactConfig{Keys: []string{"token"}})
+	path, err := proxy.ParseRedactPath("$.params.token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := traceSink("s1", traceFile, false, proxy.RedactConfig{Paths: []proxy.RedactPath{path}})
 	closed := false
 	t.Cleanup(func() {
 		if !closed {

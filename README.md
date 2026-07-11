@@ -77,6 +77,7 @@ label = "filesystem"
 trace-file = "trace.jsonl"
 redact-secrets = true
 redact-key = "token,authorization"
+redact-path = "$.params.arguments.password"
 no-trace = false
 ```
 
@@ -292,10 +293,13 @@ Captured frames can include prompts, tool arguments, credentials, and tool
 results. If payloads can carry secrets, opt in to redaction to scrub the
 observed trace copies while the proxied bytes still pass through unchanged.
 Key-based redaction replaces whole values under matching JSON object keys.
+Path-based redaction replaces only values selected by a JSONPath expression,
+which is useful when a common key name is sensitive in one location but safe in
+another. Repeat `--redact-path` to scrub more than one location.
 Value-based redaction applies regular expressions to observed string values,
-stderr text, and non-JSON text frames. Both modes are best effort. Regexes can
-miss secrets, overmatch harmless text, or fail to see transformed or encoded
-values.
+stderr text, and non-JSON text frames. All redaction modes are best effort.
+Regexes can miss secrets, overmatch harmless text, or fail to see transformed
+or encoded values.
 
 ```bash
 # built-in preset of common secret keys
@@ -303,6 +307,12 @@ mcpsnoop --redact-secrets -- node build/index.js
 
 # or name your own keys
 mcpsnoop --redact-key token,api_key,password -- node build/index.js
+
+# scrub one location without redacting every field named password
+mcpsnoop --redact-path '$.params.arguments.password' -- node build/index.js
+
+# wildcards scrub every matching array element
+mcpsnoop --redact-path '$.params.arguments.accounts[*].password' -- node build/index.js
 
 # scrub obvious token-shaped values outside known keys
 mcpsnoop --redact-value 'sk-[A-Za-z0-9]+' -- node build/index.js

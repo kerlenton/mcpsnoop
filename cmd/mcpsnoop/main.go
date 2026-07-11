@@ -94,11 +94,36 @@ func (f *redactValuesFlag) Set(value string) error {
 
 func (f *redactValuesFlag) Type() string { return "regexp" }
 
-func redactConfig(commonSecrets bool, keys redactKeysFlag, values redactValuesFlag) proxy.RedactConfig {
+type redactPathsFlag []proxy.RedactPath
+
+func (f *redactPathsFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	paths := make([]string, len(*f))
+	for i, path := range *f {
+		paths[i] = path.String()
+	}
+	return strings.Join(paths, ",")
+}
+
+func (f *redactPathsFlag) Set(value string) error {
+	path, err := proxy.ParseRedactPath(value)
+	if err != nil {
+		return fmt.Errorf("invalid redact JSONPath %q: %w", value, err)
+	}
+	*f = append(*f, path)
+	return nil
+}
+
+func (f *redactPathsFlag) Type() string { return "jsonpath" }
+
+func redactConfig(commonSecrets bool, keys redactKeysFlag, values redactValuesFlag, paths redactPathsFlag) proxy.RedactConfig {
 	return proxy.RedactConfig{
 		CommonSecrets: commonSecrets,
 		Keys:          []string(keys),
 		ValuePatterns: []string(values),
+		Paths:         []proxy.RedactPath(paths),
 	}
 }
 
@@ -146,6 +171,7 @@ func newRootCmd() *cobra.Command {
 		noTrace, redactSecrets bool
 		redactKeys             redactKeysFlag
 		redactValues           redactValuesFlag
+		redactPaths            redactPathsFlag
 	)
 	cmd := &cobra.Command{
 		Use:   "mcpsnoop [flags] -- <server command> [args...]",
@@ -169,8 +195,8 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 				fmt.Fprintln(os.Stderr, "mcpsnoop:", err)
 				return exitCode(1)
 			}
-			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys)
-			return codeOf(runShimFn(args, label, traceFile, noTrace, redactConfig(redactSecrets, redactKeys, redactValues)))
+			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys, &redactPaths)
+			return codeOf(runShimFn(args, label, traceFile, noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths)))
 		},
 	}
 	flags := cmd.Flags()
@@ -181,6 +207,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 	flags.BoolVar(&redactSecrets, "redact-secrets", false, "scrub common secret JSON keys in trace payloads")
 	flags.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")
 	flags.Var(&redactValues, "redact-value", "regular expression to scrub inside observed string values, stderr, and non-JSON text, repeatable")
+	flags.Var(&redactPaths, "redact-path", "JSONPath selecting values to scrub in saved trace payloads, repeatable")
 	// Stop parsing at the first positional so the wrapped command keeps its flags.
 	flags.SetInterspersed(false)
 
@@ -368,6 +395,7 @@ func newHTTPCmd() *cobra.Command {
 		noTrace, redactSecrets bool
 		redactKeys             redactKeysFlag
 		redactValues           redactValuesFlag
+		redactPaths            redactPathsFlag
 	)
 	cmd := &cobra.Command{
 		Use:   "http --target <url> [--listen :7000]",
@@ -379,7 +407,7 @@ func newHTTPCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "mcpsnoop http:", err)
 				return exitCode(1)
 			}
-			applyConfig(cmd.Flags(), cfg, ok, &label, nil, &noTrace, &redactSecrets, &redactKeys)
+			applyConfig(cmd.Flags(), cfg, ok, &label, nil, &noTrace, &redactSecrets, &redactKeys, &redactPaths)
 			if target == "" {
 				fmt.Fprintln(os.Stderr, "mcpsnoop http: --target is required")
 				return exitCode(2)
@@ -394,7 +422,7 @@ func newHTTPCmd() *cobra.Command {
 			}
 			sessionID := fmt.Sprintf("%s-%d", lbl, os.Getpid())
 
-			sink := traceSink(sessionID, "", noTrace, redactConfig(redactSecrets, redactKeys, redactValues))
+			sink := traceSink(sessionID, "", noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths))
 			defer sink.Close()
 
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -423,6 +451,7 @@ func newHTTPCmd() *cobra.Command {
 	f.BoolVar(&redactSecrets, "redact-secrets", false, "scrub common secret JSON keys in trace payloads")
 	f.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")
 	f.Var(&redactValues, "redact-value", "regular expression to scrub inside observed string values, stderr, and non-JSON text, repeatable")
+	f.Var(&redactPaths, "redact-path", "JSONPath selecting values to scrub in saved trace payloads, repeatable")
 	return cmd
 }
 

@@ -132,6 +132,104 @@ func TestRedactingSinkScrubsValuePatternMatches(t *testing.T) {
 	}
 }
 
+func TestRedactingSinkScrubsOnlyMatchingJSONPath(t *testing.T) {
+	path, err := ParseRedactPath("$.params.arguments.password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureSink{}
+	redacted := NewRedactingSink(sink, RedactConfig{Paths: []RedactPath{path}})
+	raw := json.RawMessage(`{
+		"params":{
+			"password":"keep-param",
+			"arguments":{"password":"secret","nested":{"password":"keep-nested"}}
+		},
+		"password":"keep-root"
+	}`)
+
+	redacted.Emit(Envelope{Raw: raw})
+
+	var obj map[string]any
+	if err := json.Unmarshal(sink.byDir("")[0].Raw, &obj); err != nil {
+		t.Fatal(err)
+	}
+	params := obj["params"].(map[string]any)
+	args := params["arguments"].(map[string]any)
+	if args["password"] != redactedValue {
+		t.Fatalf("arguments.password = %v, want redacted", args["password"])
+	}
+	if params["password"] != "keep-param" || obj["password"] != "keep-root" {
+		t.Fatalf("same-named fields outside the path were changed: %v", obj)
+	}
+	if got := args["nested"].(map[string]any)["password"]; got != "keep-nested" {
+		t.Fatalf("nested password = %v, want unchanged", got)
+	}
+}
+
+func TestRedactingSinkScrubsEveryJSONPathWildcardMatch(t *testing.T) {
+	path, err := ParseRedactPath("$.params.arguments.accounts[*].password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureSink{}
+	redacted := NewRedactingSink(sink, RedactConfig{Paths: []RedactPath{path}})
+
+	redacted.Emit(Envelope{Raw: json.RawMessage(`{
+		"params":{"arguments":{"accounts":[
+			{"password":"first","name":"one"},
+			{"password":"second","name":"two"}
+		]}}
+	}`)})
+
+	var obj map[string]any
+	if err := json.Unmarshal(sink.byDir("")[0].Raw, &obj); err != nil {
+		t.Fatal(err)
+	}
+	accounts := obj["params"].(map[string]any)["arguments"].(map[string]any)["accounts"].([]any)
+	for i, account := range accounts {
+		got := account.(map[string]any)
+		if got["password"] != redactedValue {
+			t.Fatalf("accounts[%d].password = %v, want redacted", i, got["password"])
+		}
+	}
+}
+
+func TestRedactingSinkLeavesRawBytesUnchangedWhenJSONPathDoesNotMatch(t *testing.T) {
+	path, err := ParseRedactPath("$.params.arguments.password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureSink{}
+	redacted := NewRedactingSink(sink, RedactConfig{Paths: []RedactPath{path}})
+	raw := json.RawMessage(`{ "params": { "arguments": { "token": "visible" } } }`)
+
+	redacted.Emit(Envelope{Raw: raw})
+
+	if got := sink.byDir("")[0].Raw; string(got) != string(raw) {
+		t.Fatalf("Raw = %s, want byte-for-byte unchanged %s", got, raw)
+	}
+}
+
+func TestParseRedactPathRejectsInvalidOrNonModifiableExpressions(t *testing.T) {
+	for _, path := range []string{"", "$.[", "$.."} {
+		t.Run(path, func(t *testing.T) {
+			if _, err := ParseRedactPath(path); err == nil {
+				t.Fatalf("ParseRedactPath(%q) returned nil error", path)
+			}
+		})
+	}
+}
+
+func TestRedactConfigEnabledByJSONPath(t *testing.T) {
+	path, err := ParseRedactPath("$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(RedactConfig{Paths: []RedactPath{path}}).Enabled() {
+		t.Fatal("RedactConfig.Enabled() = false, want true")
+	}
+}
+
 func TestRedactingSinkLeavesPayloadUnchangedWithoutConfig(t *testing.T) {
 	sink := &captureSink{}
 	redacted := NewRedactingSink(sink, RedactConfig{})

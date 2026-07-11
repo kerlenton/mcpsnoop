@@ -17,6 +17,7 @@ type config struct {
 	NoTrace       bool
 	RedactSecrets bool
 	RedactKeys    []string
+	RedactPaths   redactPathsFlag
 }
 
 func loadConfig() (config, bool, error) {
@@ -122,6 +123,11 @@ func parseConfig(r io.Reader) (config, error) {
 			}
 			cfg.RedactKeys = []string(keys)
 
+		case "redact-path":
+			if err := cfg.RedactPaths.Set(value); err != nil {
+				return config{}, err
+			}
+
 		default:
 			return config{}, fmt.Errorf("unknown config key %q", key)
 		}
@@ -141,6 +147,7 @@ func applyConfig(
 	label, traceFile *string,
 	noTrace, redactSecrets *bool,
 	redactKeys *redactKeysFlag,
+	redactPaths *redactPathsFlag,
 ) {
 	if !ok {
 		return
@@ -164,5 +171,9 @@ func applyConfig(
 
 	if !fs.Changed("redact-key") {
 		*redactKeys = redactKeysFlag(cfg.RedactKeys)
+	}
+
+	if !fs.Changed("redact-path") {
+		*redactPaths = cfg.RedactPaths
 	}
 }
