@@ -135,13 +135,9 @@ Prebuilt binaries for every platform are on the [Releases](https://github.com/ke
 
 ### Shell completions
 
-mcpsnoop ships completions for bash, zsh, fish, and PowerShell.
-
-```bash
-mcpsnoop completion zsh > "${fpath[1]}/_mcpsnoop"   # then restart your shell
-```
-
-Run `mcpsnoop completion --help` for the other shells and setup details.
+mcpsnoop ships completions for bash, zsh, fish, and PowerShell. Run
+`mcpsnoop completion <shell> --help` for the setup steps, which cover enabling
+completion and the install path for your OS.
 
 ## How it works
 
