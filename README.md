@@ -208,8 +208,8 @@ network hop, so mcpsnoop never needs a remote transport of its own.
 ### Live view
 
 Run the TUI on your workstation and forward the remote machine's mcpsnoop socket
-back to it. The socket path follows `MCPSNOOP_HOME`, `XDG_STATE_HOME`, and the
-remote home, defaulting to `~/.local/state/mcpsnoop/hub.sock`.
+back to it. The live tunnel uses SSH Unix-socket forwarding, so both ends must
+run Linux or macOS. On Windows, use the post-mortem log copy below.
 
 ```bash
 # on your workstation, start the TUI
@@ -225,11 +225,21 @@ mcpsnoop remote remote-user@remote-host
 mcpsnoop -- node build/index.js
 ```
 
-If the remote uses a non-default home or `MCPSNOOP_HOME`, pass it explicitly.
+The socket lives under the remote's state directory, resolved as `MCPSNOOP_HOME`,
+else `XDG_STATE_HOME/mcpsnoop`, else `~/.local/state/mcpsnoop`. By default mcpsnoop
+assumes the Linux home `/home/<user>` from your `user@host` and prints a reminder
+to stderr whenever it falls back to that guess. If the remote resolves elsewhere,
+name the one non-default piece.
 
 ```bash
+# a non-Linux or custom home, macOS is /Users/<user> and root is /root
 mcpsnoop remote --remote-home /Users/remote-user remote-user@remote-host
+
+# an explicit MCPSNOOP_HOME on the remote
 mcpsnoop remote --remote-mcpsnoop-home /srv/mcpsnoop remote-user@remote-host
+
+# an explicit XDG_STATE_HOME on the remote
+mcpsnoop remote --remote-xdg-state-home /var/lib/state remote-user@remote-host
 ```
 
 ### Post-mortem

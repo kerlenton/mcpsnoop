@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -138,20 +139,59 @@ func main() {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "mcpsnoop %s — Wireshark for MCP\n\n", appVersion())
 		fmt.Fprintf(os.Stderr, "Usage:\n")
-		fmt.Fprintf(os.Stderr, "  mcpsnoop [flags] -- <server command> [args...]   run as transparent stdio shim\n")
-		fmt.Fprintf(os.Stderr, "  mcpsnoop http --target <url> [--listen :7000]     run as transparent HTTP proxy\n")
-		fmt.Fprintf(os.Stderr, "  mcpsnoop export [-T json|html|text|otlp] [-o file|-] [session-id|log.jsonl]\n")
-		fmt.Fprintf(os.Stderr, "  mcpsnoop open [session-id|log.jsonl|-]            open a session in the TUI\n")
-		fmt.Fprintf(os.Stderr, "  mcpsnoop remote [flags] <user@host>              print SSH tunnel command\n")
-		fmt.Fprintf(os.Stderr, "  mcpsnoop                                          run the live TUI (collector)\n")
-		fmt.Fprintf(os.Stderr, "  mcpsnoop demo                                     play a scripted session (no setup)\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
+		cmds := []struct{ use, desc string }{
+			{"mcpsnoop [flags] -- <server command> [args...]", "run as a transparent stdio shim"},
+			{"mcpsnoop http --target <url> [--listen :7000]", "run as a transparent HTTP proxy"},
+			{"mcpsnoop export [-T json|html|text|otlp] [-o file|-] [session-id|log.jsonl]", ""},
+			{"mcpsnoop open [session-id|log.jsonl|-]", "open a session in the TUI"},
+			{"mcpsnoop remote [flags] <user@host>", "print the SSH tunnel command"},
+			{"mcpsnoop", "run the live TUI (collector)"},
+			{"mcpsnoop demo", "play a scripted session (no setup)"},
+			{"mcpsnoop version", "print the version"},
+			{"mcpsnoop help [command]", "show help for mcpsnoop or a command"},
+		}
+		col := 0
+		for _, c := range cmds {
+			if c.desc != "" && len(c.use) > col {
+				col = len(c.use)
+			}
+		}
+		for _, c := range cmds {
+			if c.desc == "" {
+				fmt.Fprintf(os.Stderr, "  %s\n", c.use)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "  %-*s   %s\n", col, c.use, c.desc)
+		}
+		fmt.Fprintf(os.Stderr, "\nFlags:\n")
 		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nThe shim flags above can also be set in a .mcpsnoop.toml file in the\ncurrent directory. See the README for details.\n")
 	}
 	_ = fs.Parse(os.Args[1:])
 
 	if *showVer {
 		fmt.Println("mcpsnoop", appVersion())
+		return
+	}
+
+	// `mcpsnoop help [command]` prints usage, so help is discoverable without -h
+	// and "help" is never mistaken for a server command to run. A `--` means the
+	// user is explicitly wrapping a command, so `mcpsnoop -- help` still runs it.
+	if rest := fs.Args(); len(rest) > 0 && rest[0] == "help" && !slices.Contains(os.Args[1:], "--") {
+		switch {
+		case len(rest) < 2:
+			fs.Usage()
+		case rest[1] == "http":
+			runHTTP([]string{"-h"})
+		case rest[1] == "export":
+			runExport([]string{"-h"})
+		case rest[1] == "open":
+			runOpen([]string{"-h"})
+		case rest[1] == "remote":
+			runRemote([]string{"-h"})
+		default:
+			fs.Usage()
+		}
 		return
 	}
 

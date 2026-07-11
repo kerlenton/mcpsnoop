@@ -7,7 +7,8 @@
 //
 //	$MCPSNOOP_HOME            explicit override (tests, power users)
 //	$XDG_STATE_HOME/mcpsnoop  XDG, when set
-//	~/.local/state/mcpsnoop   default (works on macOS and Linux alike)
+//	~/.local/state/mcpsnoop   default (macOS, Linux, and Windows alike, where
+//	                          ~ is the OS home from os.UserHomeDir)
 package paths
 
 import (

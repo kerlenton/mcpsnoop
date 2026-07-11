@@ -5,8 +5,8 @@ over from there.
 
 ```bash
 git switch main && git pull
-git tag v0.2.0
-git push origin v0.2.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 The [release workflow](.github/workflows/release.yml) runs GoReleaser. It

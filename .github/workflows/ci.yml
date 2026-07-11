@@ -28,3 +28,29 @@ jobs:
         run: go test -race ./...
       - name: build
         run: go build ./...
+
+  # Keep the Windows and macOS binaries honest: the release ships both, but the
+  # gate above only runs on Linux. macOS is Unix-like, so it runs the full race
+  # suite; Windows runs vet and build to catch the platform-tagged code (the
+  # console shim, socket paths) compiling, without depending on the exec-based
+  # test helpers being portable.
+  cross-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            check: go test -race ./...
+          - os: windows-latest
+            check: go vet ./...
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      - name: check
+        run: ${{ matrix.check }}
+      - name: build
+        run: go build ./...
