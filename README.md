@@ -17,8 +17,8 @@ between your AI client and your MCP servers, live in your terminal.
 
 The official [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
 connects as its own client, so it never sees what *your* client (Cursor, Claude
-Code, Codex) actually sends your server. A breakpoint only fires once a request
-arrives, so it can't show the call the model never made, or made with the wrong
+Code, Codex) actually sends your server. And anything that waits for a request
+to arrive can't show the call the model never made, or made with the wrong
 arguments. When a tool silently isn't called, capabilities don't line up, or a
 call just hangs, you're left digging through logs and guessing.
 
@@ -80,11 +80,10 @@ redact-key = "token,authorization"
 no-trace = false
 ```
 
-The config file supports `label`, `trace-file`, `redact-secrets`,
-`redact-key`, and `no-trace`.
+Those are all the keys it supports.
 
-The file is only looked up in the current working directory. Parent
-directories are not searched.
+The file is only looked up in the current working directory, not in parent
+directories.
 
 Explicit command-line flags override values from the config file.
 
@@ -150,8 +149,8 @@ completion and the install path for your OS.
 
 mcpsnoop is two roles in one binary. `mcpsnoop -- <server>` is the transparent
 shim your client spawns, forwarding bytes verbatim while shipping a copy of every
-frame to mcpsnoop with no arguments, the hub and TUI. They pair through a
-well-known socket and on-disk logs, so neither has to start first.
+frame to the hub. `mcpsnoop` with no arguments is that hub and its live TUI. They
+pair through a well-known socket and on-disk logs, so neither has to start first.
 
 Because it sits in the actual pipe, not off to the side like the Inspector, it
 sees exactly what your real client and server say to each other, whatever the

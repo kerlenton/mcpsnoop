@@ -1,8 +1,8 @@
 # Review past sessions from logs
 
-mcpsnoop keeps a per-session JSONL trace while it proxies MCP traffic. So you can
-open the TUI after a client and server session already happened and review the
-captured traffic straight from disk.
+mcpsnoop keeps a per-session JSONL trace while it proxies MCP traffic, so you can
+open the TUI after a client and server session has ended and review the captured
+traffic straight from disk.
 
 ## Where session logs live
 
