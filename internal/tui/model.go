@@ -602,7 +602,9 @@ func (m *Model) refresh() {
 	full := m.store.Timeline(m.streamSessionID)
 	m.total = len(full)
 	m.timeline = m.filterEvents(full)
-	m.streamSignals = countStreamSignals(m.timeline, m.store.SlowThreshold())
+	// Count signals over the whole session, not the filtered view, so a stream
+	// filter never hides the session's health in the footer.
+	m.streamSignals = countStreamSignals(full, m.store.SlowThreshold())
 	m.sortStream()
 	// A non-chronological sort means we're inspecting, not tailing.
 	if m.streamSort.col != "" && m.streamSort.col != "time" {

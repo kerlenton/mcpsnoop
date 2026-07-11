@@ -222,9 +222,59 @@ func TestStreamFooterShowsSignalCounts(t *testing.T) {
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
 	out := m.View()
-	for _, want := range []string{"10/10 frames", "1 err", "1 bad", "1 warn", "1 slow"} {
+	for _, want := range []string{"10 frames", "1 err", "1 bad", "1 warn", "1 slow"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stream footer missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestStreamFooterCountsSpanWholeSessionUnderFilter(t *testing.T) {
+	st := store.New(0)
+	seed(st) // id2 is a tools/call to echo that succeeds
+	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fail"}}`))
+	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"unknown tool"}}`))
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
+	total := len(m.timeline)
+
+	// Filter to the echo tool, which hides the failed call's frames from the view.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("tool:echo")})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.timeline) >= total {
+		t.Fatalf("filter should hide the error frames, got %d of %d", len(m.timeline), total)
+	}
+
+	out := m.View()
+	// Under a filter the footer shows the matched-over-total fraction.
+	if !strings.Contains(out, "2/6 frames") {
+		t.Fatalf("footer should show the filtered fraction\n%s", out)
+	}
+	// The error is filtered out of the view, but the footer still counts it,
+	// because session health should not depend on the active filter.
+	if !strings.Contains(out, "1 err") {
+		t.Fatalf("footer should count the error across the whole session under a filter\n%s", out)
+	}
+}
+
+func TestCountLabel(t *testing.T) {
+	cases := []struct {
+		shown, total int
+		noun, want   string
+	}{
+		{5, 5, "frame", "5 frames"},
+		{1, 1, "frame", "1 frame"},
+		{0, 0, "frame", "0 frames"},
+		{2, 6, "frame", "2/6 frames"},
+		{0, 1, "frame", "0/1 frame"},
+		{1, 1, "session", "1 session"},
+		{3, 10, "session", "3/10 sessions"},
+	}
+	for _, c := range cases {
+		if got := countLabel(c.shown, c.total, c.noun); got != c.want {
+			t.Errorf("countLabel(%d, %d, %q) = %q, want %q", c.shown, c.total, c.noun, got, c.want)
 		}
 	}
 }

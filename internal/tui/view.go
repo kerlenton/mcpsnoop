@@ -84,9 +84,9 @@ func (m Model) renderStatus() string {
 	if m.paused {
 		live = m.styles.slow.Render("⏸ paused")
 	}
-	count := fmt.Sprintf("%d/%d sessions", len(m.sessions), len(m.allSessions))
+	count := countLabel(len(m.sessions), len(m.allSessions), "session")
 	if m.view == viewStream {
-		count = fmt.Sprintf("%d/%d frames", len(m.timeline), m.total)
+		count = countLabel(len(m.timeline), m.total, "frame")
 	}
 	left := live + sep + m.styles.dim.Render(count)
 	if m.view == viewStream {
@@ -130,6 +130,20 @@ func (m Model) renderStatus() string {
 		gap = 1
 	}
 	return " " + left + strings.Repeat(" ", gap) + right + " "
+}
+
+// countLabel renders a plain total, or shown/total when a filter is hiding some
+// of the rows. The breadcrumb already carries the session total, so the footer
+// stays quiet until a filter actually narrows the view. noun is singular and is
+// pluralized to match the total.
+func countLabel(shown, total int, noun string) string {
+	if total != 1 {
+		noun += "s"
+	}
+	if shown != total {
+		return fmt.Sprintf("%d/%d %s", shown, total, noun)
+	}
+	return fmt.Sprintf("%d %s", total, noun)
 }
 
 func (m Model) sortFor() sortState {
