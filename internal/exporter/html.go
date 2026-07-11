@@ -115,6 +115,7 @@ const matchKind = (kind, v) => {
 const matchStatus = (ev, call, v) => {
   v = v.toLowerCase();
   if (v === "bad" || v === "invalid") return ev.kind === "invalid";
+  if (v === "warn" || v === "warning") return !!ev.warning;
   if (!call) return false;
   if (["err", "error", "fail", "failed"].includes(v)) return call.status === "error";
   if (v === "slow") return call.duration_ms != null && call.duration_ms > SLOW_MS;
