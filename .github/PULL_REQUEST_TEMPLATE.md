@@ -1,4 +1,4 @@
-<!-- A one-line summary of the change goes in the PR title (Conventional Commits: feat:/fix:/docs:/…). -->
+<!-- A one-line summary of the change goes in the PR title (Conventional Commits, like feat:/fix:/docs:/…). -->
 
 ## What and why
 

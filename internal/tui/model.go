@@ -33,7 +33,7 @@ func (s sortState) toggled(col string) sortState {
 	return sortState{col: col, desc: false}
 }
 
-// viewMode is the current table: you drill from the sessions list
+// viewMode is the current table, you drill from the sessions list
 // into a session's frame stream and back out with esc.
 type viewMode int
 
@@ -202,7 +202,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.handleInput(msg)
 	}
 
-	// Help screen: any of esc/?/q closes it.
+	// Help screen, any of esc/?/q closes it.
 	if m.showHelp {
 		if key.Matches(msg, m.keys.Back, m.keys.Help, m.keys.Quit) {
 			m.showHelp = false
@@ -210,7 +210,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Overlays scroll; "/" searches within them; n/N jump matches; esc/enter/q close.
+	// Overlays scroll. "/" searches within them, n/N jump matches, esc/enter/q close.
 	if m.overlay != overlayNone {
 		switch {
 		case key.Matches(msg, m.keys.Filter):
@@ -345,7 +345,7 @@ func (m Model) handleInput(msg tea.KeyMsg) (Model, tea.Cmd) {
 	}
 }
 
-// runCommand handles ":" commands: q/quit, sessions, stream, export, or a session name.
+// runCommand handles ":" commands, q/quit, sessions, stream, export, or a session name.
 func (m Model) runCommand(cmd string) (Model, tea.Cmd) {
 	fields := strings.Fields(cmd)
 	base := strings.ToLower(cmd)
@@ -420,7 +420,7 @@ func (m *Model) filterPlaceholder() string {
 	return "text · or tool:echo status:err dir:s2c kind:resp id:7"
 }
 
-// drillIn: in the sessions table, enter a session's stream; in the stream, open
+// drillIn. In the sessions table, enter a session's stream. In the stream, open
 // the frame inspector.
 func (m *Model) drillIn() {
 	if m.view == viewSessions {
@@ -434,8 +434,8 @@ func (m *Model) drillIn() {
 	}
 }
 
-// back pops one level: clear an active filter, then stream→sessions. At
-// the root it does NOTHING — quitting is deliberately only `:q`/Ctrl-C so you
+// back pops one level, clear an active filter, then stream→sessions. At
+// the root it does NOTHING, quitting is deliberately only `:q`/Ctrl-C so you
 // can't fall out of the UI by mashing esc/q.
 func (m *Model) back() tea.Cmd {
 	if m.view == viewStream {
@@ -709,8 +709,8 @@ func filterSessions(sessions []store.SessionHeader, query string) []store.Sessio
 	return out
 }
 
-// filterEvents applies the stream query: space-separated tokens, ANDed. A token
-// `key:value` matches a field (tool/method/id/dir/kind/status); a bare token is
+// filterEvents applies the stream query, space-separated tokens, ANDed. A token
+// `key:value` matches a field (tool/method/id/dir/kind/status), a bare token is
 // a case-insensitive substring over method/tool/id/stderr/raw JSON.
 func (m *Model) filterEvents(events []store.EventView) []store.EventView {
 	toks := strings.Fields(m.query)
@@ -844,7 +844,7 @@ func (m *Model) setOverlayBody(content string) {
 }
 
 // copyCurrent copies the most relevant thing for the current context to the
-// system clipboard: the frame JSON (inspector / stream), the open panel, or the
+// system clipboard, the frame JSON (inspector / stream), the open panel, or the
 // session log path (sessions list).
 func (m *Model) copyCurrent() {
 	var text, label string

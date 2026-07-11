@@ -105,7 +105,7 @@ func TestWriteFormats(t *testing.T) {
 }
 
 // TestResolveSessionPath covers every branch of the resolver that both `export`
-// and `open` share: a session id, the newest saved log, and an existing path
+// and `open` share, a session id, the newest saved log, and an existing path
 // outside the sessions directory that must pass through unchanged.
 func TestResolveSessionPath(t *testing.T) {
 	t.Setenv("MCPSNOOP_HOME", t.TempDir())

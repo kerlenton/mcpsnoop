@@ -31,7 +31,7 @@ func replayCmd(command []string, cwd, method string, params json.RawMessage) tea
 // replayContent renders the replay outcome for the overlay.
 func (m Model) replayContent(msg replayDoneMsg) string {
 	var b strings.Builder
-	b.WriteString(m.styles.panelTitle.Render("REPLAY — "+msg.res.Method) + "\n\n")
+	b.WriteString(m.styles.panelTitle.Render("REPLAY · "+msg.res.Method) + "\n\n")
 
 	if msg.err != nil {
 		b.WriteString(m.styles.respErr.Render("failed: "+msg.err.Error()) + "\n")

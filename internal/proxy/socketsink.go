@@ -35,10 +35,10 @@ func (m *MultiSink) Close() error {
 }
 
 // SocketSink streams envelopes to the hub over a unix socket. It is best-effort
-// by design: if the hub isn't running yet it keeps retrying in the background
-// (the client spawns the shim whenever it likes; the user opens the TUI whenever
-// they like — neither must start first), and it drops frames rather than ever
-// blocking the proxied stream. Durability is the file sink's job; this one only
+// by design. If the hub isn't running yet it keeps retrying in the background
+// (the client spawns the shim whenever it likes, the user opens the TUI whenever
+// they like, neither must start first), and it drops frames rather than ever
+// blocking the proxied stream. Durability is the file sink's job. This one only
 // powers the live view.
 type SocketSink struct {
 	addr    string
@@ -100,7 +100,7 @@ func (s *SocketSink) pump(ctx context.Context, conn net.Conn) {
 				return
 			}
 			if err := enc.Encode(env); err != nil {
-				return // hub went away; outer loop will redial
+				return // hub went away, outer loop will redial
 			}
 		}
 	}
@@ -126,7 +126,7 @@ func (s *SocketSink) Close() error {
 	return nil
 }
 
-// sleep waits for d or until ctx is cancelled; returns false if cancelled.
+// sleep waits for d or until ctx is cancelled. Returns false if cancelled.
 func sleep(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()

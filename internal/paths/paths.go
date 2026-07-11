@@ -1,9 +1,9 @@
 // Package paths resolves the well-known locations mcpsnoop uses so the shim and
-// the hub agree without any flags or manual socket wiring. This is deliberate:
-// the whole UX win over prior art is "wrap your server, then just run mcpsnoop" —
+// the hub agree without any flags or manual socket wiring. This is deliberate.
+// The whole UX win over prior art is "wrap your server, then just run mcpsnoop",
 // no --socket, no --name, no ordering dance.
 //
-// Resolution order for the base directory:
+// Resolution order for the base directory, highest priority first.
 //
 //	$MCPSNOOP_HOME            explicit override (tests, power users)
 //	$XDG_STATE_HOME/mcpsnoop  XDG, when set

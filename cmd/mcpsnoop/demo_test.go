@@ -11,7 +11,7 @@ import (
 
 // TestDemoScriptValidJSON guards against a typo in any scripted frame. Frames
 // marked invalid are the deliberate stdout-corruption case and must not parse as
-// JSON-RPC; every other frame must be valid JSON.
+// JSON-RPC. Every other frame must be valid JSON.
 func TestDemoScriptValidJSON(t *testing.T) {
 	for i, f := range demoScript() {
 		if f.raw == "" {
@@ -29,7 +29,7 @@ func TestDemoScriptValidJSON(t *testing.T) {
 	}
 }
 
-// TestDemoScriptIngests checks the scripted session folds into a coherent model:
+// TestDemoScriptIngests checks the scripted session folds into a coherent model,
 // one session, a negotiated handshake, and the flaky tool flagged as an error.
 func TestDemoScriptIngests(t *testing.T) {
 	st := store.New(0)

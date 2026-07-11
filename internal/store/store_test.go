@@ -62,7 +62,7 @@ func TestDuplicateResponseDoesNotDoubleCountPending(t *testing.T) {
 	t0 := time.Now()
 
 	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"echo"}`))
-	// First response completes the call; pending returns to zero.
+	// First response completes the call, pending returns to zero.
 	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[]}`))
 	// A duplicate or late second response for the same id must not recount.
 	ev := s.Ingest(resp(3, t0.Add(2*time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[]}`))
@@ -200,7 +200,7 @@ func TestInvalidProtocolFrame(t *testing.T) {
 	t0 := time.Now()
 
 	// A stray log line printed to stdout is not JSON, so the shim carries it as
-	// text; it is still flagged as invalid rather than shown as a frame.
+	// text, it is still flagged as invalid rather than shown as a frame.
 	ev := s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: t0,
 		Direction: proxy.ServerToClient, Text: "Listening on port 3000"})
 	if ev.Kind != EventInvalid {
@@ -246,7 +246,7 @@ func TestValidationWarnings(t *testing.T) {
 	}
 }
 
-// TestConcurrentIngest exercises the lock under -race: many goroutines ingest
+// TestConcurrentIngest exercises the lock under -race, many goroutines ingest
 // while another reads snapshots.
 func TestConcurrentIngest(t *testing.T) {
 	s := New(0)

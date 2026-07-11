@@ -15,6 +15,6 @@ labels: bug
 <!-- If a frame looks wrong, press `y` in the TUI to copy its JSON and paste it here. -->
 
 **Environment**
-- mcpsnoop version (`mcpsnoop version`):
-- OS / arch:
-- Client (Claude Desktop, Cursor, Claude Code, …):
+- mcpsnoop version (`mcpsnoop version`)
+- OS / arch
+- Client (Claude Desktop, Cursor, Claude Code, …)

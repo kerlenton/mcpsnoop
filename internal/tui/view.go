@@ -58,7 +58,7 @@ func (m Model) View() string {
 	}
 	rule := m.styles.rule.Render(strings.Repeat("─", max(m.width, 1)))
 	body = padLines(body, bodyH) // fill the region so the rule+status sit at the bottom
-	// header · rule · breadcrumb · body · rule · status — horizontal rules frame
+	// header · rule · breadcrumb · body · rule · status, horizontal rules frame
 	// the content region and give the layout structure.
 	return strings.Join([]string{header, rule, topbar, "", body, rule, m.renderStatus()}, "\n")
 }
@@ -76,7 +76,7 @@ func (m Model) bodyHeight() int {
 	return max(m.height-headerH-5, 1) // header + 2 rules + breadcrumb + blank + status
 }
 
-// renderStatus is the bottom status bar: counts on the left, mode flags on
+// renderStatus is the bottom status bar, counts on the left, mode flags on
 // the right, across a full-width subtle band.
 func (m Model) renderStatus() string {
 	sep := m.styles.dim.Render("  ·  ")
@@ -225,7 +225,7 @@ func (m Model) activeFilter() string {
 // ---- sessions table -------------------------------------------------------
 
 func (m Model) renderSessionsTable(w, h int) string {
-	// Empty state: no table header (it'd be an orphan), just a centered card.
+	// Empty state, no table header (it'd be an orphan), just a centered card.
 	if len(m.sessions) == 0 {
 		card := m.onboardingCard()
 		if m.sessionQuery != "" {
@@ -335,7 +335,7 @@ func (m Model) streamCells(e store.EventView) streamCell {
 		}
 		if e.Call != nil {
 			c.detail = compactJSON(e.Call.Params)
-			// Surface in-flight (possibly hung) calls: PENDING + live elapsed.
+			// Surface in-flight (possibly hung) calls, PENDING + live elapsed.
 			if e.Call.State == store.Pending {
 				c.status = "PENDING"
 				c.dur = e.Call.Duration().Round(time.Millisecond).String()
@@ -486,7 +486,7 @@ func (m Model) renderHelp(h int) string {
 			{"tool:echo", "by tool name"},
 			{"status:err|warn|slow|ok|pending|bad", "by outcome"},
 			{"kind:req|resp|notify|stderr|invalid", "by message type"},
-			{"dir:c2s|s2c", "by direction (who sent it — orthogonal to kind)"},
+			{"dir:c2s|s2c", "by direction (who sent it, orthogonal to kind)"},
 			{"method:tools/call  id:7", "by method / id (tokens are ANDed)"},
 		}},
 		{"FRAME ACTIONS (stream)", [][2]string{
@@ -510,7 +510,7 @@ func (m Model) renderHelp(h int) string {
 		}},
 	}
 	var b strings.Builder
-	b.WriteString(m.styles.panelTitle.Render(" mcpsnoop — keybindings") + "\n\n")
+	b.WriteString(m.styles.panelTitle.Render(" mcpsnoop · keybindings") + "\n\n")
 	for _, g := range groups {
 		// Align descriptions within each group, sized to its widest key.
 		keyW := 0
@@ -569,7 +569,7 @@ func (m Model) capsContent() string {
 		label = m.sessions[m.selSession].Label
 	}
 	var b strings.Builder
-	b.WriteString(m.styles.panelTitle.Render(" CAPABILITIES — "+label) + "\n")
+	b.WriteString(m.styles.panelTitle.Render(" CAPABILITIES · "+label) + "\n")
 	caps, ok := m.store.Capabilities(sid)
 	if !ok {
 		b.WriteString(m.styles.dim.Render(" no handshake observed yet for this session"))
@@ -661,7 +661,7 @@ func sortMark(st sortState, col string) string {
 	return " ▲"
 }
 
-// onboardingCard is the first-run empty state: a centered card telling the user
+// onboardingCard is the first-run empty state, a centered card telling the user
 // how to attach mcpsnoop. Rendered via lipgloss.Place by the caller.
 func (m Model) onboardingCard() string {
 	num := m.styles.hintKey.Render
@@ -683,7 +683,7 @@ func (m Model) onboardingCard() string {
 	)
 }
 
-// frameText is the copy-to-clipboard payload for a frame: pretty JSON, or the
+// frameText is the copy-to-clipboard payload for a frame, pretty JSON, or the
 // raw stderr line.
 func frameText(e store.EventView) string {
 	if len(e.Raw) > 0 {

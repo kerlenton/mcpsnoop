@@ -49,8 +49,8 @@ func runDemo() int {
 // the session animates into the TUI at a natural pace.
 type demoFrame struct {
 	dir     proxy.Direction
-	raw     string // stdout frame, JSON-RPC or a stray non-protocol line; empty for a stderr line
-	text    string // stderr line; empty for JSON-RPC frames
+	raw     string // stdout frame, JSON-RPC or a stray non-protocol line, empty for a stderr line
+	text    string // stderr line, empty for JSON-RPC frames
 	invalid bool   // raw is deliberately not JSON-RPC, to show the invalid flag
 	pause   time.Duration
 }
@@ -64,7 +64,7 @@ func playDemo(ctx context.Context, socket string) {
 	session := fmt.Sprintf("demo-%d", os.Getpid())
 	var seq uint64
 
-	// Give the hub a moment to bind; the socket sink also retries on its own.
+	// Give the hub a moment to bind. The socket sink also retries on its own.
 	if !sleepCtx(ctx, 700*time.Millisecond) {
 		return
 	}
@@ -83,7 +83,7 @@ func playDemo(ctx context.Context, socket string) {
 
 // demoEnvelope builds the observed envelope for one scripted frame. It routes a
 // stray non-JSON line to Text exactly as the real shim does, so the frame
-// survives the sink encoder; a json.RawMessage cannot carry non-JSON bytes.
+// survives the sink encoder. A json.RawMessage cannot carry non-JSON bytes.
 func demoEnvelope(session string, seq uint64, f demoFrame) proxy.Envelope {
 	env := proxy.Envelope{
 		SessionID:   session,
@@ -104,7 +104,7 @@ func demoEnvelope(session string, seq uint64, f demoFrame) proxy.Envelope {
 	return env
 }
 
-// demoScript is the scripted session: a handshake, a few tool calls, a stray
+// demoScript is the scripted session, a handshake, a few tool calls, a stray
 // stdout line (flagged as invalid), a slow call with progress, a large payload
 // (shows the inspector's wrapping), and a tool-level error (result.isError).
 // Pauses between the slow call and its response push it past the slow threshold,
@@ -137,7 +137,7 @@ func demoScript() []demoFrame {
 	}
 }
 
-// sleepCtx waits for d or until ctx is cancelled; returns false if cancelled.
+// sleepCtx waits for d or until ctx is cancelled. Returns false if cancelled.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
 		return ctx.Err() == nil

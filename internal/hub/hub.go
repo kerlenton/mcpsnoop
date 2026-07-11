@@ -3,8 +3,8 @@
 // socket, and it backfills history from the on-disk session logs so launching
 // the TUI after traffic has happened still shows everything.
 //
-// Live (socket) and historical (file) sources can overlap — e.g. after a hub
-// restart a shim reconnects while its file already holds the same frames. A
+// Live (socket) and historical (file) sources can overlap, for example after a
+// hub restart a shim reconnects while its file already holds the same frames. A
 // single per-session high-water-mark on the monotonic Seq deduplicates all
 // sources uniformly, so the rest of the system never sees a frame twice.
 package hub
@@ -58,7 +58,7 @@ func (h *Hub) Run(ctx context.Context) error {
 	defer ln.Close()
 	defer os.Remove(h.socketPath)
 
-	// Backfill BEFORE accepting: this primes the per-session high-water marks
+	// Backfill BEFORE accepting, this primes the per-session high-water marks
 	// from disk so a live shim that reconnects (e.g. after a hub restart) can't
 	// race its high-Seq frames ahead of the file's history and cause the gate to
 	// drop it. Shims keep retrying their connection until we accept.
@@ -98,7 +98,7 @@ func (h *Hub) listen() (net.Listener, error) {
 			c.Close()
 			return nil, ErrHubRunning
 		}
-		_ = os.Remove(h.socketPath) // stale; reclaim
+		_ = os.Remove(h.socketPath) // stale, reclaim
 	}
 	return net.Listen("unix", h.socketPath)
 }
@@ -113,7 +113,7 @@ func (h *Hub) handleConn(conn net.Conn) {
 			if err == io.EOF || errors.Is(err, net.ErrClosed) {
 				return
 			}
-			return // malformed stream; drop the connection
+			return // malformed stream, drop the connection
 		}
 		h.emit(env)
 	}

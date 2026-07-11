@@ -96,13 +96,13 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte)) http.Handle
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-				// Stream: tap SSE data frames as bytes flow to the client.
+				// Streaming case, tap SSE data frames as bytes flow to the client.
 				resp.Body = newSSETap(resp.Body, func(data []byte) {
 					emitFrames(emit, ServerToClient, data)
 				})
 				return nil
 			}
-			// Plain JSON: buffer, observe, restore.
+			// Plain JSON case, buffer, observe, restore.
 			body, err := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			if err != nil {

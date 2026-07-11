@@ -31,7 +31,7 @@ type SessionMeta struct {
 }
 
 // Envelope wraps a single observed event for transport to the hub and for the
-// on-disk session log. The shim stays dumb: it never correlates or interprets,
+// on-disk session log. The shim stays dumb, it never correlates or interprets,
 // it just timestamps and labels. All correlation/timing lives in the hub.
 type Envelope struct {
 	SessionID   string    `json:"session_id"`
@@ -54,7 +54,7 @@ type RPCError struct {
 }
 
 // RPCMessage is a best-effort peek at a JSON-RPC frame. We never re-marshal it
-// onto the wire — the raw bytes are forwarded verbatim — this is only used by
+// onto the wire (the raw bytes are forwarded verbatim). This is only used by
 // the hub to classify and correlate.
 type RPCMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -66,7 +66,7 @@ type RPCMessage struct {
 }
 
 // IsRequest reports whether the message is a request or notification (has a
-// method). A request has an id; a notification does not.
+// method). A request has an id, a notification does not.
 func (m *RPCMessage) IsRequest() bool { return m.Method != "" }
 
 // IsNotification reports whether the message is a notification (method, no id).
@@ -78,7 +78,7 @@ func (m *RPCMessage) IsResponse() bool {
 }
 
 // ParseRPC attempts to decode raw bytes as a JSON-RPC message. ok is false when
-// the bytes are not a JSON object we recognise; callers must still forward the
+// the bytes are not a JSON object we recognise. Callers must still forward the
 // raw bytes regardless.
 func ParseRPC(raw []byte) (msg RPCMessage, ok bool) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
@@ -89,7 +89,7 @@ func ParseRPC(raw []byte) (msg RPCMessage, ok bool) {
 
 // splitObserved routes an observed protocol line into an envelope's Raw or Text
 // field. Valid JSON goes to Raw, so it can be parsed, redacted, and replayed.
-// Anything else goes to Text: json.RawMessage cannot round-trip non-JSON bytes
+// Anything else goes to Text, since json.RawMessage cannot round-trip non-JSON bytes
 // through the envelope encoder (the encoder validates it and the frame would be
 // silently dropped), and a non-JSON line on the protocol channel is exactly the
 // stdout-corruption case the store flags as invalid.

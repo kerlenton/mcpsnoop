@@ -12,11 +12,11 @@ import (
 	"time"
 )
 
-// demoBin is a tiny stdio MCP server built once for these tests — self-contained
+// demoBin is a tiny stdio MCP server built once for these tests, self-contained
 // so the suite has no dependency on any examples/ directory.
 var demoBin string
 
-// tinyServer is a minimal MCP stdio server: initialize, and tools/call where
+// tinyServer is a minimal MCP stdio server, handling initialize, and tools/call where
 // "echo" succeeds (after a short delay) and anything else is a JSON-RPC error.
 const tinyServer = `package main
 

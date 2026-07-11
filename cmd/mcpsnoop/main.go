@@ -1,11 +1,11 @@
 // Command mcpsnoop is a transparent proxy debugger for MCP traffic.
 //
-// Two modes, one binary:
+// Two modes in one binary.
 //
 //	mcpsnoop -- <server command>   run as a transparent stdio shim (the client
-//	                              spawns this; it proxies stdio to the real
+//	                              spawns this, and it proxies stdio to the real
 //	                              server and traces every JSON-RPC frame).
-//	mcpsnoop                       run the live TUI in your terminal: collect
+//	mcpsnoop                       run the live TUI in your terminal, collecting
 //	                              traffic from all shims and past sessions.
 package main
 
@@ -34,9 +34,9 @@ import (
 // version is overridden at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
-// appVersion resolves the version to report: the value baked in by -ldflags
-// (release builds and `make build`), else the module version embedded by
-// `go install ...@vX`, else "dev" for a plain local build.
+// appVersion resolves the version to report. It uses the value baked in by
+// -ldflags (release builds and `make build`), else the module version embedded
+// by `go install ...@vX`, else "dev" for a plain local build.
 func appVersion() string {
 	if version != "dev" {
 		return version
@@ -137,7 +137,7 @@ func main() {
 	fs.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads (repeat or comma-separated)")
 	fs.Var(&redactValues, "redact-value", "regular expression to scrub inside observed string values, stderr, and non-JSON text (repeatable)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "mcpsnoop %s — Wireshark for MCP\n\n", appVersion())
+		fmt.Fprintf(os.Stderr, "mcpsnoop %s · Wireshark for MCP\n\n", appVersion())
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		cmds := []struct{ use, desc string }{
 			{"mcpsnoop [flags] -- <server command> [args...]", "run as a transparent stdio shim"},
@@ -232,7 +232,7 @@ var runnerNames = map[string]bool{
 	"uvx": true, "pipx": true, "sh": true, "bash": true, "env": true, "go": true,
 }
 
-// labelFor derives a friendly session name from the wrapped command: it skips
+// labelFor derives a friendly session name from the wrapped command. It skips
 // runners/flags and prefers a token that looks like a server (contains "server"
 // or "mcp", an @scope/name, or a script file), falling back to the first real
 // argument or the command itself.
@@ -329,7 +329,7 @@ func runExport(args []string) int {
 }
 
 // runShim runs the transparent stdio proxy. It writes the durable session log
-// AND streams live to the hub; neither has to be running first.
+// AND streams live to the hub. Neither has to be running first.
 func runShim(command []string, label, traceFile string, noTrace bool, redaction proxy.RedactConfig) int {
 	if label == "" {
 		label = labelFor(command)
@@ -360,7 +360,7 @@ func runShim(command []string, label, traceFile string, noTrace bool, redaction 
 	return code
 }
 
-// traceSink builds the shared sink: a durable per-session JSONL log plus a
+// traceSink builds the shared sink, a durable per-session JSONL log plus a
 // best-effort live stream to the hub. Returns a no-op sink when disabled.
 func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.RedactConfig) proxy.Sink {
 	if noTrace {

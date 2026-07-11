@@ -38,7 +38,7 @@ type StdioConfig struct {
 }
 
 // maxFrameBytes caps a single JSON-RPC line we will buffer while peeking. The
-// data path itself is unbounded (we stream in chunks); this only bounds the
+// data path itself is unbounded (we stream in chunks), this only bounds the
 // copy we hand to the Sink so a pathological line can't blow up memory.
 const maxFrameBytes = 16 << 20 // 16 MiB
 
@@ -46,7 +46,7 @@ const maxFrameBytes = 16 << 20 // 16 MiB
 // client (our stdin/stdout) and the server, observing every newline-delimited
 // JSON-RPC frame. It returns the server's exit code and any startup error.
 //
-// Transparency contract: bytes are forwarded verbatim and ordering is preserved;
+// Transparency contract. Bytes are forwarded verbatim and ordering is preserved,
 // observation is best-effort and never blocks or alters the data path.
 func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 	if len(cfg.Command) == 0 {
@@ -91,7 +91,7 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 			Transport:   "stdio",
 		}
 		if raw != nil {
-			// Copy: the underlying buffer is reused by the next read.
+			// Copy, because the underlying buffer is reused by the next read.
 			env.Raw = append([]byte(nil), raw...)
 		}
 		env.Text = text
@@ -100,7 +100,7 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 
 	// observe routes a framed protocol line to Raw when it is valid JSON, or to
 	// Text otherwise, so a stray non-JSON line still reaches the hub instead of
-	// failing to encode. Forwarding is unaffected: the bytes are already written
+	// failing to encode. Forwarding is unaffected, the bytes are already written
 	// downstream before observe runs.
 	observe := func(dir Direction, line []byte) {
 		raw, text := splitObserved(line)
@@ -152,7 +152,7 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 // observation. Each complete line (without the trailing newline) is passed to
 // observe. The exact bytes read are always written to dst first, so a slow or
 // failing observer can never affect the forwarded stream. Lines longer than
-// maxFrameBytes are still forwarded; only the observed copy is truncated.
+// maxFrameBytes are still forwarded, only the observed copy is truncated.
 func pumpFrames(src io.Reader, dst io.Writer, observe func(line []byte)) {
 	r := bufio.NewReaderSize(src, 64<<10)
 	var pending []byte // accumulated bytes of the current (unterminated) line
@@ -183,7 +183,7 @@ func pumpFrames(src io.Reader, dst io.Writer, observe func(line []byte)) {
 			}
 		}
 		if err == bufio.ErrBufferFull {
-			continue // line longer than the buffer; keep reading
+			continue // line longer than the buffer, keep reading
 		}
 		if err != nil {
 			if len(pending) > 0 {
@@ -217,7 +217,7 @@ func pumpLines(src io.Reader, dst io.Writer, observe func(line string)) {
 			}
 		}
 		if err == bufio.ErrBufferFull {
-			continue // line longer than the buffer; keep reading
+			continue // line longer than the buffer, keep reading
 		}
 		if err != nil {
 			if len(pending) > 0 {

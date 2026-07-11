@@ -149,7 +149,7 @@ func DefaultOutputPath(sessionID string, format Format) string {
 	case FormatText:
 		ext = "txt"
 	case FormatOTLP:
-		ext = "otlp.json" // OTLP payload is JSON; keep it distinct from the json export
+		ext = "otlp.json" // OTLP payload is JSON, keep it distinct from the json export
 	}
 	return filepath.Join(paths.ExportsDir(), safeFileName(sessionID)+"."+ext)
 }

@@ -92,7 +92,7 @@ document.getElementById("summary").innerHTML = [
 ].map(([k,v]) => "<div class=\"pill\">" + esc(k) + "<br><b>" + esc(v) + "</b></div>").join("");
 const calls = data.calls || [];
 const events = data.events || [];
-// Filter grammar mirrors the TUI stream filter: space-separated tokens (ANDed),
+// Filter grammar mirrors the TUI stream filter, space-separated tokens (ANDed),
 // where key:value matches a field and a bare token is a substring over the frame.
 const norm = (s) => String(s ?? "").toLowerCase();
 const SLOW_MS = 1000; // matches store.DefaultSlowThreshold (1s)
@@ -146,7 +146,7 @@ const eventMatches = (ev, tokens) => {
   const call = ev.call_index == null ? null : calls[ev.call_index];
   return tokens.every((t) => matchToken(ev, call, t));
 };
-// toneOf and statusOf mirror the TUI: requests are blue, responses take their
+// toneOf and statusOf mirror the TUI, requests are blue, responses take their
 // call's outcome (green ok, red error, amber slow), notifications lavender,
 // stderr gray. The status text shows on the response (or a pending request).
 const toneOf = (ev, call) => {

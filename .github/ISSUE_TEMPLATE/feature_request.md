@@ -11,4 +11,4 @@ labels: enhancement
 <!-- The behaviour or feature you have in mind. -->
 
 **Alternatives you've considered**
-<!-- Optional: other ways you've thought about solving this. -->
+<!-- Optional, other ways you've thought about solving this. -->

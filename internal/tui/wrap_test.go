@@ -8,7 +8,7 @@ import (
 )
 
 func TestSoftWrap(t *testing.T) {
-	// A short line is left untouched; a long unbroken value is hard-wrapped to
+	// A short line is left untouched, a long unbroken value is hard-wrapped to
 	// width, and nothing ends up wider than the limit.
 	in := "short\n" + strings.Repeat("x", 25)
 	out := softWrap(in, 10)

@@ -8,7 +8,7 @@ import (
 )
 
 // Sink receives observed envelopes. Implementations MUST be non-blocking and
-// MUST NOT propagate errors into the data path: tracing is best-effort and must
+// MUST NOT propagate errors into the data path. Tracing is best-effort and must
 // never slow down or break the real MCP traffic.
 type Sink interface {
 	Emit(Envelope)
@@ -57,7 +57,7 @@ func (s *AsyncSink) loop() {
 	defer close(s.done)
 	enc := json.NewEncoder(s.w)
 	for env := range s.ch {
-		_ = enc.Encode(env) // best-effort; a write error must not crash the proxy
+		_ = enc.Encode(env) // best-effort, a write error must not crash the proxy
 	}
 }
 

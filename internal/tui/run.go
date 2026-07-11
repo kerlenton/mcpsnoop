@@ -14,8 +14,8 @@ import (
 )
 
 // Run starts the hub and the live TUI. It blocks until the user quits or ctx is
-// cancelled. The hub feeds the store and nudges the program on every frame; a
-// periodic tick in the model catches anything sent before the program loop is
+// cancelled. The hub feeds the store and nudges the program on every frame, and
+// a periodic tick in the model catches anything sent before the program loop is
 // ready and keeps pending-call timers live.
 func Run(ctx context.Context, socketPath, sessionsDir string, slow time.Duration) error {
 	st := store.New(slow)

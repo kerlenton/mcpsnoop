@@ -44,11 +44,11 @@ func writeLog(t *testing.T, dir, session string, envs ...proxy.Envelope) {
 // the socket comes through.
 func TestHubBackfillLiveDedup(t *testing.T) {
 	sessionsDir := t.TempDir()
-	// Short socket path: macOS caps unix socket paths at ~104 bytes.
+	// Short socket path, macOS caps unix socket paths at ~104 bytes.
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("mcpsnoop-test-%d.sock", os.Getpid()))
 	defer os.Remove(sockPath)
 
-	// History on disk for session s1: seq 1..3.
+	// History on disk for session s1, seq 1..3.
 	writeLog(t, sessionsDir, "s1", env("s1", 1, "initialize"), env("s1", 2, "tools/list"), env("s1", 3, "tools/call"))
 
 	got := make(chan proxy.Envelope, 64)
@@ -58,7 +58,7 @@ func TestHubBackfillLiveDedup(t *testing.T) {
 	defer cancel()
 	go func() { _ = h.Run(ctx) }()
 
-	// Live shim: re-sends s1 seq 2,3 (overlap → must dedup) and 4 (new), plus a
+	// Live shim, re-sends s1 seq 2,3 (overlap → must dedup) and 4 (new), plus a
 	// brand-new session s2.
 	sink := proxy.NewSocketSink(sockPath, 0)
 	defer sink.Close()
@@ -71,7 +71,7 @@ func TestHubBackfillLiveDedup(t *testing.T) {
 		sink.Emit(e)
 	}
 
-	// Expect 6 unique envelopes: s1{1,2,3,4} + s2{1,2}.
+	// Expect 6 unique envelopes, s1{1,2,3,4} + s2{1,2}.
 	maxSeq := map[string]uint64{}
 	count := 0
 	deadline := time.After(3 * time.Second)

@@ -1,6 +1,6 @@
 // Package replay re-runs a captured request against a fresh, isolated copy of
 // the server. It spawns the server command itself, performs its own MCP
-// handshake, and sends the request — so it never touches or corrupts the live
+// handshake, and sends the request, so it never touches or corrupts the live
 // client session being observed.
 package replay
 

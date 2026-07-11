@@ -1,5 +1,5 @@
-// Package store turns the raw envelope stream into the model the TUI renders:
-// it correlates each JSON-RPC request with its response (and so derives
+// Package store turns the raw envelope stream into the model the TUI renders.
+// It correlates each JSON-RPC request with its response (and so derives
 // durations), extracts tool calls, captures the negotiated capabilities, and
 // flags errors and slow calls.
 //
@@ -150,7 +150,7 @@ func New(slowThreshold time.Duration) *Store {
 func (s *Store) SlowThreshold() time.Duration { return s.slowThreshold }
 
 // Delete drops a session from the store. A still-live shim will recreate it on
-// its next frame; callers that want it gone for good should also delete its log.
+// its next frame. Callers that want it gone for good should also delete its log.
 func (s *Store) Delete(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,7 +180,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			sess.command = meta.Command
 			sess.cwd = meta.CWD
 		}
-		return EventView{Kind: EventOther} // control frame; not shown in the stream
+		return EventView{Kind: EventOther} // control frame, not shown in the stream
 	}
 
 	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text}
@@ -290,7 +290,7 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 }
 
 // completeCall matches a response to its pending request. The bool reports
-// whether it completed a pending call: false means the response was unmatched or
+// whether it completed a pending call, where false means the response was unmatched or
 // a duplicate of an already-answered id. Caller holds the lock.
 func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Time, msg proxy.RPCMessage) (*call, bool) {
 	c := sess.calls[callKey{dir: opposite(respDir), id: id}]
@@ -298,7 +298,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 		return nil, false // unmatched response (request missed or before backfill)
 	}
 	if c.state != Pending {
-		return c, false // already answered; a duplicate or late response must not recount
+		return c, false // already answered, a duplicate or late response must not recount
 	}
 	c.end = ts
 	c.result = msg.Result
@@ -307,7 +307,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	case msg.Error != nil:
 		c.state = Failed // JSON-RPC / protocol error
 	case isToolError(msg.Result):
-		c.state = Failed // tool-level error: a 200-OK response with result.isError=true
+		c.state = Failed // tool-level error, a 200-OK response with result.isError=true
 		c.toolErr = true
 	default:
 		c.state = Completed
@@ -396,7 +396,7 @@ func appendWarning(existing, next string) string {
 	if existing == "" {
 		return next
 	}
-	return existing + "; " + next
+	return existing + ", " + next
 }
 
 func opposite(d proxy.Direction) proxy.Direction {

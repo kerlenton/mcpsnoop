@@ -35,7 +35,7 @@ func (c *captureSink) byDir(d Direction) []Envelope {
 	return out
 }
 
-// TestStdioTransparency uses `cat` as the wrapped "server": it echoes stdin to
+// TestStdioTransparency uses `cat` as the wrapped "server", it echoes stdin to
 // stdout. The proxy must pass bytes through verbatim and observe both
 // directions.
 func TestStdioTransparency(t *testing.T) {
@@ -104,7 +104,7 @@ func TestParseRPCResponse(t *testing.T) {
 
 // TestStdioNonJSONLine feeds a stray non-JSON line through `cat`, which echoes
 // it, so the line appears in both directions. A json.RawMessage cannot hold
-// non-JSON bytes, so the shim must carry the line as Text; otherwise the
+// non-JSON bytes, so the shim must carry the line as Text, otherwise the
 // envelope fails to encode and the frame is silently dropped before the hub.
 func TestStdioNonJSONLine(t *testing.T) {
 	const stray = "[debug] not json-rpc"
@@ -138,7 +138,7 @@ func TestStdioNonJSONLine(t *testing.T) {
 		if len(got.Raw) != 0 || got.Text != stray {
 			t.Fatalf("%s stray line: raw=%q text=%q, want it carried as Text %q", dir, got.Raw, got.Text, stray)
 		}
-		// The real failure mode this guards: the envelope must actually encode.
+		// The real failure mode this guards, the envelope must actually encode.
 		if err := json.NewEncoder(io.Discard).Encode(got); err != nil {
 			t.Fatalf("%s stray envelope failed to encode: %v", dir, err)
 		}
