@@ -336,7 +336,7 @@ func TestCapabilitiesAndHelp(t *testing.T) {
 		t.Fatal("c should open capabilities")
 	}
 	out := m.View()
-	for _, want := range []string{"CAPABILITIES", "protocolVersion", "CLIENT", "SERVER"} {
+	for _, want := range []string{"capabilities", "protocolVersion", "client", "server"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("caps missing %q\n%s", want, out)
 		}
@@ -344,12 +344,231 @@ func TestCapabilitiesAndHelp(t *testing.T) {
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 
 	m = typeRunes(t, m, "?")
-	if !m.showHelp || !strings.Contains(m.View(), "keybindings") {
+	if !m.showHelp || !strings.Contains(m.View(), "KEYBINDINGS") {
 		t.Fatalf("? should show help:\n%s", m.View())
 	}
 	m = typeRunes(t, m, "?")
 	if m.showHelp {
 		t.Fatal("? should toggle help off")
+	}
+}
+
+func TestInspectorModalSizesToContent(t *testing.T) {
+	st := store.New(0)
+	seed(st)                                        // short frames
+	m := ready(t, st)                               // 160x44
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector on a short frame
+
+	// The viewport shrinks to the payload instead of filling the tall screen.
+	if m.vp.Height >= m.height-8 {
+		t.Fatalf("short frame should shrink the viewport to its content, got %d in %d rows", m.vp.Height, m.height)
+	}
+	// The modal is centered, so the box does not start at the very top.
+	lines := strings.Split(m.View(), "\n")
+	top := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "╭") {
+			top = i
+			break
+		}
+	}
+	if top < 2 {
+		t.Fatalf("centered modal should have blank margin above, box starts at line %d", top)
+	}
+}
+
+func TestPairJump(t *testing.T) {
+	st := store.New(0)
+	seed(st) // includes a tools/call echo request and its response
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector on the selected frame
+	if m.overlay != overlayInspector {
+		t.Fatalf("enter should open the inspector, got overlay %d", m.overlay)
+	}
+	before := m.inspect
+	m = typeRunes(t, m, "x") // jump to the paired frame, still a full-width inspector
+	if m.overlay != overlayInspector {
+		t.Fatalf("x should stay in the inspector, got overlay %d", m.overlay)
+	}
+	if m.inspect == before {
+		t.Fatal("x should move the inspector to the paired frame")
+	}
+	// A refresh under follow must not disturb the inspected frame.
+	jumped := m.inspect
+	if !m.follow {
+		t.Fatal("this test needs follow on to cover the regression")
+	}
+	for range refreshEvery {
+		m = drive(t, m, tickMsg(time.Now()))
+	}
+	if m.inspect != jumped {
+		t.Fatalf("follow refresh moved the inspected frame, inspect %d want %d", m.inspect, jumped)
+	}
+	m = typeRunes(t, m, "x") // and back again
+	if m.inspect != before {
+		t.Fatalf("x again should jump back to the original frame, got %d want %d", m.inspect, before)
+	}
+}
+
+func TestReplayFromInspector(t *testing.T) {
+	st := store.New(0)
+	seed(st) // echo request (id2) + response
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream (follow -> last = a response)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector
+	m = typeRunes(t, m, "x")                        // jump to the paired request
+	if m.full[m.inspect].Kind != store.EventRequest {
+		t.Fatalf("x should land on the request, got kind %v", m.full[m.inspect].Kind)
+	}
+	// r replays the inspected request. The seeded session has no recorded command,
+	// so it opens the replay overlay with a cannot-replay note rather than doing
+	// nothing, which proves r is wired and used the inspected frame.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if m.overlay != overlayReplay {
+		t.Fatalf("r in the inspector should open the replay overlay, got overlay %d", m.overlay)
+	}
+	if strings.Contains(m.overlayRaw, "Select a request") {
+		t.Fatal("r treated the inspected request as non-replayable")
+	}
+}
+
+func TestReplayAgainFromResult(t *testing.T) {
+	st := store.New(0)
+	meta, _ := json.Marshal(proxy.SessionMeta{Command: []string{"true"}, CWD: "/tmp"})
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 0, TS: time.Now(), Direction: proxy.DirectionMeta, Raw: meta})
+	seed(st) // request/response frames on the same session, now with a command
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector on the last frame (a response)
+	m = typeRunes(t, m, "x")                        // jump to the request
+	m = typeRunes(t, m, "r")                        // replay it
+	if m.overlay != overlayReplay {
+		t.Fatalf("r should open the replay overlay, got %d", m.overlay)
+	}
+	if m.replayReq.Method == "" {
+		t.Fatal("replay should remember the request so it can be re-run")
+	}
+	if !strings.Contains(m.View(), "replay again") {
+		t.Fatalf("the replay overlay footer should offer replay again:\n%s", m.View())
+	}
+	// r straight from the result re-runs the same replay, no esc needed.
+	before := m.replayReq.Method
+	m = typeRunes(t, m, "r")
+	if m.overlay != overlayReplay || m.replayReq.Method != before {
+		t.Fatalf("r in the replay overlay should re-run the same replay, got overlay %d method %q", m.overlay, m.replayReq.Method)
+	}
+}
+
+func TestPairJumpReachesFilteredOutPair(t *testing.T) {
+	st := store.New(0)
+	seed(st) // echo request (id2) + its response
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
+
+	// Filter to requests only, so responses are hidden from the table.
+	m = typeRunes(t, m, "/")
+	m = typeRunes(t, m, "kind:req")
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	for _, e := range m.timeline {
+		if e.Kind == store.EventResponse {
+			t.Fatal("kind:req filter should hide responses from the table")
+		}
+	}
+
+	// Inspect the echo request, then x must still reach its response even though
+	// the response is filtered out of the table.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector on a request
+	if m.full[m.inspect].Kind != store.EventRequest {
+		t.Fatalf("expected to inspect a request, got kind %v", m.full[m.inspect].Kind)
+	}
+	m = typeRunes(t, m, "x")
+	if m.full[m.inspect].Kind != store.EventResponse {
+		t.Fatalf("x should jump to the filtered-out response, landed on kind %v", m.full[m.inspect].Kind)
+	}
+}
+
+func TestStreamStatsAndActivity(t *testing.T) {
+	st := store.New(0)
+	seed(st) // initialize + tools/call, both completed, timestamped now
+	m := ready(t, st)
+
+	sv := m.View()
+	if !strings.Contains(sv, "ACTIVITY") {
+		t.Fatalf("sessions header missing the ACTIVITY column\n%s", sv)
+	}
+	if !strings.ContainsAny(sv, string(sparkRamp)) {
+		t.Fatalf("sessions view missing a sparkline glyph\n%s", sv)
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
+	if m.streamCalls == 0 {
+		t.Fatal("seed has completed calls, streamCalls should be > 0")
+	}
+	if got := m.View(); !strings.Contains(got, "p50 ") || !strings.Contains(got, "p95 ") {
+		t.Fatalf("stream header missing p50/p95\n%s", got)
+	}
+}
+
+func TestResizeFuzzNoPanic(t *testing.T) {
+	st := store.New(0)
+	seed(st)
+	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"x"}}`))
+	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{}}`))
+	st.Ingest(sessionEnv("s2", "search-api"))
+	base := New(st)
+	base = drive(t, base, frameMsg{})
+
+	sizes := [][2]int{{120, 36}, {80, 24}, {1, 1}, {0, 0}, {200, 60}, {40, 10}, {99, 24}, {89, 24}, {70, 24}, {2, 60}}
+	// Exercise every screen, then hammer each with a spread of window sizes.
+	openers := map[string][]tea.Msg{
+		"sessions":  {tea.WindowSizeMsg{Width: 100, Height: 24}},
+		"stream":    {tea.WindowSizeMsg{Width: 100, Height: 24}, tea.KeyMsg{Type: tea.KeyEnter}},
+		"inspector": {tea.WindowSizeMsg{Width: 100, Height: 24}, tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyEnter}},
+		"pairjump":  {tea.WindowSizeMsg{Width: 100, Height: 24}, tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}},
+		"caps":      {tea.WindowSizeMsg{Width: 100, Height: 24}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")}},
+		"help":      {tea.WindowSizeMsg{Width: 100, Height: 24}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")}},
+		"confirm":   {tea.WindowSizeMsg{Width: 100, Height: 24}, tea.KeyMsg{Type: tea.KeyCtrlD}},
+	}
+	for name, msgs := range openers {
+		m := base
+		for _, msg := range msgs {
+			m = drive(t, m, msg)
+		}
+		for _, sz := range sizes {
+			m = drive(t, m, tea.WindowSizeMsg{Width: sz[0], Height: sz[1]})
+			if got := m.View(); got == "" && sz[0] > 0 {
+				t.Fatalf("%s at %dx%d rendered empty", name, sz[0], sz[1])
+			}
+		}
+	}
+}
+
+func TestSwitchSessionWithBrackets(t *testing.T) {
+	st := store.New(0)
+	seed(st) // demo
+	st.Ingest(sessionEnv("s2", "search-api"))
+	st.Ingest(sessionEnv("s3", "github"))
+	m := ready(t, st)
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the first session's stream
+	if m.view != viewStream {
+		t.Fatal("enter should open a stream")
+	}
+	first := m.streamSessionID
+
+	m = typeRunes(t, m, "]") // next session, still in the stream
+	if m.view != viewStream {
+		t.Fatal("] should keep us in the stream view")
+	}
+	if m.streamSessionID == first {
+		t.Fatal("] should switch to a different session")
+	}
+
+	m = typeRunes(t, m, "[") // back to the first
+	if m.streamSessionID != first {
+		t.Fatalf("[ should return to the first session, got %s", m.streamLabel)
 	}
 }
 
@@ -394,7 +613,7 @@ func TestWrapAroundNavigation(t *testing.T) {
 func TestOnboardingEmptyState(t *testing.T) {
 	m := ready(t, store.New(0))
 	out := m.View()
-	for _, want := range []string{"Waiting for MCP traffic", "mcpsnoop", "--"} {
+	for _, want := range []string{"waiting for MCP traffic", "mcpsnoop", "--"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("onboarding missing %q\n%s", want, out)
 		}
@@ -407,8 +626,8 @@ func TestPendingCallShown(t *testing.T) {
 	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"slow"}}`))
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into the stream
-	if !strings.Contains(m.View(), "PENDING") {
-		t.Fatalf("a pending request should show PENDING:\n%s", m.View())
+	if !strings.Contains(m.View(), "pending") {
+		t.Fatalf("a pending request should show pending:\n%s", m.View())
 	}
 }
 
@@ -422,11 +641,37 @@ func TestDeleteSession(t *testing.T) {
 		t.Fatalf("want 2 sessions, got %d", len(m.sessions))
 	}
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	if !m.confirmDelete {
+		t.Fatal("ctrl-d should open a delete confirmation")
+	}
+	if len(m.sessions) != 2 {
+		t.Fatalf("nothing should be deleted before confirming, got %d", len(m.sessions))
+	}
+	m = typeRunes(t, m, "y")
+	if m.confirmDelete {
+		t.Fatal("y should close the confirmation")
+	}
 	if len(m.sessions) != 1 {
-		t.Fatalf("ctrl-d should delete the selected session, got %d", len(m.sessions))
+		t.Fatalf("confirmed delete should remove the selected session, got %d", len(m.sessions))
 	}
 	if !m.flashActive() {
 		t.Fatal("delete should set a flash message")
+	}
+}
+
+func TestDeleteSessionCancel(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	st := store.New(0)
+	seed(st)
+	st.Ingest(sessionEnv("s2", "search-api"))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	m = typeRunes(t, m, "n")
+	if m.confirmDelete {
+		t.Fatal("n should close the confirmation")
+	}
+	if len(m.sessions) != 2 {
+		t.Fatalf("cancel should keep both sessions, got %d", len(m.sessions))
 	}
 }
 

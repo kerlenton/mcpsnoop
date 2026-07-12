@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
@@ -72,15 +73,28 @@ const (
 // frameMsg signals that the store ingested a new envelope.
 type frameMsg struct{}
 
-// tickMsg drives periodic refresh.
+// tickMsg drives the shared animation and refresh clock.
 type tickMsg time.Time
 
-const tickEvery = 400 * time.Millisecond
+// tickEvery is the single shared cadence. It is fast enough for a smooth spinner
+// (about 12fps) while the heavier store refresh runs every refreshEvery ticks so
+// reads stay at roughly 400ms.
+const (
+	tickEvery    = 80 * time.Millisecond
+	refreshEvery = 5
+)
+
+// The activity sparkline is 8 buckets of 15s covering the last two minutes.
+const (
+	sparkBuckets = 8
+	sparkSpan    = 2 * time.Minute
+)
 
 // Model is the Bubble Tea model for the hub view.
 type Model struct {
 	store  *store.Store
 	keys   keyMap
+	theme  theme
 	styles styles
 
 	view viewMode
@@ -90,13 +104,20 @@ type Model struct {
 	selSession   int
 	sessionQuery string
 	sessionSort  sortState
+	activity     map[string][]int  // per-session frame-count sparkline buckets
+	clients      map[string]string // per-session client name and version from initialize
 
 	streamSessionID string // session whose stream we drilled into
 	streamLabel     string
-	timeline        []store.EventView
+	full            []store.EventView // whole session, unfiltered, the inspector navigates this
+	timeline        []store.EventView // full after the stream filter, what the table shows
 	streamSignals   streamSignalCounts
-	selEvent        int
-	query           string // stream filter
+	streamCalls     int           // completed calls in the session
+	streamP50       time.Duration // median call latency
+	streamP95       time.Duration // 95th percentile call latency
+	selEvent        int           // index into timeline, the table selection
+	inspect         int           // index into full, the frame the inspector shows
+	query           string        // stream filter
 	total           int
 	follow          bool
 	streamSort      sortState
@@ -104,13 +125,17 @@ type Model struct {
 	paused bool
 
 	overlay        overlayMode
+	replayReq      store.CallView // last request sent to replay, so r can re-run it from the result
 	vp             viewport.Model
-	overlayRaw     string // overlay body before soft-wrapping (re-wrapped on resize)
-	overlayContent string // soft-wrapped, un-highlighted body, for re-search
+	overlayRaw     string // overlay body before styling (re-rendered on resize)
+	overlayDisplay string // styled body shown in the viewport (highlight, numbers)
+	overlayContent string // plain body with identical wrapping, for search matching
+	overlayHeaderH int    // fixed chrome lines above the viewport (inspector meta)
 	overlaySearch  string
 	overlayMatches []int // line numbers containing a match
 	overlayMatchIx int
 	showHelp       bool
+	confirmDelete  bool // ctrl-d asks before removing a session and its log
 
 	inputMode inputMode
 	input     textinput.Model
@@ -120,12 +145,13 @@ type Model struct {
 
 	width, height int
 	ready         bool
+	spin          int // shared spinner frame, advanced by tickMsg
 }
 
 // setFlash shows a transient message in the status bar for ~2s.
 func (m *Model) setFlash(s string) {
 	m.flash = s
-	m.flashUntil = time.Now().Add(2 * time.Second)
+	m.flashUntil = time.Now().Add(2500 * time.Millisecond)
 }
 
 func (m Model) flashActive() bool {
@@ -133,14 +159,20 @@ func (m Model) flashActive() bool {
 }
 
 // New builds the model around a store the hub feeds.
+// Version is the build version shown in the help overlay. main sets it once from
+// its own version resolution, so New stays test friendly.
+var Version = "dev"
+
 func New(st *store.Store) Model {
 	ti := textinput.New()
 	ti.Prompt = ""
 
+	th := newTheme()
 	m := Model{
 		store:  st,
 		keys:   defaultKeys(),
-		styles: newStyles(),
+		theme:  th,
+		styles: newStyles(th),
 		view:   viewSessions,
 		follow: true,
 		input:  ti,
@@ -174,7 +206,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		if !m.paused {
-			m.refresh()
+			m.spin++
+			// The spinner advances every tick, the store refresh only every fifth,
+			// so animation stays smooth without re-reading the log 12 times a second.
+			if m.spin%refreshEvery == 0 {
+				m.refresh()
+			}
 		}
 		return m, tick()
 
@@ -198,6 +235,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	// A pending delete confirmation swallows every key but y (do it) and n/esc.
+	if m.confirmDelete {
+		switch {
+		case msg.String() == "y":
+			m.confirmDelete = false
+			m.deleteCurrentSession()
+		case msg.String() == "n", key.Matches(msg, m.keys.Back):
+			m.confirmDelete = false
+		}
+		return m, nil
+	}
+
 	// Bottom prompt (":" command / "/" filter) captures input while open.
 	if m.inputMode != inputNone {
 		return m.handleInput(msg)
@@ -225,6 +274,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.overlayJump(1)
 		case msg.String() == "N":
 			m.overlayJump(-1)
+		case m.overlay == overlayInspector && msg.String() == "x":
+			// Jump to the paired frame over the whole session, so the pair is
+			// reachable even when the stream filter hides it from the table.
+			if pi, ok := m.pairIndex(m.inspect); ok {
+				m.inspect = pi
+				m.openOverlay(overlayInspector, m.inspectorBody())
+			}
+		case m.overlay == overlayInspector && key.Matches(msg, m.keys.Replay):
+			if cmd := m.startReplay(); cmd != nil {
+				return m, cmd
+			}
+		case m.overlay == overlayReplay && key.Matches(msg, m.keys.Replay):
+			if cmd := m.replayAgain(); cmd != nil {
+				return m, cmd
+			}
 		case key.Matches(msg, m.keys.Copy):
 			m.copyCurrent()
 		case key.Matches(msg, m.keys.Enter, m.keys.Back, m.keys.Quit),
@@ -259,6 +323,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.drillIn()
 	case key.Matches(msg, m.keys.Back):
 		return m, m.back()
+	case msg.String() == "[":
+		m.switchSession(-1)
+	case msg.String() == "]":
+		m.switchSession(1)
 
 	case key.Matches(msg, m.keys.Pause):
 		m.paused = !m.paused
@@ -287,7 +355,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Export):
 		m.exportCurrent("", "")
 	case key.Matches(msg, m.keys.Delete):
-		m.deleteCurrentSession()
+		if m.currentSessionID() != "" {
+			m.confirmDelete = true
+		}
 
 	case key.Matches(msg, m.keys.Up):
 		m.step(-1)
@@ -361,6 +431,8 @@ func (m Model) runCommand(cmd string) (Model, tea.Cmd) {
 	case "help", "?":
 		m.showHelp = true
 		return m, nil
+	// sessions and stream stay as quiet aliases for esc and enter, they are not
+	// advertised in the palette since a single key already does the same.
 	case "sessions", "session", "s", "..":
 		m.view = viewSessions
 		m.refresh()
@@ -395,7 +467,10 @@ func (m *Model) openInput(mode inputMode) {
 	m.inputMode = mode
 	if mode == inputCommand {
 		m.input.Prompt = ":"
-		m.input.Placeholder = "sessions · stream · export [format] [path] · <name> · q"
+		// enter and esc already handle drill in and back, so the palette lists only
+		// what a single key cannot do, export with args, a jump by session name,
+		// and quit.
+		m.input.Placeholder = "export [format] [path] · <name> · q"
 		m.input.SetValue("")
 	} else {
 		m.input.Prompt = "/"
@@ -431,8 +506,20 @@ func (m *Model) drillIn() {
 		return
 	}
 	if m.selEvent < len(m.timeline) {
-		m.openOverlay(overlayInspector, m.inspectorContent())
+		m.inspect = m.fullIndexOf(m.timeline[m.selEvent].Seq)
+		m.openOverlay(overlayInspector, m.inspectorBody())
 	}
+}
+
+// fullIndexOf finds a frame in the unfiltered timeline by its unique seq, so the
+// inspector can navigate past the stream filter.
+func (m Model) fullIndexOf(seq uint64) int {
+	for i, e := range m.full {
+		if e.Seq == seq {
+			return i
+		}
+	}
+	return 0
 }
 
 // back pops one level, clear an active filter, then stream→sessions. At
@@ -464,6 +551,28 @@ func (m *Model) enterStream(idx int) {
 	m.view = viewStream
 	m.follow = true
 	m.refresh()
+}
+
+// switchSession steps to the neighbouring session with [ and ]. In the stream it
+// jumps straight into that session's stream, in the list it moves the selection.
+func (m *Model) switchSession(delta int) {
+	n := len(m.sessions)
+	if n == 0 {
+		return
+	}
+	if m.view != viewStream {
+		m.step(delta)
+		return
+	}
+	cur := m.selSession
+	for i, s := range m.sessions {
+		if s.ID == m.streamSessionID {
+			cur = i
+			break
+		}
+	}
+	m.query = ""
+	m.enterStream((cur + delta + n) % n)
 }
 
 // applyFilter sets the filter for the current view.
@@ -530,22 +639,48 @@ func (m Model) currentSessionID() string {
 }
 
 // startReplay launches an async replay of the selected request frame.
+// focusedFrame is the frame the current context acts on, the inspected frame
+// when the inspector is open, otherwise the stream table selection.
+func (m Model) focusedFrame() (store.EventView, bool) {
+	if m.overlay == overlayInspector && m.inspect >= 0 && m.inspect < len(m.full) {
+		return m.full[m.inspect], true
+	}
+	if m.view == viewStream && m.selEvent >= 0 && m.selEvent < len(m.timeline) {
+		return m.timeline[m.selEvent], true
+	}
+	return store.EventView{}, false
+}
+
 func (m *Model) startReplay() tea.Cmd {
-	if m.view != viewStream || m.selEvent >= len(m.timeline) {
+	ev, ok := m.focusedFrame()
+	if !ok {
 		return nil
 	}
-	ev := m.timeline[m.selEvent]
 	if ev.Call == nil || ev.Kind != store.EventRequest {
 		m.openOverlay(overlayReplay, "Select a request frame to replay (a → line).")
 		return nil
 	}
+	return m.runReplay(*ev.Call)
+}
+
+// replayAgain re-runs the last replayed request, so r works straight from the
+// replay result overlay without going back to the stream.
+func (m *Model) replayAgain() tea.Cmd {
+	if m.replayReq.Method == "" {
+		return nil
+	}
+	return m.runReplay(m.replayReq)
+}
+
+func (m *Model) runReplay(call store.CallView) tea.Cmd {
 	command, cwd, ok := m.store.Command(m.streamSessionID)
 	if !ok {
 		m.openOverlay(overlayReplay, "Cannot replay: this session has no recorded server command\n(its meta frame was not captured).")
 		return nil
 	}
-	m.openOverlay(overlayReplay, "Replaying "+ev.Call.Method+" against an isolated server copy…")
-	return replayCmd(command, cwd, ev.Call.Method, ev.Call.Params)
+	m.replayReq = call
+	m.openOverlay(overlayReplay, "Replaying "+call.Method+" against an isolated server copy…")
+	return replayCmd(command, cwd, call.Method, call.Params)
 }
 
 // applySortKey maps a shift+<letter> to a column sort for the current view.
@@ -596,31 +731,74 @@ func (m *Model) refresh() {
 	sortSessions(m.sessions, m.sessionSort)
 	m.selSession = clamp(m.selSession, 0, max(len(m.sessions)-1, 0))
 
+	// Cache the sparkline and client label per session at the data cadence, so the
+	// render (which runs on every spinner tick) never touches the store.
+	m.activity = make(map[string][]int, len(m.allSessions))
+	m.clients = make(map[string]string, len(m.allSessions))
+	for _, s := range m.allSessions {
+		m.activity[s.ID] = m.store.Activity(s.ID, sparkBuckets, sparkSpan)
+		if caps, ok := m.store.Capabilities(s.ID); ok {
+			m.clients[s.ID] = infoLine(caps.ClientInfo)
+		}
+	}
+
 	if m.view != viewStream {
 		return
 	}
 	full := m.store.Timeline(m.streamSessionID)
+	m.full = full
 	m.total = len(full)
 	m.timeline = m.filterEvents(full)
 	// Count signals over the whole session, not the filtered view, so a stream
 	// filter never hides the session's health in the footer.
 	m.streamSignals = countStreamSignals(full, m.store.SlowThreshold())
+	m.streamCalls, m.streamP50, m.streamP95 = callStats(full)
 	m.sortStream()
 	// A non-chronological sort means we're inspecting, not tailing.
 	if m.streamSort.col != "" && m.streamSort.col != "time" {
 		m.follow = false
 	}
-	if m.follow {
+	// Follow snaps to the newest frame, but not while an overlay is open, or a
+	// tick would drag the selection off the frame the inspector is showing and
+	// fight an x jump to the paired frame.
+	if m.follow && m.overlay == overlayNone {
 		m.selEvent = len(m.timeline) - 1
 	}
 	m.selEvent = clamp(m.selEvent, 0, max(len(m.timeline)-1, 0))
 }
 
+// callStats computes the count, median, and 95th percentile latency over the
+// completed calls in events.
+func callStats(events []store.EventView) (n int, p50, p95 time.Duration) {
+	var ds []time.Duration
+	for _, e := range events {
+		if e.Kind == store.EventResponse && e.Call != nil && e.Call.Done() {
+			ds = append(ds, e.Call.End.Sub(e.Call.Start))
+		}
+	}
+	if len(ds) == 0 {
+		return 0, 0, 0
+	}
+	slices.Sort(ds)
+	return len(ds), percentile(ds, 50), percentile(ds, 95)
+}
+
+// percentile returns the p-th percentile of sorted by nearest rank, so p95
+// surfaces the slow tail even with few samples.
+func percentile(sorted []time.Duration, p int) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	rank := (p*len(sorted) + 99) / 100 // ceil(p/100 * n)
+	return sorted[clamp(rank-1, 0, len(sorted)-1)]
+}
+
 type streamSignalCounts struct {
-	errors int
-	bad    int
-	warn   int
-	slow   int
+	errors  int
+	bad     int
+	warn    int
+	slow    int
+	pending int
 }
 
 func countStreamSignals(events []store.EventView, slowThreshold time.Duration) streamSignalCounts {
@@ -635,6 +813,8 @@ func countStreamSignals(events []store.EventView, slowThreshold time.Duration) s
 			c.errors++
 		case e.Kind == store.EventResponse && e.Call != nil && e.Call.Slow(slowThreshold):
 			c.slow++
+		case e.Kind == store.EventRequest && e.Call != nil && e.Call.State == store.Pending:
+			c.pending++
 		}
 	}
 	return c
@@ -851,24 +1031,40 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 	return false
 }
 
-// openOverlay shows a full-screen scrollable panel with the given content.
+// openOverlay shows a centered scrollable panel with the given body. The
+// inspector reserves one chrome line for its meta header.
 func (m *Model) openOverlay(mode overlayMode, content string) {
 	m.overlay = mode
 	m.overlaySearch = ""
 	m.overlayMatches = nil
 	m.overlayMatchIx = 0
+	m.overlayHeaderH = 0
+	if mode == overlayInspector {
+		m.overlayHeaderH = 1 // the single meta line above the body
+	}
 	m.layoutOverlay()
 	m.setOverlayBody(content)
 	m.vp.GotoTop()
 }
 
-// setOverlayBody stores the raw panel text and renders it soft-wrapped to the
-// viewport width, so long single-line JSON values stay readable instead of
-// running off the edge.
+// setOverlayBody stores the raw body and renders both a styled display form for
+// the viewport and a plain form with identical wrapping for search matching. The
+// inspector numbers and syntax-highlights its JSON, other panels arrive already
+// styled and are only soft-wrapped.
 func (m *Model) setOverlayBody(content string) {
 	m.overlayRaw = content
-	m.overlayContent = softWrap(content, m.vp.Width)
-	m.vp.SetContent(m.overlayContent)
+	if m.overlay == overlayInspector {
+		m.overlayDisplay = m.numberBody(content, m.vp.Width, true)
+		m.overlayContent = m.numberBody(content, m.vp.Width, false)
+	} else {
+		m.overlayDisplay = softWrap(content, m.vp.Width)
+		m.overlayContent = ansi.Strip(m.overlayDisplay)
+	}
+	m.vp.SetContent(m.overlayDisplay)
+	// Shrink the viewport to its content so a short payload sizes the modal to
+	// itself, capped at maxVpH so long payloads still scroll inside the box.
+	_, maxVpH := m.overlayDims()
+	m.vp.Height = max(min(m.vp.TotalLineCount(), maxVpH), 1)
 }
 
 // copyCurrent copies the most relevant thing for the current context to the
@@ -877,14 +1073,18 @@ func (m *Model) setOverlayBody(content string) {
 func (m *Model) copyCurrent() {
 	var text, label string
 	switch {
-	case m.overlay == overlayInspector && m.selEvent < len(m.timeline):
-		text, label = frameText(m.timeline[m.selEvent]), "frame JSON"
+	case m.overlay == overlayInspector && m.inspect < len(m.full):
+		text, label = frameText(m.full[m.inspect]), "frame JSON"
 	case m.overlay != overlayNone:
-		text, label = m.overlayRaw, "panel"
+		// The panel body (caps, replay) is already styled, strip the ANSI so the
+		// clipboard gets clean text.
+		text, label = ansi.Strip(m.overlayRaw), "panel"
 	case m.view == viewStream && m.selEvent < len(m.timeline):
 		text, label = frameText(m.timeline[m.selEvent]), "frame JSON"
 	case m.view == viewSessions && len(m.sessions) > 0:
 		text, label = paths.SessionLogPath(m.sessions[m.selSession].ID), "log path"
+	case m.view == viewSessions && len(m.allSessions) == 0:
+		text, label = onboardingSnippet, "snippet" // first-run empty state
 	default:
 		return
 	}
@@ -957,7 +1157,9 @@ func (m *Model) deleteCurrentSession() {
 func (m *Model) closeOverlay() {
 	m.overlay = overlayNone
 	m.overlayRaw = ""
+	m.overlayDisplay = ""
 	m.overlayContent = ""
+	m.overlayHeaderH = 0
 	m.overlaySearch = ""
 	m.overlayMatches = nil
 }
@@ -969,7 +1171,7 @@ func (m *Model) applyOverlaySearch(q string) {
 	m.overlayMatches = nil
 	m.overlayMatchIx = 0
 	if q == "" {
-		m.vp.SetContent(m.overlayContent)
+		m.vp.SetContent(m.overlayDisplay)
 		return
 	}
 	lq := strings.ToLower(q)
@@ -1013,12 +1215,11 @@ func (m *Model) overlayJump(dir int) {
 }
 
 func (m *Model) layoutOverlay() {
-	w := max(m.width-4, 1)  // inside the border
-	h := max(m.height-6, 1) // inside the border + footer line
+	w, maxVpH := m.overlayDims()
 	if m.vp.Width == 0 {
-		m.vp = viewport.New(w, h)
+		m.vp = viewport.New(w, maxVpH)
 	} else {
-		m.vp.Width, m.vp.Height = w, h
+		m.vp.Width, m.vp.Height = w, maxVpH
 	}
 }
 

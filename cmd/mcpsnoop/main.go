@@ -125,6 +125,7 @@ func codeOf(code int) error {
 }
 
 func execute(args []string) int {
+	tui.Version = appVersion() // surfaced in the help overlay
 	root := newRootCmd()
 	root.SetArgs(args)
 	root.SilenceErrors = true
@@ -259,9 +260,9 @@ func labelFor(command []string) string {
 func newExportCmd() *cobra.Command {
 	var formatFlag, outFlag string
 	cmd := &cobra.Command{
-		Use:   "export [session-id|log.jsonl]",
+		Use:   "export [session-id|log.jsonl|-]",
 		Short: "Render a captured session to json, html, text, or otlp",
-		Long:  "Render a captured session to a portable file. With no session, the newest session log is exported.",
+		Long:  "Render a captured session to a portable file. With no session, the newest session log is exported. Use - to read JSONL from stdin.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			format, err := exporter.ParseFormat(formatFlag)
@@ -273,10 +274,16 @@ func newExportCmd() *cobra.Command {
 			if len(args) == 1 {
 				arg = args[0]
 			}
-			inPath, err := exporter.ResolveSessionPath(arg)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
-				return exitCode(1)
+			// Resolve a file or session before opening the output, so a bad
+			// input never truncates the target. "-" streams stdin, like check.
+			stdin := arg == "-"
+			var inPath string
+			if !stdin {
+				inPath, err = exporter.ResolveSessionPath(arg)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
+					return exitCode(1)
+				}
 			}
 
 			out := os.Stdout
@@ -293,7 +300,13 @@ func newExportCmd() *cobra.Command {
 				defer f.Close()
 				out = f
 			}
-			if err := exporter.ExportFile(inPath, out, exporter.Options{Format: format}); err != nil {
+
+			if stdin {
+				err = exporter.Export(cmd.InOrStdin(), "stdin", out, exporter.Options{Format: format})
+			} else {
+				err = exporter.ExportFile(inPath, out, exporter.Options{Format: format})
+			}
+			if err != nil {
 				fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
 				return exitCode(1)
 			}

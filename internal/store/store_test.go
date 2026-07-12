@@ -24,6 +24,36 @@ func resp(seq uint64, ts time.Time, dir proxy.Direction, id, body string) proxy.
 	return proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: ts, Direction: dir, Raw: json.RawMessage(raw)}
 }
 
+func TestActivityBuckets(t *testing.T) {
+	st := New(0)
+	now := time.Now()
+	// Two frames in the most recent bucket, one about a minute old, and one well
+	// outside the two minute window that must be ignored.
+	st.Ingest(req(1, now, proxy.ClientToServer, "1", "tools/list", ""))
+	st.Ingest(req(2, now, proxy.ClientToServer, "2", "tools/list", ""))
+	st.Ingest(req(3, now.Add(-60*time.Second), proxy.ClientToServer, "3", "tools/list", ""))
+	st.Ingest(req(4, now.Add(-10*time.Minute), proxy.ClientToServer, "4", "tools/list", ""))
+
+	buckets := st.Activity("s1", 8, 2*time.Minute)
+	if len(buckets) != 8 {
+		t.Fatalf("want 8 buckets, got %d", len(buckets))
+	}
+	if buckets[7] != 2 {
+		t.Fatalf("most recent bucket = %d, want 2", buckets[7])
+	}
+	total := 0
+	for _, v := range buckets {
+		total += v
+	}
+	if total != 3 {
+		t.Fatalf("total in window = %d, want 3 (the 10 minute old frame is excluded)", total)
+	}
+
+	if got := st.Activity("missing", 8, 2*time.Minute); len(got) != 8 {
+		t.Fatalf("unknown session should still return 8 empty buckets, got %d", len(got))
+	}
+}
+
 func TestCorrelationAndTiming(t *testing.T) {
 	s := New(100 * time.Millisecond)
 	t0 := time.Now()
