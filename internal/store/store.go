@@ -321,7 +321,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	case "initialize":
 		sess.caps.applyResponse(msg.Result)
 	case "tools/list":
-		sess.applyToolsList(msg.Result)
+		sess.applyToolsList(c.params, msg.Result)
 	}
 	return c, true
 }
@@ -360,7 +360,11 @@ func (c *capabilities) applyResponse(result json.RawMessage) {
 	c.serverInfo = r.ServerInfo
 }
 
-func (sess *session) applyToolsList(result json.RawMessage) {
+// applyToolsList records the tools a tools/list response advertised. A cursorless
+// request is a fresh page one, so its response is the server's current tool set
+// and supersedes what we had (a tools/list_changed re-list can drop tools). A
+// cursored request is a pagination continuation, so it extends the set.
+func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 	var r struct {
 		Tools []struct {
 			Name string `json:"name"`
@@ -369,6 +373,11 @@ func (sess *session) applyToolsList(result json.RawMessage) {
 
 	if json.Unmarshal(result, &r) != nil {
 		return
+	}
+
+	if !hasListCursor(reqParams) {
+		clear(sess.advertisedSet)
+		sess.advertisedTools = nil
 	}
 
 	for _, tool := range r.Tools {
@@ -382,6 +391,16 @@ func (sess *session) applyToolsList(result json.RawMessage) {
 		sess.advertisedSet[tool.Name] = struct{}{}
 		sess.advertisedTools = append(sess.advertisedTools, tool.Name)
 	}
+}
+
+// hasListCursor reports whether a tools/list request carries a pagination cursor,
+// marking its response a continuation of an earlier page rather than a fresh
+// listing that supersedes the set.
+func hasListCursor(params json.RawMessage) bool {
+	var p struct {
+		Cursor string `json:"cursor"`
+	}
+	return json.Unmarshal(params, &p) == nil && p.Cursor != ""
 }
 
 func toolName(params json.RawMessage) string {

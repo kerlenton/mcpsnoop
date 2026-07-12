@@ -326,6 +326,37 @@ func TestSessionFilterAndCommandJump(t *testing.T) {
 	}
 }
 
+func TestCapsContentShowsToolUsage(t *testing.T) {
+	st := store.New(0)
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"cli"}}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"demo"}}}`))
+	// The server advertises three tools.
+	st.Ingest(env(3, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+	st.Ingest(env(4, proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo"},{"name":"sum"},{"name":"search"}]}}`))
+	// echo and search are called (used), sum never is (unused), ghost was never
+	// advertised (called but not advertised).
+	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo"}}`))
+	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`))
+	st.Ingest(env(7, proxy.ClientToServer, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search"}}`))
+	st.Ingest(env(8, proxy.ServerToClient, `{"jsonrpc":"2.0","id":4,"result":{"content":[]}}`))
+	st.Ingest(env(9, proxy.ClientToServer, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ghost"}}`))
+	st.Ingest(env(10, proxy.ServerToClient, `{"jsonrpc":"2.0","id":5,"result":{"content":[]}}`))
+
+	m := ready(t, st)
+	m = typeRunes(t, m, "c")
+	if m.overlay != overlayCaps {
+		t.Fatal("c should open capabilities")
+	}
+	// overlayRaw is the full unwrapped caps body, so a bottom section is never
+	// lost below the viewport fold the way it could be in View().
+	out := m.overlayRaw
+	for _, want := range []string{"unused", "called but not advertised", "echo", "search", "sum", "ghost"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("caps tool usage missing %q\n%s", want, out)
+		}
+	}
+}
+
 func TestCapabilitiesAndHelp(t *testing.T) {
 	st := store.New(0)
 	seed(st)

@@ -352,30 +352,88 @@ func TestToolUsageDistinguishesUsedFromUnused(t *testing.T) {
 	}
 }
 
-func TestToolUsageUnionsMultipleToolsListResponses(t *testing.T) {
+func TestToolUsagePaginatesAcrossCursor(t *testing.T) {
 	s := New(0)
 	t0 := time.Now()
 
+	// Page one is cursorless, page two carries the cursor, so the two responses
+	// build one tool set rather than the second replacing the first.
 	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", ""))
 	s.Ingest(resp(2, t0, proxy.ServerToClient, "1",
-		`"result":{"tools":[{"name":"echo"}]}`))
+		`"result":{"tools":[{"name":"echo"}],"nextCursor":"p2"}`))
 
-	s.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/list", ""))
+	s.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/list", `{"cursor":"p2"}`))
 	s.Ingest(resp(4, t0, proxy.ServerToClient, "2",
-		`"result":{"tools":[{"name":"echo"},{"name":"sum"}]}`))
+		`"result":{"tools":[{"name":"sum"}]}`))
 
 	_, unused, unadvertised, ok := s.ToolUsage("s1")
 	if !ok {
 		t.Fatal("expected tool usage")
 	}
-	if len(unused) != 2 {
-		t.Fatalf("unused = %v", unused)
-	}
-	if unused[0] != "echo" || unused[1] != "sum" {
+	if len(unused) != 2 || unused[0] != "echo" || unused[1] != "sum" {
 		t.Fatalf("unused = %v, want [echo sum]", unused)
 	}
 	if len(unadvertised) != 0 {
 		t.Fatalf("unadvertised = %v, want none", unadvertised)
+	}
+}
+
+func TestToolUsageReplacesToolsOnFreshList(t *testing.T) {
+	s := New(0)
+	t0 := time.Now()
+
+	// A first listing offers echo and sum. A later cursorless listing (a
+	// tools/list_changed re-fetch) no longer offers sum. The fresh list is
+	// authoritative, so sum drops out instead of lingering in unused.
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", ""))
+	s.Ingest(resp(2, t0, proxy.ServerToClient, "1",
+		`"result":{"tools":[{"name":"echo"},{"name":"sum"}]}`))
+
+	s.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/list", ""))
+	s.Ingest(resp(4, t0, proxy.ServerToClient, "2",
+		`"result":{"tools":[{"name":"echo"}]}`))
+
+	_, unused, unadvertised, ok := s.ToolUsage("s1")
+	if !ok {
+		t.Fatal("expected tool usage")
+	}
+	if len(unused) != 1 || unused[0] != "echo" {
+		t.Fatalf("unused = %v, want [echo] with sum withdrawn", unused)
+	}
+	if len(unadvertised) != 0 {
+		t.Fatalf("unadvertised = %v, want none", unadvertised)
+	}
+}
+
+func TestToolUsageWithdrawnCalledToolBecomesUnadvertised(t *testing.T) {
+	s := New(0)
+	t0 := time.Now()
+
+	// The client calls sum while it is advertised, then the server re-lists
+	// without it. sum was used but is no longer advertised, so it surfaces as
+	// called-but-not-advertised rather than as an unused tool.
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", ""))
+	s.Ingest(resp(2, t0, proxy.ServerToClient, "1",
+		`"result":{"tools":[{"name":"echo"},{"name":"sum"}]}`))
+	s.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/call", `{"name":"sum"}`))
+	s.Ingest(resp(4, t0, proxy.ServerToClient, "2", `"result":{}`))
+
+	s.Ingest(req(5, t0, proxy.ClientToServer, "3", "tools/list", ""))
+	s.Ingest(resp(6, t0, proxy.ServerToClient, "3",
+		`"result":{"tools":[{"name":"echo"}]}`))
+
+	used, unused, unadvertised, ok := s.ToolUsage("s1")
+	if !ok {
+		t.Fatal("expected tool usage")
+	}
+	if len(used) != 0 {
+		t.Fatalf("used = %v, want none", used)
+	}
+	if len(unused) != 1 || unused[0] != "echo" {
+		t.Fatalf("unused = %v, want [echo]", unused)
+	}
+	if len(unadvertised) != 1 || unadvertised[0] != "sum" {
+		t.Fatalf("unadvertised = %v, want [sum]", unadvertised)
 	}
 }
 
