@@ -184,6 +184,34 @@ func (s *Store) Command(sessionID string) (command []string, cwd string, ok bool
 	return append([]string(nil), sess.command...), sess.cwd, true
 }
 
+// Activity buckets the session's frame timestamps into n equal windows over the
+// last span, oldest window first, for the sessions activity sparkline.
+func (s *Store) Activity(sessionID string, n int, span time.Duration) []int {
+	buckets := make([]int, max(n, 0))
+	if n <= 0 {
+		return buckets
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return buckets
+	}
+	start := time.Now().Add(-span)
+	step := span / time.Duration(n)
+	for _, ev := range sess.events {
+		if ev.ts.Before(start) {
+			continue
+		}
+		i := int(ev.ts.Sub(start) / step)
+		if i >= n {
+			i = n - 1
+		}
+		buckets[i]++
+	}
+	return buckets
+}
+
 // Calls returns all correlated calls for a session in request order.
 func (s *Store) Calls(sessionID string) []CallView {
 	s.mu.RLock()

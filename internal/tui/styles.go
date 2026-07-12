@@ -2,84 +2,83 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// palette, blue logo/keys, cyan crumbs & selection, with
-// per-kind accents for the frame stream. Tuned for dark terminals.
-var (
-	colAccent  = lipgloss.Color("39") // dodger blue, logo, hint keys, titles
-	colCrumb   = lipgloss.Color("37") // cyan, current breadcrumb + selection bg
-	colHeadCl  = lipgloss.Color("73") // cadet blue, table column headers
-	colBlack   = lipgloss.Color("16")
-	colDim     = lipgloss.Color("244") // gray
-	colFaint   = lipgloss.Color("240")
-	colReq     = lipgloss.Color("111") // soft blue, request (distinct from cyan selection)
-	colResp    = lipgloss.Color("114") // soft green, successful response
-	colErr     = lipgloss.Color("203") // red, error
-	colSlow    = lipgloss.Color("215") // warm amber, slow call
-	colWarn    = lipgloss.Color("179") // soft gold, best-effort protocol warning
-	colNotif   = lipgloss.Color("146") // muted lavender, notification
-	colStderr  = lipgloss.Color("245") // muted gray, server stderr (a side channel, not an error)
-	colInvalid = lipgloss.Color("205") // magenta, non-JSON-RPC on the protocol channel (stream corruption)
-	colHeader  = lipgloss.Color("231") // near-white
-)
-
+// styles holds the concrete lipgloss styles the views render with, all built
+// from the ANSI-bound theme. The color law has three layers. Chrome is blue and
+// cyan, data identity is neutral (responses fg, notify and stderr comment), and
+// verdict hues (green ok, yellow slow and warn, red err and bad, cyan pending)
+// appear only in the STATUS column, the footer counters, and the dots. err and
+// bad share the same red and are told apart by the ! glyph and the label, no
+// bold, since terminals render bold red as a brighter orange that reads as a
+// second alarm hue.
 type styles struct {
-	logo       lipgloss.Style
-	infoKey    lipgloss.Style
-	infoVal    lipgloss.Style
-	hintKey    lipgloss.Style
-	hintDesc   lipgloss.Style
-	tableHead  lipgloss.Style
-	crumbCur   lipgloss.Style
-	crumbPrev  lipgloss.Style
-	prompt     lipgloss.Style
-	rule       lipgloss.Style
-	panelTitle lipgloss.Style
+	logo        lipgloss.Style
+	brand       lipgloss.Style
+	infoVal     lipgloss.Style
+	hintKey     lipgloss.Style
+	hintDesc    lipgloss.Style
+	tableHead   lipgloss.Style
+	sectionHead lipgloss.Style
+	crumbCur    lipgloss.Style
+	crumbPrev   lipgloss.Style
+	prompt      lipgloss.Style
+	panelTitle  lipgloss.Style
 
-	badgeErr lipgloss.Style
+	bright lipgloss.Style
+	dim    lipgloss.Style
+	faint  lipgloss.Style
+	sep    lipgloss.Style
 
-	rowSel   lipgloss.Style
+	live   lipgloss.Style
+	paused lipgloss.Style
+	follow lipgloss.Style
+
 	match    lipgloss.Style
 	matchCur lipgloss.Style
 	req      lipgloss.Style
+	neutral  lipgloss.Style
 	resp     lipgloss.Style
 	respErr  lipgloss.Style
 	slow     lipgloss.Style
 	warn     lipgloss.Style
 	invalid  lipgloss.Style
 	notif    lipgloss.Style
-	stderr   lipgloss.Style
 	pending  lipgloss.Style
-	dim      lipgloss.Style
 }
 
-func newStyles() styles {
+func newStyles(t theme) styles {
+	fg := func(c lipgloss.TerminalColor) lipgloss.Style { return lipgloss.NewStyle().Foreground(c) }
 	return styles{
-		logo:       lipgloss.NewStyle().Bold(true).Foreground(colAccent),
-		infoKey:    lipgloss.NewStyle().Foreground(colCrumb),
-		infoVal:    lipgloss.NewStyle().Foreground(colHeader).Bold(true),
-		hintKey:    lipgloss.NewStyle().Foreground(colAccent),
-		hintDesc:   lipgloss.NewStyle().Foreground(colDim),
-		tableHead:  lipgloss.NewStyle().Bold(true).Foreground(colHeadCl),
-		crumbCur:   lipgloss.NewStyle().Bold(true).Foreground(colBlack).Background(colCrumb).Padding(0, 1),
-		crumbPrev:  lipgloss.NewStyle().Foreground(colHeader).Background(colFaint).Padding(0, 1),
-		prompt:     lipgloss.NewStyle().Foreground(colHeader),
-		rule:       lipgloss.NewStyle().Foreground(lipgloss.Color("238")),
-		panelTitle: lipgloss.NewStyle().Bold(true).Foreground(colAccent),
+		logo:        fg(t.blue).Bold(true),
+		brand:       fg(t.blue).Bold(true),
+		infoVal:     fg(t.bright).Bold(true),
+		hintKey:     fg(t.blue),
+		hintDesc:    fg(t.dim),
+		tableHead:   fg(t.dim).Faint(true),
+		sectionHead: fg(t.blue).Bold(true),
+		crumbCur:    fg(t.bright).Bold(true),
+		crumbPrev:   fg(t.dim),
+		prompt:      fg(t.bright),
+		panelTitle:  fg(t.blue).Bold(true),
 
-		badgeErr: lipgloss.NewStyle().Foreground(colErr).Bold(true),
+		bright: fg(t.bright),
+		dim:    fg(t.dim),
+		faint:  fg(t.dim).Faint(true),
+		sep:    fg(t.dim).Faint(true),
 
-		rowSel:   lipgloss.NewStyle().Background(colCrumb).Foreground(colBlack).Bold(true),
-		match:    lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(colHeader),
-		matchCur: lipgloss.NewStyle().Background(colSlow).Foreground(colBlack).Bold(true),
-		req:      lipgloss.NewStyle().Foreground(colReq),
-		resp:     lipgloss.NewStyle().Foreground(colResp),
-		respErr:  lipgloss.NewStyle().Foreground(colErr).Bold(true),
-		slow:     lipgloss.NewStyle().Foreground(colSlow),
-		warn:     lipgloss.NewStyle().Foreground(colWarn).Bold(true),
-		invalid:  lipgloss.NewStyle().Foreground(colInvalid).Bold(true),
-		notif:    lipgloss.NewStyle().Foreground(colNotif),
-		stderr:   lipgloss.NewStyle().Foreground(colStderr),
-		pending:  lipgloss.NewStyle().Foreground(lipgloss.Color("179")), // soft gold, in-flight
-		dim:      lipgloss.NewStyle().Foreground(colFaint),
+		live:   fg(t.green),
+		paused: fg(t.yellow),
+		follow: fg(t.cyan),
+
+		match:    lipgloss.NewStyle().Background(t.surface).Foreground(t.yellow),
+		matchCur: lipgloss.NewStyle().Background(t.yellow).Foreground(lipgloss.Color("0")),
+		req:      fg(t.blue),   // request kind identity and marker
+		neutral:  fg(t.fg),     // response, kind identity is neutral
+		resp:     fg(t.green),  // ok verdict
+		respErr:  fg(t.red),    // err verdict
+		slow:     fg(t.yellow), // slow verdict
+		warn:     fg(t.yellow), // protocol warning
+		invalid:  fg(t.red),    // bad verdict, same red as err, told apart by the ! glyph
+		notif:    fg(t.dim),    // notification, stderr, and invalid glyph, neutral comment
+		pending:  fg(t.cyan),   // in-flight verdict, spinner, follow
 	}
 }

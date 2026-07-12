@@ -129,6 +129,7 @@ func demoScript() []demoFrame {
 		{dir: proxy.ClientToServer, raw: `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"slow_search","arguments":{"query":"everything"}}}`, pause: 500 * time.Millisecond},
 		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":4,"progress":1,"total":3}}`, pause: 600 * time.Millisecond},
 		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":4,"progress":2,"total":3}}`, pause: 600 * time.Millisecond},
+		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":4,"progress":3,"total":3}}`, pause: 600 * time.Millisecond},
 		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"found 3 results"}]}}`, pause: 600 * time.Millisecond},
 		{dir: proxy.ClientToServer, raw: `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"big_payload","arguments":{}}}`, pause: 400 * time.Millisecond},
 		{dir: proxy.ServerToClient, raw: fmt.Sprintf(`{"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":%q}]}}`, bigValue), pause: 600 * time.Millisecond},

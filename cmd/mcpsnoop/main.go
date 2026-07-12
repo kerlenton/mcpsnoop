@@ -125,6 +125,7 @@ func codeOf(code int) error {
 }
 
 func execute(args []string) int {
+	tui.Version = appVersion() // surfaced in the help overlay
 	root := newRootCmd()
 	root.SetArgs(args)
 	root.SilenceErrors = true
