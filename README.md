@@ -199,7 +199,7 @@ dir:s2c kind:req                  # server-initiated requests (sampling, roots)
 Turn any captured session into a portable file.
 
 ```bash
-mcpsnoop export -T json|html|text|otlp [-o file|-] [session-id|log.jsonl]
+mcpsnoop export -T json|html|text|otlp [-o file|-] [session-id|log.jsonl|-]
 ```
 
 | Format | What you get |
@@ -216,9 +216,9 @@ mcpsnoop export -T json | jq              # the newest session, piped to jq
 mcpsnoop export -T otlp -o trace.json     # import into an OTLP-compatible tracing backend
 ```
 
-Omit `-o` to write to stdout, and omit the session to take the newest. In the
-TUI, press `e` to export the selected session as HTML, or run
-`:export json|html|text|otlp [path]` from command mode.
+Omit `-o` to write to stdout, and omit the session to take the newest, or pass
+`-` to read JSONL from stdin. In the TUI, press `e` to export the selected
+session as HTML, or run `:export json|html|text|otlp [path]` from command mode.
 
 ## Checking sessions in CI
 

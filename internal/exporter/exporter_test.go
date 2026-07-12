@@ -104,6 +104,28 @@ func TestWriteFormats(t *testing.T) {
 	}
 }
 
+// TestExportFromReaderMatchesFile covers the reader form of ExportFile, the path
+// `export -` uses to render a piped log, so stdin exports like a file does.
+func TestExportFromReaderMatchesFile(t *testing.T) {
+	data, err := os.ReadFile(sampleLog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reader, file bytes.Buffer
+	if err := Export(bytes.NewReader(data), "stdin", &reader, Options{Format: FormatText}); err != nil {
+		t.Fatalf("export from reader failed: %v", err)
+	}
+	if err := ExportFile(sampleLog(t), &file, Options{Format: FormatText}); err != nil {
+		t.Fatalf("export from file failed: %v", err)
+	}
+	if reader.String() != file.String() {
+		t.Fatalf("reader export differs from file export:\n--- reader ---\n%s\n--- file ---\n%s", reader.String(), file.String())
+	}
+	if !strings.Contains(reader.String(), "echo") {
+		t.Fatalf("reader export missing tool name:\n%s", reader.String())
+	}
+}
+
 // TestResolveSessionPath covers every branch of the resolver that both `export`
 // and `open` share, a session id, the newest saved log, and an existing path
 // outside the sessions directory that must pass through unchanged.

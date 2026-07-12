@@ -395,7 +395,18 @@ func otlpDouble(key string, value float64) otlpAttribute {
 }
 
 func ExportFile(inputPath string, w io.Writer, opts Options) error {
-	st, sessionID, err := LoadFile(inputPath)
+	f, err := os.Open(inputPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return Export(f, inputPath, w, opts)
+}
+
+// Export renders the session read from r, a JSONL envelope stream, to w. It is
+// the reader form of ExportFile, so a piped log ("-") exports like a file.
+func Export(r io.Reader, source string, w io.Writer, opts Options) error {
+	st, sessionID, err := Load(r, source)
 	if err != nil {
 		return err
 	}
