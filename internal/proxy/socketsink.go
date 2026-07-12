@@ -95,10 +95,7 @@ func (s *SocketSink) pump(ctx context.Context, conn net.Conn) {
 		select {
 		case <-ctx.Done():
 			return
-		case env, ok := <-s.ch:
-			if !ok {
-				return
-			}
+		case env := <-s.ch:
 			if err := enc.Encode(env); err != nil {
 				return // hub went away, outer loop will redial
 			}
@@ -118,10 +115,12 @@ func (s *SocketSink) Emit(env Envelope) {
 func (s *SocketSink) Dropped() uint64 { return s.dropped.Load() }
 
 func (s *SocketSink) Close() error {
-	s.once.Do(func() {
-		s.cancel()
-		close(s.ch)
-	})
+	// Cancel to stop run/pump, but deliberately do not close s.ch. A proxy
+	// goroutine can still emit during shutdown (e.g. an SSE tap draining after the
+	// HTTP server's grace period), and a send on a closed channel panics even
+	// under select. With the channel open, that late emit drops into Emit's
+	// default case instead.
+	s.once.Do(s.cancel)
 	<-s.done
 	return nil
 }

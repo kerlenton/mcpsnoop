@@ -179,7 +179,11 @@ func (t *sseTap) feed(b []byte) {
 		case '\r':
 			// ignore
 		default:
-			t.lineBuf.WriteByte(c)
+			// Cap the observed line so a server that never sends a newline cannot
+			// grow this buffer without bound. Forwarding is unaffected.
+			if t.lineBuf.Len() < maxFrameBytes {
+				t.lineBuf.WriteByte(c)
+			}
 		}
 	}
 }
@@ -193,6 +197,11 @@ func (t *sseTap) line(l []byte) {
 		return
 	}
 	if rest, ok := bytes.CutPrefix(l, []byte("data:")); ok {
+		// Cap the observed event so a stream that never sends its terminating
+		// blank line cannot grow this buffer without bound.
+		if t.dataBuf.Len() >= maxFrameBytes {
+			return
+		}
 		if t.dataBuf.Len() > 0 {
 			t.dataBuf.WriteByte('\n')
 		}
