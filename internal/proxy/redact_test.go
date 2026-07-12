@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -163,6 +164,60 @@ func TestRedactingSinkScrubsOnlyMatchingJSONPath(t *testing.T) {
 	}
 	if got := args["nested"].(map[string]any)["password"]; got != "keep-nested" {
 		t.Fatalf("nested password = %v, want unchanged", got)
+	}
+}
+
+func TestRedactPathPreservesUntargetedNumbers(t *testing.T) {
+	path, err := ParseRedactPath("$.secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureSink{}
+	redacted := NewRedactingSink(sink, RedactConfig{Paths: []RedactPath{path}})
+	// Redacting one field re-marshals the whole payload, so untargeted big
+	// integers and exponents must round-trip verbatim, not through float64.
+	redacted.Emit(Envelope{Raw: json.RawMessage(
+		`{"secret":"x","id":10000000000000000001,"big":123456789012345678,"exp":1.5e10}`)})
+
+	out := string(sink.byDir("")[0].Raw)
+	if !strings.Contains(out, `"secret":"[REDACTED]"`) {
+		t.Fatalf("secret not redacted: %s", out)
+	}
+	for _, want := range []string{`"id":10000000000000000001`, `"big":123456789012345678`, `"exp":1.5e10`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("number was reformatted, missing %q in: %s", want, out)
+		}
+	}
+}
+
+func TestRedactPathComposesWithKeyRedaction(t *testing.T) {
+	path, err := ParseRedactPath("$.params.arguments.password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureSink{}
+	redacted := NewRedactingSink(sink, RedactConfig{
+		Keys:  []string{"token"},
+		Paths: []RedactPath{path},
+	})
+	// A path rule and a key rule apply to the same payload in one pass.
+	redacted.Emit(Envelope{Raw: json.RawMessage(
+		`{"params":{"token":"t","arguments":{"password":"p","keep":"k"}}}`)})
+
+	var obj map[string]any
+	if err := json.Unmarshal(sink.byDir("")[0].Raw, &obj); err != nil {
+		t.Fatal(err)
+	}
+	params := obj["params"].(map[string]any)
+	if params["token"] != redactedValue {
+		t.Fatalf("token (key rule) = %v, want redacted", params["token"])
+	}
+	args := params["arguments"].(map[string]any)
+	if args["password"] != redactedValue {
+		t.Fatalf("password (path rule) = %v, want redacted", args["password"])
+	}
+	if args["keep"] != "k" {
+		t.Fatalf("keep = %v, want unchanged", args["keep"])
 	}
 }
 

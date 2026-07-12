@@ -167,16 +167,19 @@ func (r Redactor) redactRaw(raw json.RawMessage) (json.RawMessage, bool) {
 func (r Redactor) redactPaths(value *any) bool {
 	changed := false
 	for _, path := range r.paths {
-		pathChanged := false
+		matched := false
 		modified, err := path.expr.Modify(*value, func(any) (any, bool) {
-			pathChanged = true
+			matched = true
 			return redactedValue, true
 		})
-		if err != nil {
+		// Only adopt the rewritten tree when the path actually hit something, so a
+		// non-matching path leaves the original decoded value (and its exact
+		// numbers) in place instead of a round-tripped copy.
+		if err != nil || !matched {
 			continue
 		}
 		*value = modified
-		changed = changed || pathChanged
+		changed = true
 	}
 	return changed
 }
