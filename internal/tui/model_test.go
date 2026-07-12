@@ -603,6 +603,32 @@ func TestSwitchSessionWithBrackets(t *testing.T) {
 	}
 }
 
+func TestToolSummaryOverlay(t *testing.T) {
+	st := store.New(0)
+	seed(st)
+	m := ready(t, st)
+
+	m = typeRunes(t, m, "s")
+	if m.overlay != overlaySummary {
+		t.Fatal("s should open the tool summary")
+	}
+	out := m.View()
+	for _, want := range []string{"TOOL SUMMARY", "echo", "CALLS", "ERRORS", "P50", "SLOWEST CALLS"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing %q\n%s", want, out)
+		}
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.overlay != overlayNone {
+		t.Fatal("esc should close the summary")
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = typeRunes(t, m, "s")
+	if m.view != viewStream || m.overlay != overlaySummary {
+		t.Fatal("s should also open the summary from the stream")
+	}
+}
+
 func TestSortSessions(t *testing.T) {
 	st := store.New(0)
 	st.Ingest(sessionEnv("s1", "gamma"))

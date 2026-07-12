@@ -19,13 +19,14 @@ type keyMap struct {
 	Command key.Binding
 	Help    key.Binding
 
-	Replay key.Binding
-	Caps   key.Binding
-	Pause  key.Binding
-	Follow key.Binding
-	Copy   key.Binding
-	Export key.Binding
-	Delete key.Binding
+	Replay  key.Binding
+	Caps    key.Binding
+	Summary key.Binding
+	Pause   key.Binding
+	Follow  key.Binding
+	Copy    key.Binding
+	Export  key.Binding
+	Delete  key.Binding
 
 	Quit key.Binding
 }
@@ -45,13 +46,14 @@ func defaultKeys() keyMap {
 		Command: key.NewBinding(key.WithKeys(":"), key.WithHelp(":", "command")),
 		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 
-		Replay: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "replay")),
-		Caps:   key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "capabilities")),
-		Pause:  key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause")),
-		Follow: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow")),
-		Copy:   key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy JSON")),
-		Export: key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "export HTML")),
-		Delete: key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl-d", "delete session")),
+		Replay:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "replay")),
+		Caps:    key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "capabilities")),
+		Summary: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "tool summary")),
+		Pause:   key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause")),
+		Follow:  key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow")),
+		Copy:    key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy JSON")),
+		Export:  key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "export HTML")),
+		Delete:  key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl-d", "delete session")),
 
 		Quit: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp(":q", "quit")),
 	}

@@ -762,6 +762,7 @@ func (m Model) renderHelp() string {
 	frameActions := helpGroup{"FRAME ACTIONS", [][2]string{
 		{"r", "replay the selected tool call"},
 		{"c", "show negotiated capabilities"},
+		{"s", "show per-tool latency and error summary"},
 		{"p", "pause or resume the stream"},
 		{"f", "toggle follow"},
 	}}
@@ -1101,6 +1102,47 @@ func (m Model) capsContent() string {
 		b.WriteString("\n\n" + strings.Join(sections, "\n\n"))
 	}
 	return b.String()
+}
+
+func (m Model) summaryContent() string {
+	sid := m.currentSessionID()
+	label := m.streamLabel
+	if m.view == viewSessions && len(m.sessions) > 0 {
+		label = m.sessions[m.selSession].Label
+	}
+	var b strings.Builder
+	b.WriteString(m.styles.panelTitle.Render(" TOOL SUMMARY · "+label) + "\n\n")
+	summary, ok := m.store.ToolSummary(sid)
+	if !ok || len(summary.Tools) == 0 {
+		b.WriteString(m.styles.dim.Render(" no tool calls observed yet for this session"))
+		return b.String()
+	}
+	b.WriteString(" TOOL                 CALLS  ERRORS  PENDING       P50       P95       P99\n")
+	for _, tool := range summary.Tools {
+		b.WriteString(fmt.Sprintf(" %s %5d  %6d  %7d  %8s  %8s  %8s\n",
+			cellL(tool.Name, 20), tool.Calls, tool.Errors, tool.Pending,
+			formatLatency(tool.P50), formatLatency(tool.P95), formatLatency(tool.P99)))
+	}
+	b.WriteString("\n" + m.styles.tableHead.Render(" SLOWEST CALLS") + "\n")
+	if len(summary.Slowest) == 0 {
+		b.WriteString(m.styles.dim.Render(" no completed tool calls"))
+		return b.String()
+	}
+	for _, call := range summary.Slowest {
+		status := "ok"
+		if call.Failed {
+			status = "error"
+		}
+		b.WriteString(fmt.Sprintf(" %8s  %-5s  %s id=%s\n", formatLatency(call.Duration), status, cellL(call.ToolName, 20), call.ID))
+	}
+	return b.String()
+}
+
+func formatLatency(duration time.Duration) string {
+	if duration == 0 {
+		return "-"
+	}
+	return duration.Round(time.Microsecond).String()
 }
 
 func infoLine(raw json.RawMessage) string {

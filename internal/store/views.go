@@ -1,7 +1,10 @@
 package store
 
 import (
+	"cmp"
 	"encoding/json"
+	"math"
+	"slices"
 	"sort"
 	"time"
 
@@ -78,6 +81,33 @@ type CapsView struct {
 	ServerInfo      json.RawMessage
 	Client          json.RawMessage
 	Server          json.RawMessage
+}
+
+// ToolStats summarizes calls to one MCP tool within a session.
+type ToolStats struct {
+	Name    string
+	Calls   int
+	Errors  int
+	Pending int
+	P50     time.Duration
+	P95     time.Duration
+	P99     time.Duration
+}
+
+// SlowToolCall identifies one of a session's slowest completed tool calls.
+type SlowToolCall struct {
+	CallIndex int
+	ID        string
+	ToolName  string
+	Duration  time.Duration
+	Failed    bool
+	Start     time.Time
+}
+
+// SessionToolSummary is the aggregate tool activity for one session.
+type SessionToolSummary struct {
+	Tools   []ToolStats
+	Slowest []SlowToolCall
 }
 
 // view builds the snapshot for an event. Caller holds at least the read lock.
@@ -266,4 +296,81 @@ func (s *Store) Calls(sessionID string) []CallView {
 		}
 	}
 	return out
+}
+
+// ToolSummary returns per-tool latency and error statistics plus the five
+// slowest completed tool calls. Pending calls are counted but have no latency.
+func (s *Store) ToolSummary(sessionID string) (SessionToolSummary, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return SessionToolSummary{}, false
+	}
+
+	type aggregate struct {
+		stats     ToolStats
+		durations []time.Duration
+	}
+	byName := make(map[string]*aggregate)
+	var slowest []SlowToolCall
+	callIndex := 0
+	for _, ev := range sess.events {
+		if ev.kind != EventRequest || ev.call == nil {
+			continue
+		}
+		c := ev.call
+		index := callIndex
+		callIndex++
+		if !c.isTool {
+			continue
+		}
+		agg := byName[c.toolName]
+		if agg == nil {
+			agg = &aggregate{stats: ToolStats{Name: c.toolName}}
+			byName[c.toolName] = agg
+		}
+		agg.stats.Calls++
+		if c.state == Pending {
+			agg.stats.Pending++
+			continue
+		}
+		if c.err != nil || c.toolErr {
+			agg.stats.Errors++
+		}
+		duration := c.end.Sub(c.start)
+		agg.durations = append(agg.durations, duration)
+		slowest = append(slowest, SlowToolCall{
+			CallIndex: index, ID: c.id, ToolName: c.toolName,
+			Duration: duration, Failed: c.err != nil || c.toolErr, Start: c.start,
+		})
+	}
+
+	tools := make([]ToolStats, 0, len(byName))
+	for _, agg := range byName {
+		slices.Sort(agg.durations)
+		agg.stats.P50 = nearestRank(agg.durations, 0.50)
+		agg.stats.P95 = nearestRank(agg.durations, 0.95)
+		agg.stats.P99 = nearestRank(agg.durations, 0.99)
+		tools = append(tools, agg.stats)
+	}
+	slices.SortFunc(tools, func(a, b ToolStats) int { return cmp.Compare(a.Name, b.Name) })
+	slices.SortStableFunc(slowest, func(a, b SlowToolCall) int {
+		if c := cmp.Compare(b.Duration, a.Duration); c != 0 {
+			return c
+		}
+		return a.Start.Compare(b.Start)
+	})
+	if len(slowest) > 5 {
+		slowest = slowest[:5]
+	}
+	return SessionToolSummary{Tools: tools, Slowest: slowest}, true
+}
+
+func nearestRank(sorted []time.Duration, percentile float64) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	index := int(math.Ceil(percentile*float64(len(sorted)))) - 1
+	return sorted[max(index, 0)]
 }

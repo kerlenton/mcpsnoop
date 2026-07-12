@@ -172,6 +172,48 @@ func TestToolLevelError(t *testing.T) {
 	}
 }
 
+func TestToolSummaryAggregatesLatencyErrorsAndPendingCalls(t *testing.T) {
+	s := New(0)
+	t0 := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	durations := []time.Duration{10, 20, 30, 40, 100}
+	for i, milliseconds := range durations {
+		id := fmt.Sprintf("%d", i+1)
+		s.Ingest(req(uint64(i*2+1), t0, proxy.ClientToServer, id, "tools/call", `{"name":"echo"}`))
+		body := `"result":{"content":[]}`
+		if i == len(durations)-1 {
+			body = `"error":{"code":-32000,"message":"timeout"}`
+		}
+		s.Ingest(resp(uint64(i*2+2), t0.Add(milliseconds*time.Millisecond), proxy.ServerToClient, id, body))
+	}
+	s.Ingest(req(20, t0, proxy.ClientToServer, "6", "tools/call", `{"name":"search"}`))
+	s.Ingest(req(21, t0, proxy.ClientToServer, "7", "tools/list", ""))
+
+	summary, ok := s.ToolSummary("s1")
+	if !ok {
+		t.Fatal("ToolSummary should find the session")
+	}
+	if len(summary.Tools) != 2 {
+		t.Fatalf("tools = %d, want 2: %+v", len(summary.Tools), summary.Tools)
+	}
+	echo := summary.Tools[0]
+	if echo.Name != "echo" || echo.Calls != 5 || echo.Errors != 1 || echo.Pending != 0 {
+		t.Fatalf("echo summary = %+v", echo)
+	}
+	if echo.P50 != 30*time.Millisecond || echo.P95 != 100*time.Millisecond || echo.P99 != 100*time.Millisecond {
+		t.Fatalf("echo percentiles = %s/%s/%s, want 30ms/100ms/100ms", echo.P50, echo.P95, echo.P99)
+	}
+	search := summary.Tools[1]
+	if search.Name != "search" || search.Calls != 1 || search.Pending != 1 || search.P50 != 0 {
+		t.Fatalf("search summary = %+v", search)
+	}
+	if len(summary.Slowest) != 5 || summary.Slowest[0].ToolName != "echo" || summary.Slowest[0].Duration != 100*time.Millisecond || !summary.Slowest[0].Failed {
+		t.Fatalf("slowest calls = %+v", summary.Slowest)
+	}
+	if _, ok := s.ToolSummary("missing"); ok {
+		t.Fatal("ToolSummary should report an unknown session")
+	}
+}
+
 func TestServerToClientRequest(t *testing.T) {
 	// Server-initiated request (e.g. sampling) must correlate with the client's
 	// response travelling the other way.

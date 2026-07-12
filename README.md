@@ -166,10 +166,11 @@ server is written in.
 | `esc` | back | | `:` | command |
 | `j` / `k` | move | | `r` | replay a call |
 | `g` / `G` | top / bottom | | `c` | capabilities |
-| `ctrl-f` / `ctrl-b` | page | | `y` | copy |
+| `ctrl-f` / `ctrl-b` | page | | `s` | tool summary |
+| `p` | pause | | `y` | copy |
 | `shift`+`<key>` | sort by column | | `e` | export |
-| `p` | pause | | `ctrl-d` | delete session |
-| `f` | follow | | `?` | help |
+| `ctrl-d` | delete session | | `f` | follow |
+| `?` | help | | | |
 
 Press `?` in the app for the full list.
 
@@ -205,7 +206,7 @@ mcpsnoop export -T json|html|text|otlp [-o file|-] [session-id|log.jsonl|-]
 
 | Format | What you get |
 |---|---|
-| `json` | correlated calls, durations, status, tool-level `isError`, capabilities, and raw frames |
+| `json` | correlated calls, per-tool counts and p50/p95/p99 latency, slowest calls, capabilities, and raw frames |
 | `html` | a self-contained browser file with search and collapsible JSON |
 | `text` | a pretty plain-text dump |
 | `otlp` | OTLP JSON with a trace per session and a span per correlated call |

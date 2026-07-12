@@ -34,9 +34,33 @@ type Options struct {
 type SessionExport struct {
 	GeneratedAt  time.Time           `json:"generated_at"`
 	Session      SessionSummary      `json:"session"`
+	Summary      ToolSummaryExport   `json:"summary"`
 	Capabilities *CapabilitiesExport `json:"capabilities,omitempty"`
 	Calls        []CallExport        `json:"calls"`
 	Events       []EventExport       `json:"events"`
+}
+
+type ToolSummaryExport struct {
+	Tools        []ToolStatsExport `json:"tools"`
+	SlowestCalls []SlowCallExport  `json:"slowest_calls"`
+}
+
+type ToolStatsExport struct {
+	Name    string  `json:"name"`
+	Calls   int     `json:"calls"`
+	Errors  int     `json:"errors"`
+	Pending int     `json:"pending"`
+	P50MS   float64 `json:"p50_ms"`
+	P95MS   float64 `json:"p95_ms"`
+	P99MS   float64 `json:"p99_ms"`
+}
+
+type SlowCallExport struct {
+	CallIndex  int     `json:"call_index"`
+	ID         string  `json:"id"`
+	ToolName   string  `json:"tool_name"`
+	DurationMS float64 `json:"duration_ms"`
+	IsError    bool    `json:"is_error"`
 }
 
 type SessionSummary struct {
@@ -231,6 +255,9 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 		Calls:  outCalls,
 		Events: outEvents,
 	}
+	if summary, ok := st.ToolSummary(sessionID); ok {
+		out.Summary = exportToolSummary(summary)
+	}
 	if caps, ok := st.Capabilities(sessionID); ok {
 		out.Capabilities = &CapabilitiesExport{
 			ProtocolVersion: caps.ProtocolVersion,
@@ -241,6 +268,30 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 		}
 	}
 	return out, nil
+}
+
+func exportToolSummary(summary store.SessionToolSummary) ToolSummaryExport {
+	out := ToolSummaryExport{
+		Tools:        make([]ToolStatsExport, 0, len(summary.Tools)),
+		SlowestCalls: make([]SlowCallExport, 0, len(summary.Slowest)),
+	}
+	for _, tool := range summary.Tools {
+		out.Tools = append(out.Tools, ToolStatsExport{
+			Name: tool.Name, Calls: tool.Calls, Errors: tool.Errors, Pending: tool.Pending,
+			P50MS: durationMS(tool.P50), P95MS: durationMS(tool.P95), P99MS: durationMS(tool.P99),
+		})
+	}
+	for _, call := range summary.Slowest {
+		out.SlowestCalls = append(out.SlowestCalls, SlowCallExport{
+			CallIndex: call.CallIndex,
+			ID:        call.ID, ToolName: call.ToolName, DurationMS: durationMS(call.Duration), IsError: call.Failed,
+		})
+	}
+	return out
+}
+
+func durationMS(duration time.Duration) float64 {
+	return float64(duration) / float64(time.Millisecond)
 }
 
 func Write(w io.Writer, data SessionExport, opts Options) error {

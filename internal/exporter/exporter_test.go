@@ -62,6 +62,12 @@ func TestBuildCorrelatedExport(t *testing.T) {
 	if len(out.Events) != 2 || out.Events[1].CallIndex == nil || *out.Events[1].CallIndex != 0 {
 		t.Fatalf("bad event correlation: %+v", out.Events)
 	}
+	if len(out.Summary.Tools) != 1 || out.Summary.Tools[0].Name != "echo" || out.Summary.Tools[0].P50MS != 25 {
+		t.Fatalf("bad tool summary: %+v", out.Summary)
+	}
+	if len(out.Summary.SlowestCalls) != 1 || out.Summary.SlowestCalls[0].CallIndex != 0 || out.Summary.SlowestCalls[0].DurationMS != 25 {
+		t.Fatalf("bad slowest calls: %+v", out.Summary.SlowestCalls)
+	}
 }
 
 func TestBuildIncludesValidationWarning(t *testing.T) {
@@ -100,6 +106,13 @@ func TestWriteFormats(t *testing.T) {
 		got := buf.String()
 		if !strings.Contains(got, "echo") {
 			t.Fatalf("%s export missing tool name:\n%s", format, got)
+		}
+		if format == FormatJSON {
+			for _, field := range []string{`"summary"`, `"p50_ms": 25`, `"slowest_calls"`, `"call_index": 0`} {
+				if !strings.Contains(got, field) {
+					t.Fatalf("json export missing %s:\n%s", field, got)
+				}
+			}
 		}
 	}
 }

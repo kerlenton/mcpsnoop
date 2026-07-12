@@ -57,6 +57,7 @@ const (
 	overlayNone overlayMode = iota
 	overlayInspector
 	overlayCaps
+	overlaySummary
 	overlayReplay
 )
 
@@ -292,7 +293,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Copy):
 			m.copyCurrent()
 		case key.Matches(msg, m.keys.Enter, m.keys.Back, m.keys.Quit),
-			key.Matches(msg, m.keys.Caps):
+			key.Matches(msg, m.keys.Caps, m.keys.Summary):
 			m.closeOverlay()
 		default:
 			var cmd tea.Cmd
@@ -344,6 +345,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Caps):
 		if m.currentSessionID() != "" {
 			m.openOverlay(overlayCaps, m.capsContent())
+		}
+	case key.Matches(msg, m.keys.Summary):
+		if m.currentSessionID() != "" {
+			m.openOverlay(overlaySummary, m.summaryContent())
 		}
 	case key.Matches(msg, m.keys.Replay):
 		if cmd := m.startReplay(); cmd != nil {
