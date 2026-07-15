@@ -59,7 +59,11 @@ func Replay(ctx context.Context, command []string, cwd, method string, params js
 		return Result{}, fmt.Errorf("replay: start: %w", err)
 	}
 	defer func() {
+		// Close stdin for a graceful stop, then cancel to SIGKILL a server that
+		// ignores EOF, so teardown never blocks on Wait until the timeout fires.
+		// cancel is idempotent, the outer defer calls it too.
 		_ = stdin.Close()
+		cancel()
 		_ = cmd.Wait()
 	}()
 
