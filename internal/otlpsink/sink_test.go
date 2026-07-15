@@ -249,3 +249,59 @@ func TestSinkCloseCancelsBlockedDelivery(t *testing.T) {
 		t.Fatal("Close blocked on unavailable collector")
 	}
 }
+
+func TestSinkEmitAfterCloseDoesNotPanic(t *testing.T) {
+	sink := New(Config{Endpoint: "http://collector.invalid/v1/traces", Buffer: 1})
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A proxy goroutine can still emit during shutdown; it must drop rather than
+	// panic on a send to a closed channel.
+	request, response := callEnvelopes("session-1", 1, time.Now())
+	sink.Emit(request)
+	sink.Emit(response)
+	if sink.Dropped() == 0 {
+		t.Fatal("post-close emits should be counted as dropped")
+	}
+}
+
+func TestSinkDropsPayloadAfterMaxRetriesAndAdvances(t *testing.T) {
+	received := make(chan struct{}, 1)
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) <= maxDeliveryAttempts {
+			w.WriteHeader(http.StatusInternalServerError) // fail every attempt for the first call
+			return
+		}
+		received <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sink := New(Config{
+		Endpoint:   server.URL,
+		Buffer:     8,
+		MinBackoff: time.Millisecond,
+		MaxBackoff: 2 * time.Millisecond,
+	})
+	defer sink.Close()
+
+	// The first completed call fails every attempt, so it is dropped after the
+	// retry budget instead of blocking newer spans forever.
+	req1, resp1 := callEnvelopes("session-1", 1, time.Now())
+	sink.Emit(req1)
+	sink.Emit(resp1)
+	// The second call is delivered once the sink advances past the dropped first.
+	req2, resp2 := callEnvelopes("session-1", 2, time.Now())
+	sink.Emit(req2)
+	sink.Emit(resp2)
+
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sink did not advance to the second call after giving up on the first")
+	}
+	if sink.Dropped() == 0 {
+		t.Fatal("the undeliverable first call should have been dropped")
+	}
+}

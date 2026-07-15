@@ -35,7 +35,8 @@ type Sink struct {
 	ch       chan proxy.Envelope
 	cancel   context.CancelFunc
 	done     chan struct{}
-	once     sync.Once
+	mu       sync.RWMutex
+	closed   bool
 	dropped  atomic.Uint64
 	minRetry time.Duration
 	maxRetry time.Duration
@@ -185,36 +186,67 @@ func payloadFor(request, response proxy.Envelope) ([]byte, bool) {
 	return payload.Bytes(), true
 }
 
+// maxDeliveryAttempts bounds the retries of a single payload, so a persistently
+// failing collector drops the current span and advances to newer ones instead of
+// blocking delivery forever.
+const maxDeliveryAttempts = 5
+
+// deliver POSTs payload, retrying with backoff up to maxDeliveryAttempts. It
+// reports whether run should keep going: true after a success or after giving up
+// on the payload, and false only when ctx is cancelled (shutdown).
 func (s *Sink) deliver(ctx context.Context, payload []byte) bool {
 	backoff := s.minRetry
-	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, bytes.NewReader(payload))
-		if err == nil {
-			for name, values := range s.headers {
-				for _, value := range values {
-					req.Header.Add(name, value)
-				}
-			}
-			req.Header.Set("Content-Type", "application/json")
-			var resp *http.Response
-			resp, err = s.client.Do(req)
-			if err == nil {
-				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-				_ = resp.Body.Close()
-				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					return true
-				}
-			}
+	for attempt := range maxDeliveryAttempts {
+		if s.post(ctx, payload) {
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		if attempt == maxDeliveryAttempts-1 {
+			break
 		}
 		if !sleep(ctx, backoff) {
 			return false
 		}
 		backoff = min(backoff*2, s.maxRetry)
 	}
+	s.dropped.Add(1) // exhausted the retry budget, drop this span and move on
+	return true
+}
+
+// post makes one delivery attempt and reports a 2xx success.
+func (s *Sink) post(ctx context.Context, payload []byte) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return false
+	}
+	for name, values := range s.headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return false
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	_ = resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
 // Emit queues env without waiting for correlation or network delivery.
 func (s *Sink) Emit(env proxy.Envelope) {
+	// The RLock pairs with Close taking the write lock before it closes s.ch, so a
+	// late emit during shutdown (e.g. an SSE tap draining after the HTTP server's
+	// grace period) drops instead of panicking on a send to a closed channel.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		s.dropped.Add(1)
+		return
+	}
 	select {
 	case s.ch <- env:
 	default:
@@ -227,7 +259,15 @@ func (s *Sink) Dropped() uint64 { return s.dropped.Load() }
 
 // Close stops delivery promptly, including an in-flight HTTP request.
 func (s *Sink) Close() error {
-	s.once.Do(func() { close(s.ch) })
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	close(s.ch)
+	s.mu.Unlock()
+
 	timer := time.NewTimer(500 * time.Millisecond)
 	defer timer.Stop()
 	select {
