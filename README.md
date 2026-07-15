@@ -97,6 +97,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, or otlp |
 | `mcpsnoop check` | fail CI on errors, invalid frames, warnings, slow, or hung calls |
+| `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
 | `mcpsnoop remote <user@host>` | print the SSH tunnel command |
 | `mcpsnoop demo` | play a scripted session |
@@ -243,6 +244,21 @@ Delivery is best-effort and never blocks proxied MCP traffic. If the collector
 is unavailable, mcpsnoop retries in the background and drops new trace frames
 when its bounded queue is full. The normal JSONL session log remains the durable
 record.
+
+## Comparing sessions
+
+Compare two saved sessions by id or JSONL path.
+
+```bash
+mcpsnoop diff before-session after-session
+mcpsnoop diff old.jsonl new.jsonl
+```
+
+The report shows tools that were added or removed, `inputSchema` changes,
+matching tool calls whose status changed, and notable duration shifts. Calls are
+matched by tool name and arguments, so reordered calls still compare correctly.
+By default, duration changes must differ by at least 100 ms and 2x; use
+`--duration-threshold` and `--duration-ratio` to adjust those cutoffs.
 
 ## Checking sessions in CI
 
