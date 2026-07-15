@@ -258,7 +258,7 @@ func Write(w io.Writer, data SessionExport, opts Options) error {
 	case FormatText:
 		return writeText(w, data)
 	case FormatOTLP:
-		return writeOTLP(w, data)
+		return WriteOTLP(w, data)
 	default:
 		return fmt.Errorf("unknown export format %q", format)
 	}
@@ -315,7 +315,8 @@ type otlpAnyValue struct {
 	DoubleValue *float64 `json:"doubleValue,omitempty"`
 }
 
-func writeOTLP(w io.Writer, data SessionExport) error {
+// WriteOTLP writes data using the OTLP JSON encoding.
+func WriteOTLP(w io.Writer, data SessionExport) error {
 	traceID := otlpID(16, "trace", data.Session.ID)
 	spans := make([]otlpSpan, 0, len(data.Calls))
 	for _, call := range data.Calls {

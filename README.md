@@ -221,6 +221,28 @@ Omit `-o` to write to stdout, and omit the session to take the newest, or pass
 `-` to read JSONL from stdin. In the TUI, press `e` to export the selected
 session as HTML, or run `:export json|html|text|otlp [path]` from command mode.
 
+### Stream completed calls to an OTLP collector
+
+Send spans while the proxy is running by pointing it at an OTLP/HTTP JSON
+traces endpoint. Repeat `--otlp-header` for collector authentication or tenant
+headers.
+
+```bash
+mcpsnoop \
+  --otlp-endpoint http://localhost:4318/v1/traces \
+  --otlp-header "Authorization=Bearer $OTLP_TOKEN" \
+  -- node build/index.js
+
+mcpsnoop http \
+  --target http://localhost:3000/mcp \
+  --otlp-endpoint http://localhost:4318/v1/traces
+```
+
+Delivery is best-effort and never blocks proxied MCP traffic. If the collector
+is unavailable, mcpsnoop retries in the background and drops new trace frames
+when its bounded queue is full. The normal JSONL session log remains the durable
+record.
+
 ## Checking sessions in CI
 
 Gate a recorded agent run on errors, stream corruption, protocol warnings, slow

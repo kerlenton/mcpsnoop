@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -39,7 +41,7 @@ func TestLabelFor(t *testing.T) {
 // command without spawning a process, and returns a restore func.
 func stubShim(capture *[]string) func() {
 	orig := runShimFn
-	runShimFn = func(command []string, _, _ string, _ bool, _ proxy.RedactConfig) int {
+	runShimFn = func(command []string, _, _ string, _ bool, _ proxy.RedactConfig, _ traceOptions) int {
 		*capture = command
 		return 0
 	}
@@ -93,7 +95,7 @@ func TestRootNoArgsRunsHubNotShim(t *testing.T) {
 	defer func() { runHubFn = origHub }()
 
 	origShim := runShimFn
-	runShimFn = func([]string, string, string, bool, proxy.RedactConfig) int {
+	runShimFn = func([]string, string, string, bool, proxy.RedactConfig, traceOptions) int {
 		t.Fatal("shim ran for bare mcpsnoop, want hub")
 		return 0
 	}
@@ -252,6 +254,124 @@ func TestRedactPathsFlagRejectsInvalidJSONPath(t *testing.T) {
 	}
 }
 
+func TestOTLPHeadersFlagParsesRepeatedValues(t *testing.T) {
+	var flag otlpHeadersFlag
+	for _, value := range []string{
+		"Authorization=Bearer test-token",
+		"X-Tenant=team-a",
+		"X-Tenant=team-b",
+	} {
+		if err := flag.Set(value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	header := http.Header(flag)
+	if got := header.Get("Authorization"); got != "Bearer test-token" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := header.Values("X-Tenant"); !slices.Equal(got, []string{"team-a", "team-b"}) {
+		t.Fatalf("X-Tenant = %v", got)
+	}
+}
+
+func TestOTLPHeadersFlagRejectsMalformedValues(t *testing.T) {
+	for _, value := range []string{"Authorization", "=token", "Bad Header=value", "X-Test=one\ntwo"} {
+		var flag otlpHeadersFlag
+		if err := flag.Set(value); err == nil {
+			t.Fatalf("Set(%q) returned nil", value)
+		}
+	}
+}
+
+func TestParseTraceOptionsValidatesEndpointAndHeaderDependency(t *testing.T) {
+	for _, endpoint := range []string{"collector:4318/v1/traces", "ftp://collector/v1/traces", "http:///v1/traces"} {
+		if _, err := parseTraceOptions(endpoint, nil); err == nil {
+			t.Fatalf("parseTraceOptions(%q) returned nil error", endpoint)
+		}
+	}
+	if _, err := parseTraceOptions("", otlpHeadersFlag{"Authorization": {"Bearer token"}}); err == nil {
+		t.Fatal("header without endpoint returned nil error")
+	}
+	got, err := parseTraceOptions("https://collector.example/v1/traces", otlpHeadersFlag{"Authorization": {"Bearer token"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OTLPEndpoint != "https://collector.example/v1/traces" || got.OTLPHeaders.Get("Authorization") != "Bearer token" {
+		t.Fatalf("trace options = %+v", got)
+	}
+}
+
+func TestProxyCommandsExposeLiveOTLPFlags(t *testing.T) {
+	root := newRootCmd()
+	for _, name := range []string{"otlp-endpoint", "otlp-header"} {
+		if root.Flags().Lookup(name) == nil {
+			t.Fatalf("root command is missing --%s", name)
+		}
+	}
+	httpCmd, _, err := root.Find([]string{"http"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"otlp-endpoint", "otlp-header"} {
+		if httpCmd.Flags().Lookup(name) == nil {
+			t.Fatalf("http command is missing --%s", name)
+		}
+	}
+}
+
+func TestTraceSinkStreamsCompletedCallToOTLP(t *testing.T) {
+	received := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		var payload struct {
+			ResourceSpans []struct {
+				ScopeSpans []struct {
+					Spans []json.RawMessage `json:"spans"`
+				} `json:"scopeSpans"`
+			} `json:"resourceSpans"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		} else if len(payload.ResourceSpans) != 1 || len(payload.ResourceSpans[0].ScopeSpans) != 1 || len(payload.ResourceSpans[0].ScopeSpans[0].Spans) != 1 {
+			t.Errorf("unexpected OTLP payload: %+v", payload)
+		}
+		received <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	traceFile := filepath.Join(t.TempDir(), "session.jsonl")
+	sink := traceSink("s1", traceFile, false, proxy.RedactConfig{}, traceOptions{
+		OTLPEndpoint: server.URL,
+		OTLPHeaders:  http.Header{"Authorization": {"Bearer test-token"}},
+	})
+	defer sink.Close()
+	started := time.Unix(1_700_000_000, 0)
+	sink.Emit(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "inventory", Seq: 1, TS: started,
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lookup"}}`),
+	})
+	sink.Emit(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "inventory", Seq: 2, TS: started.Add(20 * time.Millisecond),
+		Direction: proxy.ServerToClient,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	})
+
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for live OTLP delivery")
+	}
+	if data, err := os.ReadFile(traceFile); err != nil {
+		t.Fatal(err)
+	} else if len(data) == 0 {
+		t.Fatal("durable trace file is empty")
+	}
+}
+
 func TestTraceSinkRedactsFileAndLiveSocket(t *testing.T) {
 	stateDir := filepath.Join(os.TempDir(), fmt.Sprintf("mcpsnoop-test-%d", os.Getpid()))
 	if err := os.RemoveAll(stateDir); err != nil {
@@ -289,7 +409,7 @@ func TestTraceSinkRedactsFileAndLiveSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sink := traceSink("s1", traceFile, false, proxy.RedactConfig{Paths: []proxy.RedactPath{path}})
+	sink := traceSink("s1", traceFile, false, proxy.RedactConfig{Paths: []proxy.RedactPath{path}}, traceOptions{})
 	closed := false
 	t.Cleanup(func() {
 		if !closed {

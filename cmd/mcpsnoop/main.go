@@ -14,18 +14,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
+	"github.com/kerlenton/mcpsnoop/internal/otlpsink"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
@@ -118,6 +121,69 @@ func (f *redactPathsFlag) Set(value string) error {
 
 func (f *redactPathsFlag) Type() string { return "jsonpath" }
 
+type otlpHeadersFlag http.Header
+
+func (f *otlpHeadersFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	var headers []string
+	for name, values := range http.Header(*f) {
+		for _, value := range values {
+			headers = append(headers, name+"="+value)
+		}
+	}
+	sort.Strings(headers)
+	return strings.Join(headers, ",")
+}
+
+func (f *otlpHeadersFlag) Set(value string) error {
+	name, headerValue, ok := strings.Cut(value, "=")
+	name = strings.TrimSpace(name)
+	headerValue = strings.TrimSpace(headerValue)
+	if !ok || !validHeaderName(name) || strings.ContainsAny(headerValue, "\r\n") {
+		return fmt.Errorf("invalid OTLP header %q, want Name=Value", value)
+	}
+	if *f == nil {
+		*f = make(otlpHeadersFlag)
+	}
+	http.Header(*f).Add(name, headerValue)
+	return nil
+}
+
+func (f *otlpHeadersFlag) Type() string { return "header" }
+
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && !strings.ContainsRune("!#$%&'*+-.^_`|~", r) {
+			return false
+		}
+	}
+	return true
+}
+
+type traceOptions struct {
+	OTLPEndpoint string
+	OTLPHeaders  http.Header
+}
+
+func parseTraceOptions(endpoint string, headers otlpHeadersFlag) (traceOptions, error) {
+	if endpoint == "" {
+		if len(headers) != 0 {
+			return traceOptions{}, errors.New("--otlp-header requires --otlp-endpoint")
+		}
+		return traceOptions{}, nil
+	}
+	u, err := url.ParseRequestURI(endpoint)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return traceOptions{}, fmt.Errorf("invalid OTLP endpoint %q, want an http(s) URL", endpoint)
+	}
+	return traceOptions{OTLPEndpoint: endpoint, OTLPHeaders: http.Header(headers)}, nil
+}
+
 func redactConfig(commonSecrets bool, keys redactKeysFlag, values redactValuesFlag, paths redactPathsFlag) proxy.RedactConfig {
 	return proxy.RedactConfig{
 		CommonSecrets: commonSecrets,
@@ -169,10 +235,12 @@ func execute(args []string) int {
 func newRootCmd() *cobra.Command {
 	var (
 		label, traceFile       string
+		otlpEndpoint           string
 		noTrace, redactSecrets bool
 		redactKeys             redactKeysFlag
 		redactValues           redactValuesFlag
 		redactPaths            redactPathsFlag
+		otlpHeaders            otlpHeadersFlag
 	)
 	cmd := &cobra.Command{
 		Use:   "mcpsnoop [flags] -- <server command> [args...]",
@@ -197,13 +265,19 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 				return exitCode(1)
 			}
 			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys, &redactPaths)
-			return codeOf(runShimFn(args, label, traceFile, noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths)))
+			trace, err := parseTraceOptions(otlpEndpoint, otlpHeaders)
+			if err != nil {
+				return err
+			}
+			return codeOf(runShimFn(args, label, traceFile, noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths), trace))
 		},
 	}
 	flags := cmd.Flags()
 	flags.SortFlags = false
 	flags.StringVar(&label, "label", "", "server label shown in the TUI, defaults to the command name")
 	flags.StringVar(&traceFile, "trace-file", "", "override the JSONL trace path, defaults to the well-known session log")
+	flags.StringVar(&otlpEndpoint, "otlp-endpoint", "", "stream completed calls to an OTLP/HTTP JSON traces endpoint")
+	flags.Var(&otlpHeaders, "otlp-header", "HTTP header for OTLP delivery as Name=Value, repeatable")
 	flags.BoolVar(&noTrace, "no-trace", false, "disable tracing, pure passthrough")
 	flags.BoolVar(&redactSecrets, "redact-secrets", false, "scrub common secret JSON keys in trace payloads")
 	flags.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")
@@ -348,13 +422,13 @@ func newExportCmd() *cobra.Command {
 
 // runShim runs the transparent stdio proxy. It writes the durable session log
 // AND streams live to the hub. Neither has to be running first.
-func runShim(command []string, label, traceFile string, noTrace bool, redaction proxy.RedactConfig) int {
+func runShim(command []string, label, traceFile string, noTrace bool, redaction proxy.RedactConfig, trace traceOptions) int {
 	if label == "" {
 		label = labelFor(command)
 	}
 	sessionID := fmt.Sprintf("%s-%d", label, os.Getpid())
 
-	sink := traceSink(sessionID, traceFile, noTrace, redaction)
+	sink := traceSink(sessionID, traceFile, noTrace, redaction, trace)
 	defer sink.Close()
 	if !noTrace {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: tracing %q (session %s)\n", strings.Join(command, " "), sessionID)
@@ -380,7 +454,7 @@ func runShim(command []string, label, traceFile string, noTrace bool, redaction 
 
 // traceSink builds the shared sink, a durable per-session JSONL log plus a
 // best-effort live stream to the hub. Returns a no-op sink when disabled.
-func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.RedactConfig) proxy.Sink {
+func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.RedactConfig, trace traceOptions) proxy.Sink {
 	if noTrace {
 		return proxy.NopSink()
 	}
@@ -394,6 +468,12 @@ func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.Redact
 		sinks = append(sinks, proxy.NewAsyncSink(f, 0))
 	}
 	sinks = append(sinks, proxy.NewSocketSink(paths.SocketPath(), 0))
+	if trace.OTLPEndpoint != "" {
+		sinks = append(sinks, otlpsink.New(otlpsink.Config{
+			Endpoint: trace.OTLPEndpoint,
+			Headers:  trace.OTLPHeaders,
+		}))
+	}
 	sink := proxy.Sink(proxy.NewMultiSink(sinks...))
 	if redaction.Enabled() {
 		sink = proxy.NewRedactingSink(sink, redaction)
@@ -405,10 +485,12 @@ func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.Redact
 func newHTTPCmd() *cobra.Command {
 	var (
 		target, listen, label  string
+		otlpEndpoint           string
 		noTrace, redactSecrets bool
 		redactKeys             redactKeysFlag
 		redactValues           redactValuesFlag
 		redactPaths            redactPathsFlag
+		otlpHeaders            otlpHeadersFlag
 	)
 	cmd := &cobra.Command{
 		Use:   "http --target <url> [--listen :7000]",
@@ -425,6 +507,10 @@ func newHTTPCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "mcpsnoop http: --target is required")
 				return exitCode(2)
 			}
+			trace, err := parseTraceOptions(otlpEndpoint, otlpHeaders)
+			if err != nil {
+				return err
+			}
 			lbl := label
 			if lbl == "" {
 				if u, err := url.Parse(target); err == nil && u.Host != "" {
@@ -435,7 +521,7 @@ func newHTTPCmd() *cobra.Command {
 			}
 			sessionID := fmt.Sprintf("%s-%d", lbl, os.Getpid())
 
-			sink := traceSink(sessionID, "", noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths))
+			sink := traceSink(sessionID, "", noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths), trace)
 			defer sink.Close()
 
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -460,6 +546,8 @@ func newHTTPCmd() *cobra.Command {
 	f.StringVar(&target, "target", "", "real MCP server endpoint, for example http://localhost:3000/mcp (required)")
 	f.StringVar(&listen, "listen", ":7000", "address to listen on")
 	f.StringVar(&label, "label", "", "server label shown in the TUI, defaults to the target host")
+	f.StringVar(&otlpEndpoint, "otlp-endpoint", "", "stream completed calls to an OTLP/HTTP JSON traces endpoint")
+	f.Var(&otlpHeaders, "otlp-header", "HTTP header for OTLP delivery as Name=Value, repeatable")
 	f.BoolVar(&noTrace, "no-trace", false, "disable tracing, pure passthrough")
 	f.BoolVar(&redactSecrets, "redact-secrets", false, "scrub common secret JSON keys in trace payloads")
 	f.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")
