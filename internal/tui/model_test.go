@@ -603,6 +603,24 @@ func TestSwitchSessionWithBrackets(t *testing.T) {
 	}
 }
 
+func TestFormatLatency(t *testing.T) {
+	for _, c := range []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "-"},
+		{250 * time.Microsecond, "250µs"},
+		{1500 * time.Microsecond, "1.5ms"},
+		{25300 * time.Microsecond, "25.3ms"},
+		{2500 * time.Millisecond, "2.5s"},
+		{1234567 * time.Microsecond, "1.23s"}, // stays compact, not 1.234567s
+	} {
+		if got := formatLatency(c.d); got != c.want {
+			t.Errorf("formatLatency(%v) = %q, want %q", c.d, got, c.want)
+		}
+	}
+}
+
 func TestToolSummaryOverlay(t *testing.T) {
 	st := store.New(0)
 	seed(st)

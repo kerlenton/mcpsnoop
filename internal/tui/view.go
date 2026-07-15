@@ -1138,11 +1138,20 @@ func (m Model) summaryContent() string {
 	return b.String()
 }
 
-func formatLatency(duration time.Duration) string {
-	if duration == 0 {
+// formatLatency renders a call latency compactly, with finer digits for smaller
+// values, so every value fits the summary's fixed-width column instead of an
+// over-precise string like 1.234567s. Zero means no completed calls, a dash.
+func formatLatency(d time.Duration) string {
+	switch {
+	case d <= 0:
 		return "-"
+	case d < time.Millisecond:
+		return d.Round(time.Microsecond).String()
+	case d < time.Second:
+		return d.Round(100 * time.Microsecond).String()
+	default:
+		return d.Round(10 * time.Millisecond).String()
 	}
-	return duration.Round(time.Microsecond).String()
 }
 
 func infoLine(raw json.RawMessage) string {
