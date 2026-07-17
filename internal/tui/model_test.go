@@ -395,6 +395,27 @@ func TestCapsContentShowsDeclaredCapabilities(t *testing.T) {
 	}
 }
 
+func TestCapsContentStatelessModel(t *testing.T) {
+	st := store.New()
+	// No initialize handshake (removed in 2026-07-28). The client declares itself in
+	// a request's _meta and the server answers server/discover, yet the inspector
+	// must populate exactly as it did for the legacy handshake.
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"ExampleClient","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{"elicitation":{}}}}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"instructions":"Prefer the search tool.","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"ExampleServer","version":"2.0"}}}}`))
+
+	m := ready(t, st)
+	m = typeRunes(t, m, "c")
+	if m.overlay != overlayCaps {
+		t.Fatal("c should open capabilities")
+	}
+	out := m.overlayRaw
+	for _, want := range []string{"capabilities", "protocol", "2026-07-28", "ExampleClient", "ExampleServer", "● elicitation", "● tools", "instructions", "Prefer the search tool."} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stateless caps body missing %q\n%s", want, out)
+		}
+	}
+}
+
 func TestCapsOverlayUpdatesLive(t *testing.T) {
 	st := store.New()
 	// Only the client half of the handshake so far, so the server is still unknown.

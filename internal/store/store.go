@@ -101,7 +101,10 @@ type event struct {
 	call      *call  // set for request/response events
 }
 
-// capabilities holds what the handshake negotiated.
+// capabilities holds what each side declared, whether through the legacy
+// initialize handshake or the 2026-07-28 stateless model, where the client's
+// info/version/capabilities ride every request's _meta and the server's are
+// fetched with server/discover (the initialize handshake was removed, SEP-2575).
 type capabilities struct {
 	set             bool
 	protocolVersion string
@@ -109,6 +112,7 @@ type capabilities struct {
 	serverInfo      json.RawMessage
 	client          json.RawMessage
 	server          json.RawMessage
+	instructions    string // server's usage guidance (initialize or server/discover)
 }
 
 // session aggregates everything observed for one proxied server instance.
@@ -236,6 +240,13 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.warning = validationWarning(msg)
 	}
 
+	// In the stateless model the client's identity and capabilities ride every
+	// request's _meta rather than a one-time initialize, so read them from any
+	// client frame that carries them (a no-op otherwise).
+	if e.Direction == proxy.ClientToServer && msg.Method != "" {
+		sess.caps.applyRequestMeta(msg.Params)
+	}
+
 	// A gateway routes on the Mcp-Method/Mcp-Name headers, and a compliant server
 	// rejects a request whose headers disagree with the body, so flag the mismatch
 	// rather than let it look fine. The check is surfaced as a warning (a spec
@@ -339,6 +350,8 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	switch c.method {
 	case "initialize":
 		sess.caps.applyResponse(msg.Result)
+	case "server/discover":
+		sess.caps.applyDiscover(msg.Result)
 	case "tools/list":
 		sess.applyToolsList(c.params, msg.Result)
 	}
@@ -367,6 +380,7 @@ func (c *capabilities) applyResponse(result json.RawMessage) {
 		ProtocolVersion string          `json:"protocolVersion"`
 		Capabilities    json.RawMessage `json:"capabilities"`
 		ServerInfo      json.RawMessage `json:"serverInfo"`
+		Instructions    string          `json:"instructions"`
 	}
 	if json.Unmarshal(result, &r) != nil {
 		return
@@ -377,6 +391,77 @@ func (c *capabilities) applyResponse(result json.RawMessage) {
 	}
 	c.server = r.Capabilities
 	c.serverInfo = r.ServerInfo
+	if r.Instructions != "" {
+		c.instructions = r.Instructions
+	}
+}
+
+// applyRequestMeta reads the client's protocol version, info, and capabilities
+// from a request's _meta, where the stateless model repeats them on every
+// request instead of exchanging them once in initialize. The reverse-DNS keys
+// are sourced verbatim from the draft schema. It is a no-op when the request
+// carries none of them, so a plain call never fabricates a handshake.
+func (c *capabilities) applyRequestMeta(params json.RawMessage) {
+	var p struct {
+		Meta struct {
+			ProtocolVersion string          `json:"io.modelcontextprotocol/protocolVersion"`
+			ClientInfo      json.RawMessage `json:"io.modelcontextprotocol/clientInfo"`
+			Capabilities    json.RawMessage `json:"io.modelcontextprotocol/clientCapabilities"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return
+	}
+	m := p.Meta
+	if m.ProtocolVersion == "" && len(m.ClientInfo) == 0 && len(m.Capabilities) == 0 {
+		return
+	}
+	c.set = true
+	if m.ProtocolVersion != "" {
+		c.protocolVersion = m.ProtocolVersion
+	}
+	if len(m.ClientInfo) > 0 {
+		c.clientInfo = m.ClientInfo
+	}
+	if len(m.Capabilities) > 0 {
+		c.client = m.Capabilities
+	}
+}
+
+// applyDiscover reads server capabilities from a server/discover result, the
+// stateless replacement for the initialize response. serverInfo may sit at the
+// top level or, per the draft schema, in the result's _meta. The server lists
+// the versions it supports, of which we surface the first when no version is
+// otherwise known.
+func (c *capabilities) applyDiscover(result json.RawMessage) {
+	var r struct {
+		SupportedVersions []string        `json:"supportedVersions"`
+		Capabilities      json.RawMessage `json:"capabilities"`
+		ServerInfo        json.RawMessage `json:"serverInfo"`
+		Instructions      string          `json:"instructions"`
+		Meta              struct {
+			ServerInfo json.RawMessage `json:"io.modelcontextprotocol/serverInfo"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(result, &r) != nil {
+		return
+	}
+	c.set = true
+	if len(r.Capabilities) > 0 {
+		c.server = r.Capabilities
+	}
+	switch {
+	case len(r.ServerInfo) > 0:
+		c.serverInfo = r.ServerInfo
+	case len(r.Meta.ServerInfo) > 0:
+		c.serverInfo = r.Meta.ServerInfo
+	}
+	if c.protocolVersion == "" && len(r.SupportedVersions) > 0 {
+		c.protocolVersion = r.SupportedVersions[0]
+	}
+	if r.Instructions != "" {
+		c.instructions = r.Instructions
+	}
 }
 
 // applyToolsList records the tools a tools/list response advertised. A cursorless

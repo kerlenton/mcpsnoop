@@ -341,6 +341,76 @@ func TestCapabilitiesCapture(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesFromStatelessMeta(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	// The 2026-07-28 model removed initialize: the client's identity, version, and
+	// capabilities ride every request's _meta instead. Here on a server/discover.
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "server/discover",
+		`{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"ExampleClient","version":"1.0.0"},"io.modelcontextprotocol/clientCapabilities":{"elicitation":{}}}}`))
+	caps, ok := s.Capabilities("s1")
+	if !ok {
+		t.Fatal("client _meta should populate capabilities without an initialize handshake")
+	}
+	if caps.ProtocolVersion != "2026-07-28" {
+		t.Fatalf("protocolVersion = %q, want 2026-07-28 from _meta", caps.ProtocolVersion)
+	}
+	if !strings.Contains(string(caps.ClientInfo), "ExampleClient") {
+		t.Fatalf("clientInfo not read from _meta: %s", caps.ClientInfo)
+	}
+	if !strings.Contains(string(caps.Client), "elicitation") {
+		t.Fatalf("client capabilities not read from _meta: %s", caps.Client)
+	}
+
+	// The server side arrives in a server/discover response; serverInfo travels in
+	// the result's _meta per the draft schema.
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
+		`"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{},"resources":{}},"instructions":"Call search before answering.","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"ExampleServer","version":"2.0"}}}`))
+	caps, _ = s.Capabilities("s1")
+	if !strings.Contains(string(caps.ServerInfo), "ExampleServer") {
+		t.Fatalf("serverInfo not read from discover _meta: %s", caps.ServerInfo)
+	}
+	if !strings.Contains(string(caps.Server), "tools") || !strings.Contains(string(caps.Server), "resources") {
+		t.Fatalf("server capabilities not read from server/discover: %s", caps.Server)
+	}
+	if caps.Instructions != "Call search before answering." {
+		t.Fatalf("instructions not read from server/discover: %q", caps.Instructions)
+	}
+}
+
+func TestCapabilitiesDiscoverOnlyFallsBackToSupportedVersion(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	// A server/discover response with no prior client _meta: the protocol version
+	// falls back to the first supported version, and serverInfo is also honored at
+	// the top level (as some servers place it).
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "server/discover", ""))
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
+		`"result":{"supportedVersions":["2026-07-28","2025-11-25"],"capabilities":{"tools":{}},"serverInfo":{"name":"Srv","version":"9"}}`))
+	caps, ok := s.Capabilities("s1")
+	if !ok {
+		t.Fatal("server/discover response should populate capabilities")
+	}
+	if caps.ProtocolVersion != "2026-07-28" {
+		t.Fatalf("protocolVersion = %q, want first of supportedVersions", caps.ProtocolVersion)
+	}
+	if !strings.Contains(string(caps.ServerInfo), "Srv") {
+		t.Fatalf("top-level serverInfo not honored: %s", caps.ServerInfo)
+	}
+}
+
+func TestCapabilitiesNeitherPathIsUnknown(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	// Plain calls with no initialize, no client _meta, and no server/discover leave
+	// capabilities undeclared, so the inspector shows unknown rather than an error.
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"echo"}`))
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[]}`))
+	if _, ok := s.Capabilities("s1"); ok {
+		t.Fatal("a session that declared no capabilities should report none")
+	}
+}
+
 func TestNotificationAndUnmatchedResponse(t *testing.T) {
 	s := New()
 	t0 := time.Now()

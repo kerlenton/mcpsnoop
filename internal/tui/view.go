@@ -1128,18 +1128,24 @@ func (m Model) capsContent() string {
 	label := m.currentLabel()
 	caps, ok := m.store.Capabilities(sid)
 	if !ok {
-		return m.styles.faint.Render("no handshake observed yet for this session")
+		return m.styles.faint.Render("no capabilities observed yet for this session")
 	}
 	// This screen answers one question, which capabilities did each side declare,
-	// with a marker per capability and nothing else. The raw handshake, with
+	// with a marker per capability and nothing else. The raw declaration, with
 	// listChanged and any other sub-flags, is one keystroke away in the inspector
-	// on the initialize frame.
+	// on the frame that carried it (initialize, or a stateless _meta/server-discover).
 	w, _ := m.overlayDims()
 	title := m.capsTitle(label, valueOr(caps.ProtocolVersion, "unknown"), w)
 	client := m.capSection("client", caps.ClientInfo, clientCapOrder, caps.Client)
 	server := m.capSection("server", caps.ServerInfo, serverCapOrder, caps.Server)
 	// A blank line under the title and one between the two groups.
-	return title + "\n\n" + client + "\n\n" + server
+	body := title + "\n\n" + client + "\n\n" + server
+	// The server may attach usage guidance for the model. Show it under the two
+	// sections when present, dim so it never competes with the capability markers.
+	if caps.Instructions != "" {
+		body += "\n\n" + m.styles.dim.Render("instructions") + "\n" + m.styles.faint.Render(caps.Instructions)
+	}
+	return body
 }
 
 // capsTitle is the header line: the accent title and session label on the left,
