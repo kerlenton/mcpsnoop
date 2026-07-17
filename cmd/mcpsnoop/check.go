@@ -13,20 +13,22 @@ import (
 type checkSignal string
 
 const (
-	checkError   checkSignal = "error"
-	checkInvalid checkSignal = "invalid"
-	checkWarn    checkSignal = "warn"
-	checkPending checkSignal = "pending"
+	checkError    checkSignal = "error"
+	checkInvalid  checkSignal = "invalid"
+	checkWarn     checkSignal = "warn"
+	checkMismatch checkSignal = "mismatch"
+	checkPending  checkSignal = "pending"
 )
 
-var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkPending}
+var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending}
 
 type checkSummary struct {
-	sessionID string
-	errors    int
-	invalid   int
-	warnings  int
-	pending   int
+	sessionID  string
+	errors     int
+	invalid    int
+	warnings   int
+	mismatches int
+	pending    int
 }
 
 func newCheckCmd() *cobra.Command {
@@ -34,7 +36,7 @@ func newCheckCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "check [session-id|log.jsonl|-]",
 		Short: "Fail when a captured session contains selected signals",
-		Long:  "Check a captured session for errors, invalid frames, warnings, or calls that never got a response. With no session, the newest session log is checked. Use - to read from stdin.",
+		Long:  "Check a captured session for errors, invalid frames, warnings, routing-header mismatches, or calls that never got a response. With no session, the newest session log is checked. Use - to read from stdin.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			signals, err := parseCheckSignals(failOn)
@@ -55,8 +57,8 @@ func newCheckCmd() *cobra.Command {
 
 			anyFailed := false
 			for _, summary := range summarizeCheck(st) {
-				fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d pending=%d\n",
-					summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.pending)
+				fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d\n",
+					summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending)
 				if failed := summary.failed(signals); len(failed) > 0 {
 					fmt.Fprintf(cmd.OutOrStdout(), "check failed: %s\n", strings.Join(failed, ","))
 					anyFailed = true
@@ -70,7 +72,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().SortFlags = false
-	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, pending")
+	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending")
 	return cmd
 }
 
@@ -79,10 +81,10 @@ func parseCheckSignals(value string) (map[checkSignal]bool, error) {
 	for _, part := range strings.Split(value, ",") {
 		signal := checkSignal(strings.TrimSpace(part))
 		switch signal {
-		case checkError, checkInvalid, checkWarn, checkPending:
+		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending:
 			signals[signal] = true
 		default:
-			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, or pending, got %q", part)
+			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, or pending, got %q", part)
 		}
 	}
 	return signals, nil
@@ -113,6 +115,9 @@ func summarizeCheck(st *store.Store) []checkSummary {
 			if event.Warning != "" {
 				summary.warnings++
 			}
+			if event.RoutingMismatch {
+				summary.mismatches++
+			}
 		}
 		summaries = append(summaries, summary)
 	}
@@ -121,10 +126,11 @@ func summarizeCheck(st *store.Store) []checkSummary {
 
 func (s checkSummary) failed(selected map[checkSignal]bool) []string {
 	counts := map[checkSignal]int{
-		checkError:   s.errors,
-		checkInvalid: s.invalid,
-		checkWarn:    s.warnings,
-		checkPending: s.pending,
+		checkError:    s.errors,
+		checkInvalid:  s.invalid,
+		checkWarn:     s.warnings,
+		checkMismatch: s.mismatches,
+		checkPending:  s.pending,
 	}
 	var failed []string
 	for _, signal := range checkSignalOrder {

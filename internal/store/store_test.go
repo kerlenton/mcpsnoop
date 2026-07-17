@@ -3,12 +3,108 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
+
+func TestIngestRoutingHeaderMismatch(t *testing.T) {
+	s := New()
+	now := time.Now()
+
+	// The Mcp-Method header says tools/list but the body is tools/call. A gateway
+	// routes on the header and the server rejects the disagreement, so flag it.
+	bad := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
+		Transport: "http", MCPMethod: "tools/list", MCPName: "search",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search"}}`),
+	}
+	ev := s.Ingest(bad)
+	if ev.MCPMethod != "tools/list" || ev.MCPName != "search" {
+		t.Fatalf("routing headers not captured: %+v", ev)
+	}
+	if !strings.Contains(ev.Warning, "Mcp-Method") || !strings.Contains(ev.Warning, "disagrees") {
+		t.Fatalf("expected a mismatch warning, got %q", ev.Warning)
+	}
+	if !ev.RoutingMismatch {
+		t.Fatalf("mismatch should be flagged structurally, not only in the warning text")
+	}
+
+	// A matching header carries no mismatch warning or flag.
+	good := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ClientToServer,
+		Transport: "http", MCPMethod: "tools/call",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call"}`),
+	}
+	if g := s.Ingest(good); strings.Contains(g.Warning, "disagrees") || g.RoutingMismatch {
+		t.Fatalf("matching header should not warn, got warning %q mismatch %v", g.Warning, g.RoutingMismatch)
+	}
+}
+
+func TestIngestRoutingHeaderNameMismatch(t *testing.T) {
+	s := New()
+	now := time.Now()
+
+	// The method agrees but Mcp-Name claims a safe tool while the body calls a
+	// different one. This is the tool-shadowing case, so it must be flagged.
+	shadow := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
+		Transport: "http", MCPMethod: "tools/call", MCPName: "safe_tool",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dangerous_tool"}}`),
+	}
+	ev := s.Ingest(shadow)
+	if !strings.Contains(ev.Warning, "Mcp-Name") || !strings.Contains(ev.Warning, "disagrees") {
+		t.Fatalf("expected an Mcp-Name mismatch warning, got %q", ev.Warning)
+	}
+	if !ev.RoutingMismatch {
+		t.Fatalf("name mismatch should set the structured flag")
+	}
+
+	// Mcp-Name matching the body operation is clean, even for a resources/read
+	// whose target lives in params.uri rather than params.name.
+	ok := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ClientToServer,
+		Transport: "http", MCPMethod: "resources/read", MCPName: "file:///a.txt",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"file:///a.txt"}}`),
+	}
+	if g := s.Ingest(ok); g.RoutingMismatch {
+		t.Fatalf("matching uri should not flag a mismatch, got %q", g.Warning)
+	}
+}
+
+func TestIngestRoutingHeadersInvalidOnBatch(t *testing.T) {
+	s := New()
+	now := time.Now()
+
+	// A single routing header cannot address N methods, so a batch carrying one is
+	// invalid by construction. The first element carries the header (per emitFrames)
+	// and must earn one clear warning rather than a fabricated method disagreement.
+	first := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
+		Transport: "http", MCPMethod: "tools/list", Batch: true,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+	}
+	ev := s.Ingest(first)
+	if !strings.Contains(ev.Warning, "batch") || !ev.RoutingMismatch {
+		t.Fatalf("batch element with a routing header should warn about the batch, got %q flag %v", ev.Warning, ev.RoutingMismatch)
+	}
+	if strings.Contains(ev.Warning, "disagrees") {
+		t.Fatalf("batch warning must not fabricate a per-element method disagreement: %q", ev.Warning)
+	}
+
+	// Later batch elements carry no header, so they stay clean.
+	rest := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ClientToServer,
+		Transport: "http", Batch: true,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo"}}`),
+	}
+	if g := s.Ingest(rest); g.RoutingMismatch || strings.Contains(g.Warning, "batch") {
+		t.Fatalf("headerless batch element should stay clean, got %q flag %v", g.Warning, g.RoutingMismatch)
+	}
+}
 
 func req(seq uint64, ts time.Time, dir proxy.Direction, id, method, params string) proxy.Envelope {
 	raw := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":%q`, id, method)

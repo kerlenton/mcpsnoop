@@ -213,6 +213,30 @@ func TestStreamQueryFilter(t *testing.T) {
 	}
 }
 
+func TestStreamFilterMismatch(t *testing.T) {
+	st := store.New()
+	seed(st) // two clean calls
+	// A frame whose routing header disagrees with the body (Mcp-Name shadowing).
+	shadow := env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"dangerous"}}`)
+	shadow.MCPMethod, shadow.MCPName, shadow.Transport = "tools/call", "safe", "http"
+	st.Ingest(shadow)
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
+	total := len(m.timeline)
+
+	mm := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	mm = drive(t, mm, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("status:mismatch")})
+	fm := drive(t, mm, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if len(fm.timeline) != 1 || total <= 1 {
+		t.Fatalf("status:mismatch should match exactly the shadowing frame, got %d of %d", len(fm.timeline), total)
+	}
+	if !fm.timeline[0].RoutingMismatch {
+		t.Fatalf("status:mismatch matched a frame without the flag: %+v", fm.timeline[0])
+	}
+}
+
 func TestStreamFooterShowsSignalCounts(t *testing.T) {
 	st := store.New()
 	seed(st)

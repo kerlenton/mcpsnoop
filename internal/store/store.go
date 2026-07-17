@@ -85,16 +85,20 @@ type call struct {
 
 // event is the mutable internal timeline entry.
 type event struct {
-	seq     uint64
-	ts      time.Time
-	dir     proxy.Direction
-	kind    EventKind
-	method  string
-	id      string
-	raw     json.RawMessage
-	text    string
-	warning string
-	call    *call // set for request/response events
+	seq       uint64
+	ts        time.Time
+	dir       proxy.Direction
+	kind      EventKind
+	method    string
+	id        string
+	raw       json.RawMessage
+	text      string
+	warning   string
+	mcpMethod string // Mcp-Method routing header (HTTP transport, SEP-2243)
+	mcpName   string // Mcp-Name routing header
+	batch     bool   // one element of a JSON-RPC batch (routing headers cannot address it)
+	mismatch  bool   // a routing header disagrees with the body (structured flag for warning)
+	call      *call  // set for request/response events
 }
 
 // capabilities holds what the handshake negotiated.
@@ -174,7 +178,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		return EventView{Kind: EventOther} // control frame, not shown in the stream
 	}
 
-	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text}
+	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName, batch: e.Batch}
 
 	if e.Direction == proxy.ServerStderr {
 		ev.kind = EventStderr
@@ -230,6 +234,33 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	default:
 		ev.kind = EventOther
 		ev.warning = validationWarning(msg)
+	}
+
+	// A gateway routes on the Mcp-Method/Mcp-Name headers, and a compliant server
+	// rejects a request whose headers disagree with the body, so flag the mismatch
+	// rather than let it look fine. The check is surfaced as a warning (a spec
+	// violation CI should catch) but also carried on ev.mismatch so filters and
+	// exporters can key on it structurally instead of on the warning text.
+	if ev.mcpMethod != "" || ev.mcpName != "" {
+		switch {
+		case ev.batch:
+			// One header cannot route N methods, so routing a batch is invalid by
+			// construction. Say so once rather than fabricating a per-element mismatch.
+			ev.warning = appendWarning(ev.warning, "routing headers are invalid on a JSON-RPC batch")
+			ev.mismatch = true
+		default:
+			if ev.mcpMethod != "" && msg.Method != "" && ev.mcpMethod != msg.Method {
+				ev.warning = appendWarning(ev.warning, "routing header Mcp-Method "+ev.mcpMethod+" disagrees with body method "+msg.Method)
+				ev.mismatch = true
+			}
+			// Mcp-Name names the target operation (params.name for tools/call and
+			// prompts/get, params.uri for resources/read). A lie here is the
+			// tool-shadowing case, so it matters more than a bare method mismatch.
+			if name := operationName(msg); ev.mcpName != "" && name != "" && ev.mcpName != name {
+				ev.warning = appendWarning(ev.warning, "routing header Mcp-Name "+ev.mcpName+" disagrees with body name "+name)
+				ev.mismatch = true
+			}
+		}
 	}
 
 	sess.events = append(sess.events, ev)
@@ -406,6 +437,33 @@ func isToolError(result json.RawMessage) bool {
 		IsError bool `json:"isError"`
 	}
 	return json.Unmarshal(result, &r) == nil && r.IsError
+}
+
+// operationName returns the target that the Mcp-Name routing header addresses
+// for a given request, so a lie can be caught. Only methods whose target lives
+// in a well-known params field are considered (tools/call and prompts/get name
+// it in params.name, resources/read in params.uri); everything else returns ""
+// so a method that merely happens to carry a "name" param is never falsely
+// flagged, keeping the mismatch signal safe for a CI gate.
+func operationName(msg proxy.RPCMessage) string {
+	if len(msg.Params) == 0 {
+		return ""
+	}
+	var p struct {
+		Name string `json:"name"`
+		URI  string `json:"uri"`
+	}
+	if json.Unmarshal(msg.Params, &p) != nil {
+		return ""
+	}
+	switch msg.Method {
+	case "tools/call", "prompts/get":
+		return p.Name
+	case "resources/read", "resources/subscribe", "resources/unsubscribe":
+		return p.URI
+	default:
+		return ""
+	}
 }
 
 func validationWarning(msg proxy.RPCMessage) string {

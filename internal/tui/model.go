@@ -1083,6 +1083,11 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 	if v == "warn" || v == "warning" {
 		return e.Warning != ""
 	}
+	if v == "mismatch" {
+		// A routing header disagreeing with the body (Mcp-Method/Mcp-Name, SEP-2243).
+		// It is a structured subset of warnings, so it stays discoverable on its own.
+		return e.RoutingMismatch
+	}
 	if e.Call == nil {
 		return false
 	}
@@ -1107,7 +1112,7 @@ func (m *Model) openOverlay(mode overlayMode, content string) {
 	m.overlayMatchIx = 0
 	m.overlayHeaderH = 0
 	if mode == overlayInspector {
-		m.overlayHeaderH = 1 // the single meta line above the body
+		m.overlayHeaderH = m.inspectorHeaderH() // meta line, plus routing headers when present
 	}
 	m.layoutOverlay()
 	m.setOverlayBody(content)
