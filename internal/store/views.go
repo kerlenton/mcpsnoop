@@ -58,9 +58,10 @@ type EventView struct {
 	MCPName   string
 	// MCPProtocolVersion is the MCP-Protocol-Version request header.
 	MCPProtocolVersion string
-	// RoutingMismatch is true when a routing header disagrees with the body (or is
-	// present on a batch). It is a structured handle for the same condition the
-	// warning describes, so filters and exporters need not match warning text.
+	// RoutingMismatch is true when a routing header (Mcp-Method/Mcp-Name) or the
+	// MCP-Protocol-Version header disagrees with the body, or a routing header rides
+	// a batch. It is a structured handle for the same condition the warning
+	// describes, so filters and exporters need not match warning text.
 	RoutingMismatch bool
 	Call            *CallView // set for request/response events
 }

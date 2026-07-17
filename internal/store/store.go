@@ -276,6 +276,20 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		}
 	}
 
+	// The MCP-Protocol-Version header must match the version the request repeats in
+	// its _meta; a gateway routes on the header while the server reads the body, so
+	// a disagreement is the same class of spec violation as a routing-header
+	// mismatch. This is request-scoped, so unlike the routing headers it is valid on
+	// a batch and gated only on the header being present.
+	if ev.mcpProtocolVersion != "" {
+		if mv := metaProtocolVersion(msg.Params); mv != "" && mv != ev.mcpProtocolVersion {
+			ev.warning = appendWarning(ev.warning,
+				"MCP-Protocol-Version header "+ev.mcpProtocolVersion+
+					" disagrees with _meta protocolVersion "+mv)
+			ev.mismatch = true
+		}
+	}
+
 	sess.events = append(sess.events, ev)
 	return ev.view(sess)
 }
@@ -580,6 +594,24 @@ func operationName(msg proxy.RPCMessage) string {
 	default:
 		return ""
 	}
+}
+
+// metaProtocolVersion returns the protocol version a request repeats in its
+// _meta (io.modelcontextprotocol/protocolVersion), or "" when absent, so the
+// MCP-Protocol-Version header can be checked against it.
+func metaProtocolVersion(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var p struct {
+		Meta struct {
+			ProtocolVersion string `json:"io.modelcontextprotocol/protocolVersion"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return ""
+	}
+	return p.Meta.ProtocolVersion
 }
 
 func validationWarning(msg proxy.RPCMessage) string {

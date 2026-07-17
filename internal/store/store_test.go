@@ -106,6 +106,47 @@ func TestIngestRoutingHeadersInvalidOnBatch(t *testing.T) {
 	}
 }
 
+func TestIngestProtocolVersionMismatch(t *testing.T) {
+	s := New()
+	now := time.Now()
+
+	// The MCP-Protocol-Version header says 2026-07-28 but the version the request
+	// repeats in its _meta says otherwise. A gateway routes on the header while the
+	// server reads the body, so flag the disagreement.
+	bad := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
+		Transport: "http", MCPProtocolVersion: "2026-07-28",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25"}}}`),
+	}
+	ev := s.Ingest(bad)
+	if !ev.RoutingMismatch {
+		t.Fatal("a protocol-version disagreement should set the structured mismatch flag")
+	}
+	if !strings.Contains(ev.Warning, "MCP-Protocol-Version") || !strings.Contains(ev.Warning, "disagrees") {
+		t.Fatalf("expected a protocol-version mismatch warning, got %q", ev.Warning)
+	}
+
+	// Header agreeing with the _meta version is clean.
+	good := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ClientToServer,
+		Transport: "http", MCPProtocolVersion: "2026-07-28",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`),
+	}
+	if g := s.Ingest(good); g.RoutingMismatch || strings.Contains(g.Warning, "disagrees") {
+		t.Fatalf("matching version should not warn, got mismatch %v warning %q", g.RoutingMismatch, g.Warning)
+	}
+
+	// Header present but no _meta version means nothing to disagree with.
+	noMeta := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: now, Direction: proxy.ClientToServer,
+		Transport: "http", MCPProtocolVersion: "2026-07-28",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":3,"method":"tools/list"}`),
+	}
+	if g := s.Ingest(noMeta); g.RoutingMismatch {
+		t.Fatal("a header with no _meta version to compare must not flag a mismatch")
+	}
+}
+
 func req(seq uint64, ts time.Time, dir proxy.Direction, id, method, params string) proxy.Envelope {
 	raw := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":%q`, id, method)
 	if params != "" {
