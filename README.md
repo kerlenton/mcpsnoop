@@ -96,7 +96,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop` | open the live TUI |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, or otlp |
-| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, slow, or hung calls |
+| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, or hung calls |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
 | `mcpsnoop remote <user@host>` | print the SSH tunnel command |
@@ -109,7 +109,7 @@ Run `mcpsnoop help` for the full list, or `mcpsnoop help <command>` for the flag
 | | MCP Inspector | mcpsnoop |
 |---|:---:|:---:|
 | Sees your real client and server traffic | no | yes |
-| Flags slow and hung calls | no | yes |
+| Flags hung calls and stream errors | no | yes |
 | Flags stray output that corrupts the stream | no | yes |
 | Flags malformed JSON-RPC frames | no | yes |
 | Interactive terminal UI | no | yes |
@@ -187,12 +187,12 @@ matches the method, tool, id, and payload.
 | `id:` | request id | `id:7` |
 | `dir:` | direction (`c2s`, `s2c`) | `dir:s2c` |
 | `kind:` | frame type (`req`, `resp`, `notify`, `stderr`, `invalid`) | `kind:invalid` |
-| `status:` | call outcome (`ok`, `error`, `slow`, `pending`, `bad`, `warn`) | `status:slow` |
+| `status:` | call outcome (`ok`, `error`, `pending`, `bad`, `warn`) | `status:error` |
 
 Stack tokens to get specific.
 
 ```text
-tool:search status:slow           # slow calls to one search tool
+tool:search status:pending        # in-flight calls to one search tool
 method:tools/call status:error    # tool calls that failed
 dir:s2c kind:req                  # server-initiated requests (sampling, roots)
 ```
@@ -260,25 +260,28 @@ matched by tool name and arguments, so reordered calls still compare correctly.
 By default, duration changes must differ by at least 100 ms and 2x; use
 `--duration-threshold` and `--duration-ratio` to adjust those cutoffs.
 
+Pass `--exit-code` to gate CI on regressions: it exits non-zero when the after
+session drops a tool, changes an input schema, has a call whose status got worse,
+or slows down. Improvements (added tools, fixed calls, speedups) still exit zero.
+
 ## Checking sessions in CI
 
-Gate a recorded agent run on errors, stream corruption, protocol warnings, slow
-calls, or calls that never got a response.
+Gate a recorded agent run on errors, stream corruption, protocol warnings, or
+calls that never got a response.
 
 ```bash
-mcpsnoop check [--fail-on error,invalid,warn,slow,pending] [--slow-threshold 1s] [session-id|log.jsonl|-]
+mcpsnoop check [--fail-on error,invalid,warn,pending] [session-id|log.jsonl|-]
 ```
 
-The three default signals (error, invalid, warn) fail the check. Add `slow` to
-gate on calls longer than `--slow-threshold`, one second by default, and
-`pending` to gate on calls that never got a response. Pass a comma-separated
-subset to select only the conditions relevant to a job. Omit the session to
-check the newest capture, or use `-` to read JSONL from stdin.
+The three default signals (error, invalid, warn) fail the check. Add `pending`
+to gate on calls that never got a response. Pass a comma-separated subset to
+select only the conditions relevant to a job. Omit the session to check the
+newest capture, or use `-` to read JSONL from stdin.
 
 ```bash
 mcpsnoop check build-agent
 mcpsnoop check --fail-on error,invalid artifacts/session.jsonl
-mcpsnoop check --fail-on error,slow --slow-threshold 2s - < trace.jsonl
+mcpsnoop check --fail-on error,pending - < trace.jsonl
 ```
 
 ## Watching from another machine

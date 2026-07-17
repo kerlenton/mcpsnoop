@@ -127,6 +127,7 @@ type Model struct {
 
 	overlay        overlayMode
 	replayReq      store.CallView // last request sent to replay, so r can re-run it from the result
+	replaying      bool           // an async replay is in flight; a footer spinner shows until the result lands
 	vp             viewport.Model
 	overlayRaw     string // overlay body before styling (re-rendered on resize)
 	overlayDisplay string // styled body shown in the viewport (highlight, numbers)
@@ -136,7 +137,6 @@ type Model struct {
 	overlayMatches []int // line numbers containing a match
 	overlayMatchIx int
 	showHelp       bool
-	confirmDelete  bool // ctrl-d asks before removing a session and its log
 
 	inputMode inputMode
 	input     textinput.Model
@@ -153,6 +153,16 @@ type Model struct {
 func (m *Model) setFlash(s string) {
 	m.flash = s
 	m.flashUntil = time.Now().Add(2500 * time.Millisecond)
+}
+
+// dismissTransient clears a pending flash and abandons an in-flight replay, so a
+// stale toast or spinner never carries over to the next screen. Navigation calls
+// this; actions that set their own flash (copy, export, delete) do not go through
+// here, so their message survives.
+func (m *Model) dismissTransient() {
+	m.flash = ""
+	m.flashUntil = time.Time{}
+	m.replaying = false
 }
 
 func (m Model) flashActive() bool {
@@ -213,20 +223,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.spin%refreshEvery == 0 {
 				m.refresh()
 			}
+			// An open live overlay rebuilds every tick so a pending spinner animates
+			// at the tick cadence. The content-diff guard makes this a no-op when
+			// nothing changed.
+			m.refreshLiveOverlay()
 		}
 		return m, tick()
 
 	case frameMsg:
 		if !m.paused {
 			m.refresh()
+			m.refreshLiveOverlay()
 		}
 		return m, nil
 
 	case replayDoneMsg:
-		if m.overlay == overlayReplay {
-			m.setOverlayBody(m.replayContent(msg))
-			m.vp.GotoTop()
+		if !m.replaying {
+			return m, nil // the replay was abandoned by navigating away
 		}
+		m.replaying = false
+		m.openOverlay(overlayReplay, m.replayContent(msg))
+		m.vp.GotoTop()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -236,17 +253,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
-	// A pending delete confirmation swallows every key but y (do it) and n/esc.
-	if m.confirmDelete {
-		switch {
-		case msg.String() == "y":
-			m.confirmDelete = false
-			m.deleteCurrentSession()
-		case msg.String() == "n", key.Matches(msg, m.keys.Back):
-			m.confirmDelete = false
-		}
-		return m, nil
-	}
 
 	// Bottom prompt (":" command / "/" filter) captures input while open.
 	if m.inputMode != inputNone {
@@ -360,9 +366,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Export):
 		m.exportCurrent("", "")
 	case key.Matches(msg, m.keys.Delete):
-		if m.currentSessionID() != "" {
-			m.confirmDelete = true
-		}
+		m.deleteCurrentSession()
 
 	case key.Matches(msg, m.keys.Up):
 		m.step(-1)
@@ -445,6 +449,11 @@ func (m Model) runCommand(cmd string) (Model, tea.Cmd) {
 	case "stream", "frames":
 		if m.currentSessionID() != "" {
 			m.enterStream(m.selSession)
+		}
+		return m, nil
+	case "summary":
+		if m.currentSessionID() != "" {
+			m.openOverlay(overlaySummary, m.summaryContent())
 		}
 		return m, nil
 	case "export":
@@ -531,6 +540,7 @@ func (m Model) fullIndexOf(seq uint64) int {
 // the root it does NOTHING, quitting is deliberately only `:q`/Ctrl-C so you
 // can't fall out of the UI by mashing esc/q.
 func (m *Model) back() tea.Cmd {
+	m.dismissTransient()
 	if m.view == viewStream {
 		if m.query != "" {
 			m.applyFilter("")
@@ -550,6 +560,7 @@ func (m *Model) enterStream(idx int) {
 	if idx < 0 || idx >= len(m.sessions) {
 		return
 	}
+	m.dismissTransient()
 	m.selSession = idx
 	m.streamSessionID = m.sessions[idx].ID
 	m.streamLabel = m.sessions[idx].Label
@@ -643,6 +654,15 @@ func (m Model) currentSessionID() string {
 	return ""
 }
 
+// currentLabel is the human name for the session the overlays act on: the
+// selected row in the sessions list, otherwise the streamed session's label.
+func (m Model) currentLabel() string {
+	if m.view == viewSessions && len(m.sessions) > 0 {
+		return m.sessions[m.selSession].Label
+	}
+	return m.streamLabel
+}
+
 // startReplay launches an async replay of the selected request frame.
 // focusedFrame is the frame the current context acts on, the inspected frame
 // when the inspector is open, otherwise the stream table selection.
@@ -656,13 +676,33 @@ func (m Model) focusedFrame() (store.EventView, bool) {
 	return store.EventView{}, false
 }
 
+// canReplay reports whether the focused frame is a request this session can
+// actually replay (its server command was captured), so r is only offered, and
+// acted on, when it will work.
+func (m Model) canReplay() bool {
+	ev, ok := m.focusedFrame()
+	if !ok || ev.Call == nil || ev.Kind != store.EventRequest {
+		return false
+	}
+	return m.sessionReplayable()
+}
+
+// sessionReplayable reports whether the streamed session recorded the server
+// command a replay needs. It gates r at the session level, stable with no
+// per-frame flicker, so replay is never offered for a session that can never run
+// it (for example a log opened without its meta frame).
+func (m Model) sessionReplayable() bool {
+	_, _, ok := m.store.Command(m.streamSessionID)
+	return ok
+}
+
 func (m *Model) startReplay() tea.Cmd {
 	ev, ok := m.focusedFrame()
 	if !ok {
 		return nil
 	}
 	if ev.Call == nil || ev.Kind != store.EventRequest {
-		m.openOverlay(overlayReplay, "Select a request frame to replay (a → line).")
+		m.setFlash("replay needs a request frame")
 		return nil
 	}
 	return m.runReplay(*ev.Call)
@@ -678,13 +718,16 @@ func (m *Model) replayAgain() tea.Cmd {
 }
 
 func (m *Model) runReplay(call store.CallView) tea.Cmd {
+	if m.replaying {
+		return nil // a replay is already in flight; ignore until it lands or is abandoned
+	}
 	command, cwd, ok := m.store.Command(m.streamSessionID)
 	if !ok {
-		m.openOverlay(overlayReplay, "Cannot replay: this session has no recorded server command\n(its meta frame was not captured).")
+		m.setFlash("no recorded server command to replay")
 		return nil
 	}
 	m.replayReq = call
-	m.openOverlay(overlayReplay, "Replaying "+call.Method+" against an isolated server copy…")
+	m.replaying = true
 	return replayCmd(command, cwd, call.Method, call.Params)
 }
 
@@ -756,7 +799,7 @@ func (m *Model) refresh() {
 	m.timeline = m.filterEvents(full)
 	// Count signals over the whole session, not the filtered view, so a stream
 	// filter never hides the session's health in the footer.
-	m.streamSignals = countStreamSignals(full, m.store.SlowThreshold())
+	m.streamSignals = countStreamSignals(full)
 	m.streamCalls, m.streamP50, m.streamP95 = callStats(full)
 	m.sortStream()
 	// A non-chronological sort means we're inspecting, not tailing.
@@ -770,6 +813,29 @@ func (m *Model) refresh() {
 		m.selEvent = len(m.timeline) - 1
 	}
 	m.selEvent = clamp(m.selEvent, 0, max(len(m.timeline)-1, 0))
+}
+
+// refreshLiveOverlay rebuilds an open live overlay from the current store state,
+// so a capabilities or tool-summary view left open keeps up with the session
+// instead of going stale until it is closed and reopened. It reads the store
+// directly, so it works in any view, and it re-renders only when the content
+// actually changed so the scroll position never jumps on an idle tick.
+func (m *Model) refreshLiveOverlay() {
+	var content string
+	switch m.overlay {
+	case overlayCaps:
+		content = m.capsContent()
+	case overlaySummary:
+		content = m.summaryContent()
+	default:
+		return
+	}
+	if content == m.overlayRaw {
+		return
+	}
+	off := m.vp.YOffset
+	m.setOverlayBody(content)
+	m.vp.SetYOffset(off)
 }
 
 // callStats computes the count, median, and 95th percentile latency over the
@@ -789,7 +855,7 @@ func callStats(events []store.EventView) (n int, p50, p95 time.Duration) {
 }
 
 // percentile returns the p-th percentile of sorted by nearest rank, so p95
-// surfaces the slow tail even with few samples.
+// surfaces the tail even with few samples.
 func percentile(sorted []time.Duration, p int) time.Duration {
 	if len(sorted) == 0 {
 		return 0
@@ -802,11 +868,10 @@ type streamSignalCounts struct {
 	errors  int
 	bad     int
 	warn    int
-	slow    int
 	pending int
 }
 
-func countStreamSignals(events []store.EventView, slowThreshold time.Duration) streamSignalCounts {
+func countStreamSignals(events []store.EventView) streamSignalCounts {
 	var c streamSignalCounts
 	for _, e := range events {
 		switch {
@@ -816,8 +881,6 @@ func countStreamSignals(events []store.EventView, slowThreshold time.Duration) s
 			c.bad++
 		case e.Kind == store.EventResponse && e.Call != nil && e.Call.Failed():
 			c.errors++
-		case e.Kind == store.EventResponse && e.Call != nil && e.Call.Slow(slowThreshold):
-			c.slow++
 		case e.Kind == store.EventRequest && e.Call != nil && e.Call.State == store.Pending:
 			c.pending++
 		}
@@ -1026,8 +1089,6 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 	switch v {
 	case "err", "error", "fail", "failed":
 		return e.Call.Failed()
-	case "slow":
-		return e.Call.Slow(m.store.SlowThreshold())
 	case "pending", "pend", "inflight":
 		return e.Call.State == store.Pending
 	case "ok", "success":
@@ -1039,6 +1100,7 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 // openOverlay shows a centered scrollable panel with the given body. The
 // inspector reserves one chrome line for its meta header.
 func (m *Model) openOverlay(mode overlayMode, content string) {
+	m.dismissTransient()
 	m.overlay = mode
 	m.overlaySearch = ""
 	m.overlayMatches = nil
@@ -1149,17 +1211,19 @@ func (m *Model) deleteCurrentSession() {
 	if id == "" {
 		return
 	}
+	label := valueOr(m.deleteTargetLabel(), "session")
 	m.store.Delete(id)
 	_ = os.Remove(paths.SessionLogPath(id))
 	if m.view == viewStream {
 		m.view = viewSessions
 	}
 	m.refresh()
-	m.setFlash("✓ deleted session")
+	m.setFlash("✓ deleted " + label)
 }
 
 // closeOverlay dismisses the overlay and clears any in-overlay search.
 func (m *Model) closeOverlay() {
+	m.dismissTransient()
 	m.overlay = overlayNone
 	m.overlayRaw = ""
 	m.overlayDisplay = ""

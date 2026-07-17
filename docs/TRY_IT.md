@@ -48,7 +48,7 @@ For Claude Desktop, add the same wrap to your `claude_desktop_config.json`.
    `c`, and replay a call with `r`.
 
 Frames stream in as the client works. The quick calls come back OK, and the long
-one sends progress notifications and runs long enough to trip the **SLOW** flag.
+one sends progress notifications and shows a visibly higher latency.
 
 The shim your client spawns and the TUI both use the default home, so they find
 each other with no wiring. Leave `MCPSNOOP_HOME` unset.

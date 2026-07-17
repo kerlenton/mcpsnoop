@@ -49,6 +49,32 @@ func TestDiffCommandComparesTwoLogPaths(t *testing.T) {
 	}
 }
 
+func TestDiffCommandExitCodeGatesOnRegression(t *testing.T) {
+	dir := t.TempDir()
+	ok := filepath.Join(dir, "ok.jsonl")
+	failing := filepath.Join(dir, "failing.jsonl")
+	writeDiffLog(t, ok,
+		diffEnvelope("ok", 1, time.Unix(1, 0), proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"q":"x"}}}`),
+		diffEnvelope("ok", 2, time.Unix(2, 0), proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	)
+	writeDiffLog(t, failing,
+		diffEnvelope("failing", 1, time.Unix(1, 0), proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"q":"x"}}}`),
+		diffEnvelope("failing", 2, time.Unix(2, 0), proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[]}}`),
+	)
+
+	// A regression (ok -> error) still exits 0 without the flag, and non-zero with it.
+	if code, _, stderr := executeDiff(t, []string{ok, failing}); code != 0 {
+		t.Fatalf("without --exit-code: exit = %d, stderr = %q", code, stderr)
+	}
+	if code, _, _ := executeDiff(t, []string{"--exit-code", ok, failing}); code != 1 {
+		t.Fatalf("regression with --exit-code: exit = %d, want 1", code)
+	}
+	// Reversed, an improvement (error -> ok) does not trip the gate.
+	if code, _, _ := executeDiff(t, []string{"--exit-code", failing, ok}); code != 0 {
+		t.Fatalf("improvement with --exit-code: exit = %d, want 0", code)
+	}
+}
+
 func TestDiffCommandRejectsInvalidDurationRatio(t *testing.T) {
 	for _, ratio := range []string{"0.5", "NaN", "+Inf"} {
 		t.Run(ratio, func(t *testing.T) {

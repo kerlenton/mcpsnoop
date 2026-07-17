@@ -25,7 +25,7 @@ func resp(seq uint64, ts time.Time, dir proxy.Direction, id, body string) proxy.
 }
 
 func TestActivityBuckets(t *testing.T) {
-	st := New(0)
+	st := New()
 	now := time.Now()
 	// Two frames in the most recent bucket, one about a minute old, and one well
 	// outside the two minute window that must be ignored.
@@ -55,7 +55,7 @@ func TestActivityBuckets(t *testing.T) {
 }
 
 func TestCorrelationAndTiming(t *testing.T) {
-	s := New(100 * time.Millisecond)
+	s := New()
 	t0 := time.Now()
 
 	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"echo","arguments":{"text":"hi"}}`))
@@ -75,9 +75,6 @@ func TestCorrelationAndTiming(t *testing.T) {
 	if got := c.Duration(); got != 200*time.Millisecond {
 		t.Fatalf("duration = %v, want 200ms", got)
 	}
-	if !c.Slow(100 * time.Millisecond) {
-		t.Fatalf("call should be flagged slow (200ms > 100ms threshold)")
-	}
 
 	calls := s.Calls("s1")
 	if len(calls) != 1 || calls[0].State != Completed {
@@ -88,7 +85,7 @@ func TestCorrelationAndTiming(t *testing.T) {
 // TestDuplicateResponseDoesNotDoubleCountPending guards against a second
 // response for an already-answered id decrementing the pending counter twice.
 func TestDuplicateResponseDoesNotDoubleCountPending(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 
 	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"echo"}`))
@@ -111,7 +108,7 @@ func TestDuplicateResponseDoesNotDoubleCountPending(t *testing.T) {
 // TestDuplicateErrorResponseDoesNotDoubleCountErrors guards the error counter
 // against a re-sent error response for the same id.
 func TestDuplicateErrorResponseDoesNotDoubleCountErrors(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 	s.Ingest(req(1, t0, proxy.ClientToServer, "7", "tools/call", `{"name":"nope"}`))
 	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "7", `"error":{"code":-32601,"message":"no"}`))
@@ -124,7 +121,7 @@ func TestDuplicateErrorResponseDoesNotDoubleCountErrors(t *testing.T) {
 // TestReusedInFlightRequestIDIsFlagged checks that a request reusing an id whose
 // earlier request is still pending is flagged, without leaking the pending count.
 func TestReusedInFlightRequestIDIsFlagged(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"a"}`))
 	ev := s.Ingest(req(2, t0.Add(time.Millisecond), proxy.ClientToServer, "1", "tools/call", `{"name":"b"}`))
@@ -141,7 +138,7 @@ func TestReusedInFlightRequestIDIsFlagged(t *testing.T) {
 }
 
 func TestErrorResponse(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 	s.Ingest(req(1, t0, proxy.ClientToServer, "7", "tools/call", `{"name":"nope"}`))
 	ev := s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "7", `"error":{"code":-32601,"message":"unknown tool"}`))
@@ -156,7 +153,7 @@ func TestErrorResponse(t *testing.T) {
 func TestToolLevelError(t *testing.T) {
 	// MCP tool failures arrive as a 200-OK response with result.isError=true,
 	// NOT as a JSON-RPC error. They must still count/flag as errors.
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"add"}`))
 	ev := s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
@@ -173,7 +170,7 @@ func TestToolLevelError(t *testing.T) {
 }
 
 func TestToolSummaryAggregatesLatencyErrorsAndPendingCalls(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	durations := []time.Duration{10, 20, 30, 40, 100}
 	for i, milliseconds := range durations {
@@ -217,7 +214,7 @@ func TestToolSummaryAggregatesLatencyErrorsAndPendingCalls(t *testing.T) {
 func TestServerToClientRequest(t *testing.T) {
 	// Server-initiated request (e.g. sampling) must correlate with the client's
 	// response travelling the other way.
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 	s.Ingest(req(1, t0, proxy.ServerToClient, "99", "sampling/createMessage", `{}`))
 	ev := s.Ingest(resp(2, t0.Add(5*time.Millisecond), proxy.ClientToServer, "99", `"result":{"ok":true}`))
@@ -227,7 +224,7 @@ func TestServerToClientRequest(t *testing.T) {
 }
 
 func TestCapabilitiesCapture(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "initialize",
 		`{"protocolVersion":"2025-06-18","capabilities":{"sampling":{}},"clientInfo":{"name":"cli"}}`))
@@ -249,7 +246,7 @@ func TestCapabilitiesCapture(t *testing.T) {
 }
 
 func TestNotificationAndUnmatchedResponse(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 	s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: t0, Direction: proxy.ClientToServer,
 		Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)})
@@ -268,7 +265,7 @@ func TestNotificationAndUnmatchedResponse(t *testing.T) {
 // channel is flagged as EventInvalid. On stdio this is the classic failure of a
 // server printing a stray line to stdout, which corrupts the stream.
 func TestInvalidProtocolFrame(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 
 	// A stray log line printed to stdout is not JSON, so the shim carries it as
@@ -296,7 +293,7 @@ func TestInvalidProtocolFrame(t *testing.T) {
 }
 
 func TestValidationWarnings(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 
 	ev := s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: t0,
@@ -321,7 +318,7 @@ func TestValidationWarnings(t *testing.T) {
 // TestConcurrentIngest exercises the lock under -race, many goroutines ingest
 // while another reads snapshots.
 func TestConcurrentIngest(t *testing.T) {
-	s := New(0)
+	s := New()
 	var wg sync.WaitGroup
 	for g := range 8 {
 		wg.Add(1)
@@ -363,7 +360,7 @@ func TestConcurrentIngest(t *testing.T) {
 }
 
 func TestToolUsageDistinguishesUsedFromUnused(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 
 	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", ""))
@@ -395,7 +392,7 @@ func TestToolUsageDistinguishesUsedFromUnused(t *testing.T) {
 }
 
 func TestToolUsagePaginatesAcrossCursor(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 
 	// Page one is cursorless, page two carries the cursor, so the two responses
@@ -421,7 +418,7 @@ func TestToolUsagePaginatesAcrossCursor(t *testing.T) {
 }
 
 func TestToolUsageReplacesToolsOnFreshList(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 
 	// A first listing offers echo and sum. A later cursorless listing (a
@@ -448,7 +445,7 @@ func TestToolUsageReplacesToolsOnFreshList(t *testing.T) {
 }
 
 func TestToolUsageWithdrawnCalledToolBecomesUnadvertised(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 
 	// The client calls sum while it is advertised, then the server re-lists
@@ -480,7 +477,7 @@ func TestToolUsageWithdrawnCalledToolBecomesUnadvertised(t *testing.T) {
 }
 
 func TestToolUsageReportsCalledButNotAdvertised(t *testing.T) {
-	s := New(0)
+	s := New()
 	t0 := time.Now()
 	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", ""))
 	s.Ingest(resp(2, t0, proxy.ServerToClient, "1",

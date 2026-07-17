@@ -97,6 +97,27 @@ func TestWriteTextReportsNoDifferences(t *testing.T) {
 	}
 }
 
+func TestHasRegression(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		report Report
+		want   bool
+	}{
+		{"empty", Report{}, false},
+		{"added tool only", Report{AddedTools: []string{"x"}}, false},
+		{"removed tool", Report{RemovedTools: []string{"x"}}, true},
+		{"schema changed", Report{ChangedSchemas: []string{"x"}}, true},
+		{"status worse", Report{CallChanges: []CallChange{{Before: "ok", After: "error"}}}, true},
+		{"status better", Report{CallChanges: []CallChange{{Before: "error", After: "ok"}}}, false},
+		{"slower", Report{DurationChanges: []DurationChange{{Before: time.Second, After: 2 * time.Second}}}, true},
+		{"faster", Report{DurationChanges: []DurationChange{{Before: 2 * time.Second, After: time.Second}}}, false},
+	} {
+		if got := c.report.HasRegression(); got != c.want {
+			t.Errorf("%s: HasRegression() = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestCanonicalJSONPreservesLargeIntegers(t *testing.T) {
 	left := canonicalJSON(json.RawMessage(`{"id":9007199254740992}`))
 	right := canonicalJSON(json.RawMessage(`{"id":9007199254740993}`))

@@ -38,7 +38,7 @@ func runDemo() int {
 
 	go playDemo(ctx, socket)
 
-	if err := tui.Run(ctx, socket, sessions, 0); err != nil {
+	if err := tui.Run(ctx, socket, sessions); err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)
 		return 1
 	}
@@ -105,10 +105,9 @@ func demoEnvelope(session string, seq uint64, f demoFrame) proxy.Envelope {
 }
 
 // demoScript is the scripted session, a handshake, a few tool calls, a stray
-// stdout line (flagged as invalid), a slow call with progress, a large payload
-// (shows the inspector's wrapping), and a tool-level error (result.isError).
-// Pauses between the slow call and its response push it past the slow threshold,
-// so it shows up as SLOW.
+// stdout line (flagged as invalid), a long-running call with progress, a large
+// payload (shows the inspector's wrapping), and a tool-level error
+// (result.isError). Pauses give the calls a range of visible latencies.
 func demoScript() []demoFrame {
 	bigValue := strings.Repeat("ZmFrZS1iYXNlNjQtcGF5bG9hZC0", 26) // ~700 chars, no spaces
 

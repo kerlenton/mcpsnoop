@@ -189,7 +189,7 @@ func LoadFile(path string) (*store.Store, string, error) {
 
 // Load reads a JSONL envelope stream into a store and returns its first session.
 func Load(r io.Reader, source string) (*store.Store, string, error) {
-	st := store.New(0)
+	st := store.New()
 	var firstSession string
 	dec := json.NewDecoder(r)
 	for {

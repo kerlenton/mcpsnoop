@@ -14,6 +14,7 @@ import (
 func newDiffCmd() *cobra.Command {
 	var durationThreshold time.Duration
 	var durationRatio float64
+	var exitOnRegression bool
 	cmd := &cobra.Command{
 		Use:   "diff <session-id|log.jsonl> <session-id|log.jsonl>",
 		Short: "Compare tools and calls across two captured sessions",
@@ -48,12 +49,16 @@ func newDiffCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop diff:", err)
 				return exitCode(1)
 			}
+			if exitOnRegression && report.HasRegression() {
+				return exitCode(1)
+			}
 			return nil
 		},
 	}
 	cmd.Flags().SortFlags = false
 	cmd.Flags().DurationVar(&durationThreshold, "duration-threshold", sessiondiff.DefaultDurationThreshold, "minimum absolute duration change to report")
 	cmd.Flags().Float64Var(&durationRatio, "duration-ratio", sessiondiff.DefaultDurationRatio, "minimum slowdown or speedup ratio to report")
+	cmd.Flags().BoolVar(&exitOnRegression, "exit-code", false, "exit non-zero when the after session regressed (removed tool, schema change, worse call status, or slowdown)")
 	return cmd
 }
 
