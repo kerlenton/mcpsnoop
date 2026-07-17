@@ -52,7 +52,11 @@ type EventView struct {
 	Raw     json.RawMessage
 	Text    string
 	Warning string
-	Call    *CallView // set for request/response events
+	// MCPMethod and MCPName are the HTTP routing headers (Mcp-Method, Mcp-Name),
+	// set on request frames captured over the streamable-HTTP transport.
+	MCPMethod string
+	MCPName   string
+	Call      *CallView // set for request/response events
 }
 
 // SessionHeader is a lightweight per-session summary for the left panel.
@@ -108,15 +112,17 @@ type SessionToolSummary struct {
 // view builds the snapshot for an event. Caller holds at least the read lock.
 func (e *event) view(_ *session) EventView {
 	v := EventView{
-		Seq:     e.seq,
-		TS:      e.ts,
-		Dir:     e.dir,
-		Kind:    e.kind,
-		Method:  e.method,
-		ID:      e.id,
-		Raw:     e.raw,
-		Text:    e.text,
-		Warning: e.warning,
+		Seq:       e.seq,
+		TS:        e.ts,
+		Dir:       e.dir,
+		Kind:      e.kind,
+		Method:    e.method,
+		ID:        e.id,
+		Raw:       e.raw,
+		Text:      e.text,
+		Warning:   e.warning,
+		MCPMethod: e.mcpMethod,
+		MCPName:   e.mcpName,
 	}
 	if e.call != nil {
 		cv := e.call.view()

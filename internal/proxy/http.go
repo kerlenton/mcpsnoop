@@ -61,10 +61,24 @@ func RunHTTP(ctx context.Context, cfg HTTPConfig) error {
 	return nil
 }
 
+// mcpMethodHeader and mcpNameHeader are the SEP-2243 Streamable HTTP routing
+// headers a client sets so a gateway can route without parsing the JSON-RPC body.
+const (
+	mcpMethodHeader = "Mcp-Method"
+	mcpNameHeader   = "Mcp-Name"
+)
+
+// route carries the routing headers observed on a request, both empty when the
+// frame is a response or the client did not send them.
+type route struct {
+	method string // Mcp-Method
+	name   string // Mcp-Name
+}
+
 // newHTTPEmitter returns an emit function bound to a session and sink.
-func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte) {
+func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 	var seq atomic.Uint64
-	return func(dir Direction, body []byte) {
+	return func(dir Direction, body []byte, r route) {
 		raw, text := splitObserved(body)
 		env := Envelope{
 			SessionID:   cfg.SessionID,
@@ -74,6 +88,8 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte) {
 			Direction:   dir,
 			Transport:   "http",
 			Text:        text,
+			MCPMethod:   r.method,
+			MCPName:     r.name,
 		}
 		if raw != nil {
 			env.Raw = append([]byte(nil), raw...)
@@ -84,7 +100,7 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte) {
 
 // httpProxyHandler builds the reverse-proxy handler that taps request and
 // response bodies. Exposed (unexported) for testing with httptest.
-func httpProxyHandler(target *url.URL, emit func(Direction, []byte)) http.Handler {
+func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
@@ -93,12 +109,14 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte)) http.Handle
 			if target.Path != "" && target.Path != "/" {
 				req.URL.Path = target.Path
 			}
+			// The routing headers are not hop-by-hop, so the reverse proxy forwards
+			// them to the target verbatim; the Director leaves them untouched.
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 				// Streaming case, tap SSE data frames as bytes flow to the client.
 				resp.Body = newSSETap(resp.Body, func(data []byte) {
-					emitFrames(emit, ServerToClient, data)
+					emitFrames(emit, ServerToClient, data, route{})
 				})
 				return nil
 			}
@@ -108,7 +126,7 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte)) http.Handle
 			if err != nil {
 				return err
 			}
-			emitFrames(emit, ServerToClient, body)
+			emitFrames(emit, ServerToClient, body, route{})
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 			resp.ContentLength = int64(len(body))
 			resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
@@ -121,7 +139,8 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte)) http.Handle
 			body, err := io.ReadAll(r.Body)
 			_ = r.Body.Close()
 			if err == nil {
-				emitFrames(emit, ClientToServer, body)
+				rt := route{method: r.Header.Get(mcpMethodHeader), name: r.Header.Get(mcpNameHeader)}
+				emitFrames(emit, ClientToServer, body, rt)
 				r.Body = io.NopCloser(bytes.NewReader(body))
 				r.ContentLength = int64(len(body))
 			}
@@ -131,8 +150,8 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte)) http.Handle
 }
 
 // emitFrames emits one envelope per JSON-RPC message in body, splitting a batch
-// array into its elements.
-func emitFrames(emit func(Direction, []byte), dir Direction, body []byte) {
+// array into its elements. Each element carries the same request routing headers.
+func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte, rt route) {
 	b := bytes.TrimSpace(body)
 	if len(b) == 0 {
 		return
@@ -141,12 +160,12 @@ func emitFrames(emit func(Direction, []byte), dir Direction, body []byte) {
 		var arr []json.RawMessage
 		if json.Unmarshal(b, &arr) == nil {
 			for _, m := range arr {
-				emit(dir, m)
+				emit(dir, m, rt)
 			}
 			return
 		}
 	}
-	emit(dir, b)
+	emit(dir, b, rt)
 }
 
 // sseTap passes SSE bytes through unchanged while extracting each event's

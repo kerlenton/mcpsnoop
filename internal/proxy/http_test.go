@@ -11,9 +11,9 @@ import (
 )
 
 // emitterTo adapts a captureSink into the emit func httpProxyHandler expects.
-func emitterTo(sink *captureSink) func(Direction, []byte) {
-	return func(d Direction, raw []byte) {
-		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...)})
+func emitterTo(sink *captureSink) func(Direction, []byte, route) {
+	return func(d Direction, raw []byte, rt route) {
+		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name})
 	}
 }
 
@@ -49,6 +49,65 @@ func TestHTTPProxyJSON(t *testing.T) {
 	}
 	if len(s2c) != 1 || string(s2c[0].Raw) != wantResp {
 		t.Fatalf("s2c = %+v", s2c)
+	}
+}
+
+func TestHTTPProxyForwardsAndCapturesRoutingHeaders(t *testing.T) {
+	var gotMethod, gotName string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotName = r.Header.Get("Mcp-Method"), r.Header.Get("Mcp-Name")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Mcp-Method", "tools/call")
+	req.Header.Set("Mcp-Name", "echo")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	// Forwarded verbatim to the target.
+	if gotMethod != "tools/call" || gotName != "echo" {
+		t.Fatalf("target received Mcp-Method=%q Mcp-Name=%q, want tools/call / echo", gotMethod, gotName)
+	}
+	// Captured onto the observed client->server frame.
+	c2s := sink.byDir(ClientToServer)
+	if len(c2s) != 1 || c2s[0].MCPMethod != "tools/call" || c2s[0].MCPName != "echo" {
+		t.Fatalf("captured frame headers = %+v", c2s)
+	}
+}
+
+func TestHTTPProxyWithoutRoutingHeadersDegrades(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	// No routing headers (an older client): the frame's header fields stay empty.
+	resp, err := http.Post(front.URL, "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	c2s := sink.byDir(ClientToServer)
+	if len(c2s) != 1 || c2s[0].MCPMethod != "" || c2s[0].MCPName != "" {
+		t.Fatalf("absent headers should stay empty, got %+v", c2s)
 	}
 }
 

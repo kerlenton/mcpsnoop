@@ -3,12 +3,43 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
+
+func TestIngestRoutingHeaderMismatch(t *testing.T) {
+	s := New()
+	now := time.Now()
+
+	// The Mcp-Method header says tools/list but the body is tools/call. A gateway
+	// routes on the header and the server rejects the disagreement, so flag it.
+	bad := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
+		Transport: "http", MCPMethod: "tools/list", MCPName: "search",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search"}}`),
+	}
+	ev := s.Ingest(bad)
+	if ev.MCPMethod != "tools/list" || ev.MCPName != "search" {
+		t.Fatalf("routing headers not captured: %+v", ev)
+	}
+	if !strings.Contains(ev.Warning, "Mcp-Method") || !strings.Contains(ev.Warning, "disagrees") {
+		t.Fatalf("expected a mismatch warning, got %q", ev.Warning)
+	}
+
+	// A matching header carries no mismatch warning.
+	good := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ClientToServer,
+		Transport: "http", MCPMethod: "tools/call",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call"}`),
+	}
+	if w := s.Ingest(good).Warning; strings.Contains(w, "disagrees") {
+		t.Fatalf("matching header should not warn, got %q", w)
+	}
+}
 
 func req(seq uint64, ts time.Time, dir proxy.Direction, id, method, params string) proxy.Envelope {
 	raw := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":%q`, id, method)

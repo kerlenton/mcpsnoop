@@ -1107,7 +1107,7 @@ func (m *Model) openOverlay(mode overlayMode, content string) {
 	m.overlayMatchIx = 0
 	m.overlayHeaderH = 0
 	if mode == overlayInspector {
-		m.overlayHeaderH = 1 // the single meta line above the body
+		m.overlayHeaderH = m.inspectorHeaderH() // meta line, plus routing headers when present
 	}
 	m.layoutOverlay()
 	m.setOverlayBody(content)

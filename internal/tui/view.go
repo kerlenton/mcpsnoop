@@ -902,7 +902,32 @@ func (m Model) inspectorHeader(w int) string {
 	}
 	left := m.styles.infoVal.Render(fmt.Sprintf("FRAME %d/%d", m.inspect+1, len(m.full))) + "  " + strings.Join(parts, sep)
 	right := m.pairWidget() + sep + m.styles.faint.Render(e.TS.Format("15:04:05.000"))
-	return bar(w, left, right)
+	head := bar(w, left, right)
+	// A second chrome line carries the Streamable HTTP routing headers (SEP-2243)
+	// verbatim when the request had them, so the busy meta line stays readable and
+	// older transports show nothing. overlayHeaderH tracks the extra line.
+	if e.MCPMethod != "" || e.MCPName != "" {
+		var rp []string
+		if e.MCPMethod != "" {
+			rp = append(rp, m.styles.dim.Render("Mcp-Method ")+m.styles.neutral.Render(e.MCPMethod))
+		}
+		if e.MCPName != "" {
+			rp = append(rp, m.styles.dim.Render("Mcp-Name ")+m.styles.neutral.Render(e.MCPName))
+		}
+		head += "\n" + bar(w, strings.Join(rp, sep), "")
+	}
+	return head
+}
+
+// inspectorHeaderH is the number of fixed chrome lines above the inspector body:
+// the meta line, plus a routing-headers line when the inspected frame has them.
+func (m Model) inspectorHeaderH() int {
+	if m.inspect >= 0 && m.inspect < len(m.full) {
+		if e := m.full[m.inspect]; e.MCPMethod != "" || e.MCPName != "" {
+			return 2
+		}
+	}
+	return 1
 }
 
 // pairWidget is the right side of the inspector header, req N ⇄ resp N with the

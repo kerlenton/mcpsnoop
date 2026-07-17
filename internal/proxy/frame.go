@@ -44,6 +44,11 @@ type Envelope struct {
 	Raw json.RawMessage `json:"raw,omitempty"`
 	// Text holds a plain line (used for stderr). Empty for JSON-RPC frames.
 	Text string `json:"text,omitempty"`
+	// MCPMethod and MCPName are the Streamable HTTP routing headers (Mcp-Method,
+	// Mcp-Name; SEP-2243), set on client requests so a gateway can route without
+	// reading the body. Empty for stdio and pre-2026 HTTP servers.
+	MCPMethod string `json:"mcp_method,omitempty"`
+	MCPName   string `json:"mcp_name,omitempty"`
 }
 
 // RPCError is the JSON-RPC error object.

@@ -85,16 +85,18 @@ type call struct {
 
 // event is the mutable internal timeline entry.
 type event struct {
-	seq     uint64
-	ts      time.Time
-	dir     proxy.Direction
-	kind    EventKind
-	method  string
-	id      string
-	raw     json.RawMessage
-	text    string
-	warning string
-	call    *call // set for request/response events
+	seq       uint64
+	ts        time.Time
+	dir       proxy.Direction
+	kind      EventKind
+	method    string
+	id        string
+	raw       json.RawMessage
+	text      string
+	warning   string
+	mcpMethod string // Mcp-Method routing header (HTTP transport, SEP-2243)
+	mcpName   string // Mcp-Name routing header
+	call      *call  // set for request/response events
 }
 
 // capabilities holds what the handshake negotiated.
@@ -174,7 +176,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		return EventView{Kind: EventOther} // control frame, not shown in the stream
 	}
 
-	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text}
+	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName}
 
 	if e.Direction == proxy.ServerStderr {
 		ev.kind = EventStderr
@@ -230,6 +232,12 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	default:
 		ev.kind = EventOther
 		ev.warning = validationWarning(msg)
+	}
+
+	// A gateway routes on Mcp-Method, and a server rejects a request whose header
+	// disagrees with the body, so flag the mismatch rather than let it look fine.
+	if ev.mcpMethod != "" && msg.Method != "" && ev.mcpMethod != msg.Method {
+		ev.warning = appendWarning(ev.warning, "routing header Mcp-Method "+ev.mcpMethod+" disagrees with body method "+msg.Method)
 	}
 
 	sess.events = append(sess.events, ev)
