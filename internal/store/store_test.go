@@ -412,6 +412,40 @@ func TestCapabilitiesNeitherPathIsUnknown(t *testing.T) {
 	}
 }
 
+func TestServerInfoFromResponseMeta(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	// A stateless session that never calls server/discover or initialize: the
+	// client identifies itself in a tools/call request _meta, and the server's
+	// identity rides the tools/call response _meta (which servers SHOULD send on
+	// every response per $defs.ResultMetaObject in the draft schema).
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call",
+		`{"name":"echo","_meta":{"io.modelcontextprotocol/clientInfo":{"name":"cli","version":"1.0"}}}`))
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
+		`"result":{"content":[],"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"StatelessSrv","version":"3.1"}}}`))
+
+	caps, ok := s.Capabilities("s1")
+	if !ok {
+		t.Fatal("stateless session should have capabilities")
+	}
+	var info struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(caps.ServerInfo, &info) != nil || info.Name != "StatelessSrv" || info.Version != "3.1" {
+		t.Fatalf("serverInfo not read from response _meta: %s", caps.ServerInfo)
+	}
+
+	// A response without _meta serverInfo leaves serverInfo unset.
+	s2 := New()
+	s2.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call",
+		`{"name":"echo","_meta":{"io.modelcontextprotocol/clientInfo":{"name":"cli"}}}`))
+	s2.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[]}`))
+	if caps2, _ := s2.Capabilities("s1"); len(caps2.ServerInfo) != 0 {
+		t.Fatalf("plain response must not set serverInfo, got %s", caps2.ServerInfo)
+	}
+}
+
 func TestNotificationAndUnmatchedResponse(t *testing.T) {
 	s := New()
 	t0 := time.Now()

@@ -198,6 +198,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.kind = EventResponse
 		ev.id = string(msg.ID)
 		ev.warning = validationWarning(msg)
+		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.TS, msg)
 		ev.call = c
 		sess.responses++
@@ -466,6 +467,31 @@ func (c *capabilities) applyDiscover(result json.RawMessage) {
 	if r.Instructions != "" {
 		c.instructions = r.Instructions
 	}
+}
+
+// applyResponseMeta reads the server's identity from any response's _meta.
+// The normative draft schema ($defs.ResultMetaObject) says servers SHOULD send
+// io.modelcontextprotocol/serverInfo on every response, so capture it even when
+// the session never calls server/discover. No-op when absent, so legacy
+// (2025-11-25) responses, which carry serverInfo at the top level only, are
+// untouched.
+func (c *capabilities) applyResponseMeta(result json.RawMessage) {
+	if len(result) == 0 {
+		return
+	}
+	var r struct {
+		Meta struct {
+			ServerInfo json.RawMessage `json:"io.modelcontextprotocol/serverInfo"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(result, &r) != nil {
+		return
+	}
+	if len(r.Meta.ServerInfo) == 0 {
+		return
+	}
+	c.set = true
+	c.serverInfo = r.Meta.ServerInfo
 }
 
 // applyToolsList records the tools a tools/list response advertised. A cursorless
