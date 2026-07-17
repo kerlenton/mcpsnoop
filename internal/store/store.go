@@ -429,11 +429,14 @@ func (c *capabilities) applyRequestMeta(params json.RawMessage) {
 }
 
 // applyDiscover reads server capabilities from a server/discover result, the
-// stateless replacement for the initialize response. Per the draft schema
-// serverInfo rides the result's _meta (io.modelcontextprotocol/serverInfo, which
-// servers SHOULD send on every response); a top-level serverInfo is honored only
-// as a fallback for servers that place it there. The server lists the versions it
-// supports, of which we surface the first when no version is otherwise known.
+// stateless replacement for the initialize response. serverInfo is read from the
+// result's _meta first, since the normative draft JSON schema ($defs.ResultMetaObject)
+// makes io.modelcontextprotocol/serverInfo the canonical location that servers
+// SHOULD send on every response, and DiscoverResult has no top-level serverInfo.
+// The top-level read is only a defensive fallback for the shape in the
+// non-normative docs example, so this precedence must not be flipped back. The
+// server lists the versions it supports, of which we surface the first when no
+// version is otherwise known.
 func (c *capabilities) applyDiscover(result json.RawMessage) {
 	var r struct {
 		SupportedVersions []string        `json:"supportedVersions"`
