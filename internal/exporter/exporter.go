@@ -81,6 +81,7 @@ type CapabilitiesExport struct {
 	ServerInfo      json.RawMessage `json:"server_info,omitempty"`
 	Client          json.RawMessage `json:"client,omitempty"`
 	Server          json.RawMessage `json:"server,omitempty"`
+	Instructions    string          `json:"instructions,omitempty"`
 }
 
 type CallExport struct {
@@ -266,6 +267,7 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 			ServerInfo:      caps.ServerInfo,
 			Client:          caps.Client,
 			Server:          caps.Server,
+			Instructions:    caps.Instructions,
 		}
 	}
 	return out, nil

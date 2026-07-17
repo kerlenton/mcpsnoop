@@ -101,7 +101,10 @@ type event struct {
 	call      *call  // set for request/response events
 }
 
-// capabilities holds what the handshake negotiated.
+// capabilities holds what each side declared, whether through the legacy
+// initialize handshake or the 2026-07-28 stateless model, where the client's
+// info/version/capabilities ride every request's _meta and the server's are
+// fetched with server/discover (the initialize handshake was removed, SEP-2575).
 type capabilities struct {
 	set             bool
 	protocolVersion string
@@ -109,6 +112,7 @@ type capabilities struct {
 	serverInfo      json.RawMessage
 	client          json.RawMessage
 	server          json.RawMessage
+	instructions    string // server's usage guidance (initialize or server/discover)
 }
 
 // session aggregates everything observed for one proxied server instance.
@@ -194,6 +198,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.kind = EventResponse
 		ev.id = string(msg.ID)
 		ev.warning = validationWarning(msg)
+		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.TS, msg)
 		ev.call = c
 		sess.responses++
@@ -234,6 +239,13 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	default:
 		ev.kind = EventOther
 		ev.warning = validationWarning(msg)
+	}
+
+	// In the stateless model the client's identity and capabilities ride every
+	// request's _meta rather than a one-time initialize, so read them from any
+	// client frame that carries them (a no-op otherwise).
+	if e.Direction == proxy.ClientToServer && msg.Method != "" {
+		sess.caps.applyRequestMeta(msg.Params)
 	}
 
 	// A gateway routes on the Mcp-Method/Mcp-Name headers, and a compliant server
@@ -339,6 +351,8 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	switch c.method {
 	case "initialize":
 		sess.caps.applyResponse(msg.Result)
+	case "server/discover":
+		sess.caps.applyDiscover(msg.Result)
 	case "tools/list":
 		sess.applyToolsList(c.params, msg.Result)
 	}
@@ -367,6 +381,7 @@ func (c *capabilities) applyResponse(result json.RawMessage) {
 		ProtocolVersion string          `json:"protocolVersion"`
 		Capabilities    json.RawMessage `json:"capabilities"`
 		ServerInfo      json.RawMessage `json:"serverInfo"`
+		Instructions    string          `json:"instructions"`
 	}
 	if json.Unmarshal(result, &r) != nil {
 		return
@@ -377,6 +392,106 @@ func (c *capabilities) applyResponse(result json.RawMessage) {
 	}
 	c.server = r.Capabilities
 	c.serverInfo = r.ServerInfo
+	if r.Instructions != "" {
+		c.instructions = r.Instructions
+	}
+}
+
+// applyRequestMeta reads the client's protocol version, info, and capabilities
+// from a request's _meta, where the stateless model repeats them on every
+// request instead of exchanging them once in initialize. The reverse-DNS keys
+// are sourced verbatim from the draft schema. It is a no-op when the request
+// carries none of them, so a plain call never fabricates a handshake.
+func (c *capabilities) applyRequestMeta(params json.RawMessage) {
+	var p struct {
+		Meta struct {
+			ProtocolVersion string          `json:"io.modelcontextprotocol/protocolVersion"`
+			ClientInfo      json.RawMessage `json:"io.modelcontextprotocol/clientInfo"`
+			Capabilities    json.RawMessage `json:"io.modelcontextprotocol/clientCapabilities"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return
+	}
+	m := p.Meta
+	if m.ProtocolVersion == "" && len(m.ClientInfo) == 0 && len(m.Capabilities) == 0 {
+		return
+	}
+	c.set = true
+	if m.ProtocolVersion != "" {
+		c.protocolVersion = m.ProtocolVersion
+	}
+	if len(m.ClientInfo) > 0 {
+		c.clientInfo = m.ClientInfo
+	}
+	if len(m.Capabilities) > 0 {
+		c.client = m.Capabilities
+	}
+}
+
+// applyDiscover reads server capabilities from a server/discover result, the
+// stateless replacement for the initialize response. serverInfo is read from the
+// result's _meta first, since the normative draft JSON schema ($defs.ResultMetaObject)
+// makes io.modelcontextprotocol/serverInfo the canonical location that servers
+// SHOULD send on every response, and DiscoverResult has no top-level serverInfo.
+// The top-level read is only a defensive fallback for the shape in the
+// non-normative docs example, so this precedence must not be flipped back. The
+// server lists the versions it supports, of which we surface the first when no
+// version is otherwise known.
+func (c *capabilities) applyDiscover(result json.RawMessage) {
+	var r struct {
+		SupportedVersions []string        `json:"supportedVersions"`
+		Capabilities      json.RawMessage `json:"capabilities"`
+		ServerInfo        json.RawMessage `json:"serverInfo"`
+		Instructions      string          `json:"instructions"`
+		Meta              struct {
+			ServerInfo json.RawMessage `json:"io.modelcontextprotocol/serverInfo"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(result, &r) != nil {
+		return
+	}
+	c.set = true
+	if len(r.Capabilities) > 0 {
+		c.server = r.Capabilities
+	}
+	switch {
+	case len(r.Meta.ServerInfo) > 0:
+		c.serverInfo = r.Meta.ServerInfo
+	case len(r.ServerInfo) > 0:
+		c.serverInfo = r.ServerInfo
+	}
+	if c.protocolVersion == "" && len(r.SupportedVersions) > 0 {
+		c.protocolVersion = r.SupportedVersions[0]
+	}
+	if r.Instructions != "" {
+		c.instructions = r.Instructions
+	}
+}
+
+// applyResponseMeta reads the server's identity from any response's _meta.
+// The normative draft schema ($defs.ResultMetaObject) says servers SHOULD send
+// io.modelcontextprotocol/serverInfo on every response, so capture it even when
+// the session never calls server/discover. No-op when absent, so legacy
+// (2025-11-25) responses, which carry serverInfo at the top level only, are
+// untouched.
+func (c *capabilities) applyResponseMeta(result json.RawMessage) {
+	if len(result) == 0 {
+		return
+	}
+	var r struct {
+		Meta struct {
+			ServerInfo json.RawMessage `json:"io.modelcontextprotocol/serverInfo"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(result, &r) != nil {
+		return
+	}
+	if len(r.Meta.ServerInfo) == 0 {
+		return
+	}
+	c.set = true
+	c.serverInfo = r.Meta.ServerInfo
 }
 
 // applyToolsList records the tools a tools/list response advertised. A cursorless

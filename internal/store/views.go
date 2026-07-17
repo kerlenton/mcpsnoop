@@ -84,6 +84,7 @@ type CapsView struct {
 	ServerInfo      json.RawMessage
 	Client          json.RawMessage
 	Server          json.RawMessage
+	Instructions    string
 }
 
 // ToolStats summarizes calls to one MCP tool within a session.
@@ -206,6 +207,7 @@ func (s *Store) Capabilities(sessionID string) (CapsView, bool) {
 		ServerInfo:      sess.caps.serverInfo,
 		Client:          sess.caps.client,
 		Server:          sess.caps.server,
+		Instructions:    sess.caps.instructions,
 	}, true
 }
 
