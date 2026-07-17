@@ -793,7 +793,7 @@ func (m Model) renderHelp() string {
 	filter := helpGroup{"STREAM FILTER QUERY", [][2]string{
 		{"<text>", "substring over method, tool, id, payload"},
 		{"tool:echo", "by tool name"},
-		{"status:err|warn|ok|pending|bad", "by outcome"},
+		{"status:err|warn|ok|pending|bad|mismatch", "by outcome"},
 		{"kind:req|resp|notify|stderr|invalid", "by message type"},
 		{"dir:c2s|s2c", "by direction"},
 		{"method:tools/call", "by method"},

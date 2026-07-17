@@ -49,6 +49,9 @@ type Envelope struct {
 	// reading the body. Empty for stdio and pre-2026 HTTP servers.
 	MCPMethod string `json:"mcp_method,omitempty"`
 	MCPName   string `json:"mcp_name,omitempty"`
+	// Batch marks a frame that was one element of a JSON-RPC batch array. Routing
+	// headers address a single operation, so they cannot describe a batch.
+	Batch bool `json:"batch,omitempty"`
 }
 
 // RPCError is the JSON-RPC error object.

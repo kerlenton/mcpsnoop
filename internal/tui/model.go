@@ -1083,6 +1083,11 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 	if v == "warn" || v == "warning" {
 		return e.Warning != ""
 	}
+	if v == "mismatch" {
+		// A routing header disagreeing with the body (Mcp-Method/Mcp-Name, SEP-2243).
+		// It is a structured subset of warnings, so it stays discoverable on its own.
+		return e.RoutingMismatch
+	}
 	if e.Call == nil {
 		return false
 	}

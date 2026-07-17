@@ -13,7 +13,7 @@ import (
 // emitterTo adapts a captureSink into the emit func httpProxyHandler expects.
 func emitterTo(sink *captureSink) func(Direction, []byte, route) {
 	return func(d Direction, raw []byte, rt route) {
-		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name})
+		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, Batch: rt.batch})
 	}
 }
 
@@ -108,6 +108,49 @@ func TestHTTPProxyWithoutRoutingHeadersDegrades(t *testing.T) {
 	c2s := sink.byDir(ClientToServer)
 	if len(c2s) != 1 || c2s[0].MCPMethod != "" || c2s[0].MCPName != "" {
 		t.Fatalf("absent headers should stay empty, got %+v", c2s)
+	}
+}
+
+func TestHTTPProxyBatchHeadersRideFirstElementOnly(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[{"jsonrpc":"2.0","id":1,"result":{}},{"jsonrpc":"2.0","id":2,"result":{}}]`)
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	// A batch carrying routing headers: the headers name one operation but the
+	// batch has two, so they cannot be copied onto every element.
+	batch := `[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo"}}]`
+	req, _ := http.NewRequest(http.MethodPost, front.URL, strings.NewReader(batch))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Mcp-Method", "tools/list")
+	req.Header.Set("Mcp-Name", "search")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	c2s := sink.byDir(ClientToServer)
+	if len(c2s) != 2 {
+		t.Fatalf("expected 2 split batch frames, got %d: %+v", len(c2s), c2s)
+	}
+	if !c2s[0].Batch || !c2s[1].Batch {
+		t.Fatalf("both batch elements should be flagged batched: %+v", c2s)
+	}
+	// Headers ride only the first element, so the store flags the batch once
+	// rather than fabricating a per-element method mismatch on the rest.
+	if c2s[0].MCPMethod != "tools/list" || c2s[0].MCPName != "search" {
+		t.Fatalf("first element should carry the headers, got %+v", c2s[0])
+	}
+	if c2s[1].MCPMethod != "" || c2s[1].MCPName != "" {
+		t.Fatalf("later elements must not carry the headers, got %+v", c2s[1])
 	}
 }
 

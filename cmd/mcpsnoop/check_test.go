@@ -21,7 +21,7 @@ func TestCheckFailsOnSelectedSessionSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 pending=1\ncheck failed: error,invalid,warn\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1\ncheck failed: error,invalid,warn\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -36,7 +36,7 @@ func TestCheckFailsOnlyOnSelectedSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 because the fixture contains an invalid frame", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 pending=1\ncheck failed: invalid\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1\ncheck failed: invalid\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -50,7 +50,7 @@ func TestCheckIgnoresUnselectedSignals(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=2 invalid=0 warnings=0 pending=0\ncheck passed\n" {
+	if stdout != "session s1: errors=2 invalid=0 warnings=0 mismatches=0 pending=0\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -68,7 +68,7 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=0 invalid=0 warnings=0 pending=0\ncheck passed\n" {
+	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -149,6 +149,38 @@ func TestCheckFailsOnHungCall(t *testing.T) {
 		t.Fatalf("exit = %d, want 0 since pending is opt-in", code)
 	}
 	if !strings.Contains(stdout, "check passed") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
+func TestCheckFailsOnRoutingMismatch(t *testing.T) {
+	// The Mcp-Name header claims a safe tool while the body calls another one: a
+	// routing mismatch (tool shadowing) that a compliant gateway would reject.
+	shadow := checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dangerous"}}`)
+	shadow.Transport, shadow.MCPMethod, shadow.MCPName = "http", "tools/call", "safe"
+	log := encodeCheckLog(t, shadow,
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	)
+
+	// The dedicated signal gates on it specifically.
+	code, stdout, _ := executeCheck(t, []string{"--fail-on", "mismatch", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 for a routing mismatch", code)
+	}
+	if !strings.Contains(stdout, "mismatches=1") || !strings.Contains(stdout, "check failed: mismatch") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+
+	// A clean session leaves the mismatch signal quiet.
+	clean := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`),
+	)
+	code, stdout, _ = executeCheck(t, []string{"--fail-on", "mismatch", "-"}, clean)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 for a clean session", code)
+	}
+	if !strings.Contains(stdout, "mismatches=0") || !strings.Contains(stdout, "check passed") {
 		t.Fatalf("stdout = %q", stdout)
 	}
 }

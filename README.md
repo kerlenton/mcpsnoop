@@ -96,7 +96,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop` | open the live TUI |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, or otlp |
-| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, or hung calls |
+| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, or hung calls |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
 | `mcpsnoop remote <user@host>` | print the SSH tunnel command |
@@ -187,7 +187,7 @@ matches the method, tool, id, and payload.
 | `id:` | request id | `id:7` |
 | `dir:` | direction (`c2s`, `s2c`) | `dir:s2c` |
 | `kind:` | frame type (`req`, `resp`, `notify`, `stderr`, `invalid`) | `kind:invalid` |
-| `status:` | call outcome (`ok`, `error`, `pending`, `bad`, `warn`) | `status:error` |
+| `status:` | call outcome (`ok`, `error`, `pending`, `bad`, `warn`, `mismatch`) | `status:error` |
 
 Stack tokens to get specific.
 
@@ -266,22 +266,23 @@ or slows down. Improvements (added tools, fixed calls, speedups) still exit zero
 
 ## Checking sessions in CI
 
-Gate a recorded agent run on errors, stream corruption, protocol warnings, or
-calls that never got a response.
+Gate a recorded agent run on errors, stream corruption, protocol warnings,
+routing-header mismatches, or calls that never got a response.
 
 ```bash
-mcpsnoop check [--fail-on error,invalid,warn,pending] [session-id|log.jsonl|-]
+mcpsnoop check [--fail-on error,invalid,warn,mismatch,pending] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
-to gate on calls that never got a response. Pass a comma-separated subset to
-select only the conditions relevant to a job. Omit the session to check the
-newest capture, or use `-` to read JSONL from stdin.
+to gate on calls that never got a response, or `mismatch` to gate specifically on
+a routing header (Mcp-Method or Mcp-Name) disagreeing with the body. Pass a
+comma-separated subset to select only the conditions relevant to a job. Omit the
+session to check the newest capture, or use `-` to read JSONL from stdin.
 
 ```bash
 mcpsnoop check build-agent
 mcpsnoop check --fail-on error,invalid artifacts/session.jsonl
-mcpsnoop check --fail-on error,pending - < trace.jsonl
+mcpsnoop check --fail-on mismatch gateway-run.jsonl
 ```
 
 ## Watching from another machine

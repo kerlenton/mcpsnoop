@@ -110,6 +110,7 @@ type EventExport struct {
 	Method    string          `json:"method,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Warning   string          `json:"warning,omitempty"`
+	Mismatch  bool            `json:"mismatch,omitempty"`
 	CallIndex *int            `json:"call_index,omitempty"`
 	Raw       json.RawMessage `json:"raw,omitempty"`
 	Text      string          `json:"text,omitempty"`
@@ -510,6 +511,7 @@ func exportEvent(ev store.EventView, callIndex map[string]int) EventExport {
 		Method:    ev.Method,
 		ID:        ev.ID,
 		Warning:   ev.Warning,
+		Mismatch:  ev.RoutingMismatch,
 		Raw:       ev.Raw,
 		Text:      ev.Text,
 	}

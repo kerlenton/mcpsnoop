@@ -69,10 +69,12 @@ const (
 )
 
 // route carries the routing headers observed on a request, both empty when the
-// frame is a response or the client did not send them.
+// frame is a response or the client did not send them. batch marks a frame
+// split out of a JSON-RPC batch array, which routing headers cannot address.
 type route struct {
 	method string // Mcp-Method
 	name   string // Mcp-Name
+	batch  bool
 }
 
 // newHTTPEmitter returns an emit function bound to a session and sink.
@@ -90,6 +92,7 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 			Text:        text,
 			MCPMethod:   r.method,
 			MCPName:     r.name,
+			Batch:       r.batch,
 		}
 		if raw != nil {
 			env.Raw = append([]byte(nil), raw...)
@@ -150,7 +153,11 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 }
 
 // emitFrames emits one envelope per JSON-RPC message in body, splitting a batch
-// array into its elements. Each element carries the same request routing headers.
+// array into its elements. A request's routing headers describe a single
+// operation, so they cannot be copied onto every batch element (that would
+// fabricate a method mismatch on all but the matching one). Instead each element
+// is flagged as batched and the headers ride only the first, letting the store
+// surface a single "invalid on a batch" warning rather than per-element noise.
 func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte, rt route) {
 	b := bytes.TrimSpace(body)
 	if len(b) == 0 {
@@ -159,8 +166,12 @@ func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte,
 	if b[0] == '[' {
 		var arr []json.RawMessage
 		if json.Unmarshal(b, &arr) == nil {
-			for _, m := range arr {
-				emit(dir, m, rt)
+			for i, m := range arr {
+				er := route{batch: true}
+				if i == 0 {
+					er.method, er.name = rt.method, rt.name
+				}
+				emit(dir, m, er)
 			}
 			return
 		}
