@@ -166,7 +166,7 @@ func (s *Sink) remember(pending map[callKey]pendingCall, order *list.List, key c
 }
 
 func payloadFor(request, response proxy.Envelope) ([]byte, bool) {
-	st := store.New(0)
+	st := store.New()
 	st.Ingest(request)
 	event := st.Ingest(response)
 	if event.Call == nil || !event.Call.Done() {

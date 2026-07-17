@@ -12,8 +12,8 @@ var htmlTemplate = template.Must(template.New("html").Parse(`<!doctype html>
 /* Semantic colors mirror the TUI palette (internal/tui/styles.go). The dark
    theme uses the exact TUI hex values; the light theme uses readable darker
    variants of the same hues. */
-:root { color-scheme: light dark; --bg:#f8f8f5; --fg:#202124; --muted:#6b6f76; --line:#d8d9d3; --panel:#ffffff; --code:#f0f1ec; --accent:#0067c0; --req:#3b6fc4; --resp:#2e7d32; --notif:#5a51bf; --stderr:#6b6f76; --slow:#b26a00; --warn:#8a6d00; --err:#c62828; --invalid:#b0177e; }
-@media (prefers-color-scheme: dark) { :root { --bg:#171817; --fg:#eceee8; --muted:#aeb4ad; --line:#343832; --panel:#20221f; --code:#151714; --accent:#00afff; --req:#87afff; --resp:#87d787; --notif:#afafd7; --stderr:#8a8a8a; --slow:#ffaf5f; --warn:#d7af5f; --err:#ff5f5f; --invalid:#ff5faf; } }
+:root { color-scheme: light dark; --bg:#f8f8f5; --fg:#202124; --muted:#6b6f76; --line:#d8d9d3; --panel:#ffffff; --code:#f0f1ec; --accent:#0067c0; --req:#3b6fc4; --resp:#2e7d32; --notif:#5a51bf; --stderr:#6b6f76; --pending:#0e7c86; --warn:#8a6d00; --err:#c62828; --invalid:#b0177e; }
+@media (prefers-color-scheme: dark) { :root { --bg:#171817; --fg:#eceee8; --muted:#aeb4ad; --line:#343832; --panel:#20221f; --code:#151714; --accent:#00afff; --req:#87afff; --resp:#87d787; --notif:#afafd7; --stderr:#8a8a8a; --pending:#5fd7d7; --warn:#d7af5f; --err:#ff5f5f; --invalid:#ff5faf; } }
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 header { position:sticky; top:0; z-index:2; padding:18px 24px 14px; background:color-mix(in srgb, var(--bg) 92%, transparent); border-bottom:1px solid var(--line); backdrop-filter:blur(10px); }
@@ -36,14 +36,12 @@ main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
 .status.ok { color:var(--resp); }
 .status.error { color:var(--err); }
 .status.warn { color:var(--warn); }
-.status.slow { color:var(--slow); }
-.status.pending { color:var(--slow); }
+.status.pending { color:var(--pending); }
 .status.bad { color:var(--invalid); }
 /* Per-event tone by kind/status, matching the TUI stream colors. */
 .tone-req { border-left-color:var(--req); } .tone-req .dir { color:var(--req); }
 .tone-resp { border-left-color:var(--resp); } .tone-resp .dir { color:var(--resp); }
 .tone-error { border-left-color:var(--err); } .tone-error .dir { color:var(--err); }
-.tone-slow { border-left-color:var(--slow); } .tone-slow .dir { color:var(--slow); }
 .tone-warn { border-left-color:var(--warn); } .tone-warn .dir { color:var(--warn); }
 .tone-notif { border-left-color:var(--notif); } .tone-notif .dir { color:var(--notif); }
 .tone-stderr { border-left-color:var(--stderr); } .tone-stderr .dir { color:var(--stderr); }
@@ -95,7 +93,6 @@ const events = data.events || [];
 // Filter grammar mirrors the TUI stream filter, space-separated tokens (ANDed),
 // where key:value matches a field and a bare token is a substring over the frame.
 const norm = (s) => String(s ?? "").toLowerCase();
-const SLOW_MS = 1000; // matches store.DefaultSlowThreshold (1s)
 const matchDir = (dir, v) => {
   v = v.toLowerCase();
   if (["c2s", "client", "in", "req", "request", "->", "→"].includes(v)) return dir === "c2s";
@@ -118,7 +115,6 @@ const matchStatus = (ev, call, v) => {
   if (v === "warn" || v === "warning") return !!ev.warning;
   if (!call) return false;
   if (["err", "error", "fail", "failed"].includes(v)) return call.status === "error";
-  if (v === "slow") return call.duration_ms != null && call.duration_ms > SLOW_MS;
   if (["pending", "pend", "inflight"].includes(v)) return call.status === "pending";
   if (["ok", "success"].includes(v)) return call.status === "ok";
   return false;
@@ -148,8 +144,8 @@ const eventMatches = (ev, tokens) => {
   return tokens.every((t) => matchToken(ev, call, t));
 };
 // toneOf and statusOf mirror the TUI, requests are blue, responses take their
-// call's outcome (green ok, red error, amber slow), notifications lavender,
-// stderr gray. The status text shows on the response (or a pending request).
+// call's outcome (green ok, red error), notifications lavender, stderr gray. The
+// status text shows on the response (or a pending request).
 const toneOf = (ev, call) => {
   if (ev.kind === "stderr") return "stderr";
   if (ev.kind === "notification") return "notif";
@@ -158,7 +154,6 @@ const toneOf = (ev, call) => {
   if (ev.kind === "request") return "req";
   if (ev.kind === "response") {
     if (call && call.status === "error") return "error";
-    if (call && call.duration_ms != null && call.duration_ms > SLOW_MS) return "slow";
     return "resp";
   }
   return "resp";
@@ -169,7 +164,6 @@ const statusOf = (ev, call) => {
   if (!call) return "";
   if (ev.kind === "response") {
     if (call.status === "error") return "error";
-    if (call.duration_ms != null && call.duration_ms > SLOW_MS) return "slow";
     return call.status;
   }
   return call.status === "pending" ? "pending" : "";

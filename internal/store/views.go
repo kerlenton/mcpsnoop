@@ -41,11 +41,6 @@ func (c CallView) Duration() time.Duration {
 	return time.Since(c.Start)
 }
 
-// Slow reports whether a completed call exceeded threshold.
-func (c CallView) Slow(threshold time.Duration) bool {
-	return c.Done() && c.End.Sub(c.Start) > threshold
-}
-
 // EventView is an immutable snapshot of one timeline entry.
 type EventView struct {
 	Seq     uint64

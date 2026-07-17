@@ -56,6 +56,40 @@ func (r Report) Empty() bool {
 		len(r.DurationChanges) == 0
 }
 
+// HasRegression reports whether the after session is worse than the before one:
+// a removed tool or a changed input schema (a potentially breaking contract
+// change), a call whose status got worse, or a call that got notably slower.
+// Improvements, added tools, fixed calls, and speedups do not count.
+func (r Report) HasRegression() bool {
+	if len(r.RemovedTools) > 0 || len(r.ChangedSchemas) > 0 {
+		return true
+	}
+	for _, change := range r.CallChanges {
+		if statusRank(change.After) > statusRank(change.Before) {
+			return true
+		}
+	}
+	for _, change := range r.DurationChanges {
+		if change.After > change.Before {
+			return true
+		}
+	}
+	return false
+}
+
+// statusRank orders call outcomes worst-last, so a status change reads as a
+// regression when the rank rises and an improvement when it falls.
+func statusRank(status string) int {
+	switch status {
+	case "error":
+		return 2
+	case "pending":
+		return 1
+	default: // ok, and anything unexpected
+		return 0
+	}
+}
+
 func Compare(before, after exporter.SessionExport, opts Options) Report {
 	if opts.DurationThreshold < 0 {
 		opts.DurationThreshold = DefaultDurationThreshold

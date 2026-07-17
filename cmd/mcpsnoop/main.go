@@ -561,7 +561,7 @@ func runHub() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := tui.Run(ctx, paths.SocketPath(), paths.SessionsDir(), 0); err != nil {
+	if err := tui.Run(ctx, paths.SocketPath(), paths.SessionsDir()); err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)
 		return 1
 	}
@@ -606,7 +606,7 @@ func runOpen(arg string) int {
 		r = f
 	}
 
-	st := store.New(0)
+	st := store.New()
 	if err := proxy.Decode(r, func(e proxy.Envelope) {
 		st.Ingest(e)
 	}); err != nil {

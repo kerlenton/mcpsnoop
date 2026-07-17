@@ -32,7 +32,7 @@ func TestDemoScriptValidJSON(t *testing.T) {
 // TestDemoScriptIngests checks the scripted session folds into a coherent model,
 // one session, a negotiated handshake, and the flaky tool flagged as an error.
 func TestDemoScriptIngests(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	var sawInvalid bool
 	for i, f := range demoScript() {
 		env := demoEnvelope("demo", uint64(i+1), f)

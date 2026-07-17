@@ -1,7 +1,7 @@
 // Package store turns the raw envelope stream into the model the TUI renders.
 // It correlates each JSON-RPC request with its response (and so derives
 // durations), extracts tool calls, captures the negotiated capabilities, and
-// flags errors and slow calls.
+// flags errors.
 //
 // The hub calls Ingest concurrently from several connection goroutines, so the
 // store is internally synchronised. Reads return value snapshots (raw JSON is
@@ -16,10 +16,6 @@ import (
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
-
-// DefaultSlowThreshold is the duration above which a completed call is "slow".
-// Sub-second tool calls are normal, so only flag calls that take longer.
-const DefaultSlowThreshold = 1 * time.Second
 
 // CallState is the lifecycle of a request/response pair.
 type CallState int
@@ -132,25 +128,17 @@ type session struct {
 
 // Store is the concurrency-safe collector the hub feeds and the TUI reads.
 type Store struct {
-	mu            sync.RWMutex
-	slowThreshold time.Duration
-	sessions      map[string]*session
-	order         []string // session ids in first-seen order
+	mu       sync.RWMutex
+	sessions map[string]*session
+	order    []string // session ids in first-seen order
 }
 
-// New returns an empty store. slowThreshold <= 0 uses DefaultSlowThreshold.
-func New(slowThreshold time.Duration) *Store {
-	if slowThreshold <= 0 {
-		slowThreshold = DefaultSlowThreshold
-	}
+// New returns an empty store.
+func New() *Store {
 	return &Store{
-		slowThreshold: slowThreshold,
-		sessions:      make(map[string]*session),
+		sessions: make(map[string]*session),
 	}
 }
-
-// SlowThreshold is the cutoff used by CallView.Slow.
-func (s *Store) SlowThreshold() time.Duration { return s.slowThreshold }
 
 // Delete drops a session from the store. A still-live shim will recreate it on
 // its next frame. Callers that want it gone for good should also delete its log.

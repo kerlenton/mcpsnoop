@@ -21,7 +21,7 @@ func TestCheckFailsOnSelectedSessionSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 slow=0 pending=1\ncheck failed: error,invalid,warn\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 pending=1\ncheck failed: error,invalid,warn\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -36,7 +36,7 @@ func TestCheckFailsOnlyOnSelectedSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 because the fixture contains an invalid frame", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 slow=0 pending=1\ncheck failed: invalid\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 pending=1\ncheck failed: invalid\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -50,7 +50,7 @@ func TestCheckIgnoresUnselectedSignals(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=2 invalid=0 warnings=0 slow=0 pending=0\ncheck passed\n" {
+	if stdout != "session s1: errors=2 invalid=0 warnings=0 pending=0\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -68,7 +68,7 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=0 invalid=0 warnings=0 slow=0 pending=0\ncheck passed\n" {
+	if stdout != "session s1: errors=0 invalid=0 warnings=0 pending=0\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -103,31 +103,6 @@ func TestCheckReportsMalformedInput(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "mcpsnoop check: stdin: invalid JSONL envelope") {
 		t.Fatalf("stderr = %q, want malformed-input error", stderr)
-	}
-}
-
-func TestCheckFailsOnSlowCallOverThreshold(t *testing.T) {
-	t0 := time.Unix(100, 0)
-	log := encodeCheckLog(t,
-		proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: t0, Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow"}}`)},
-		proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0.Add(2 * time.Second), Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{}}`)},
-	)
-
-	code, stdout, _ := executeCheck(t, []string{"--fail-on", "slow", "-"}, log)
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1 for a 2s call over the 1s default", code)
-	}
-	if !strings.Contains(stdout, "slow=1") || !strings.Contains(stdout, "check failed: slow") {
-		t.Fatalf("stdout = %q", stdout)
-	}
-
-	// Raising the threshold above the call clears it.
-	code, stdout, _ = executeCheck(t, []string{"--fail-on", "slow", "--slow-threshold", "5s", "-"}, log)
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0 once the threshold is above the call", code)
-	}
-	if !strings.Contains(stdout, "slow=0") || !strings.Contains(stdout, "check passed") {
-		t.Fatalf("stdout = %q", stdout)
 	}
 }
 

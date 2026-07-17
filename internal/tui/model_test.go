@@ -7,8 +7,10 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/replay"
 	"github.com/kerlenton/mcpsnoop/internal/store"
 )
 
@@ -17,6 +19,14 @@ func env(seq uint64, dir proxy.Direction, raw string) proxy.Envelope {
 		SessionID: "s1", ServerLabel: "demo", Seq: seq, TS: time.Now(),
 		Direction: dir, Transport: "stdio", Raw: json.RawMessage(raw),
 	}
+}
+
+// envAt is env with an explicit timestamp, so a test can give calls real
+// durations (a request and its response at known times).
+func envAt(seq uint64, dir proxy.Direction, ts time.Time, raw string) proxy.Envelope {
+	e := env(seq, dir, raw)
+	e.TS = ts
+	return e
 }
 
 func sessionEnv(id, label string) proxy.Envelope {
@@ -54,7 +64,7 @@ func ready(t *testing.T, st *store.Store) Model {
 }
 
 func TestSessionsTableAndDrillIn(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st)
 	m := ready(t, st)
 
@@ -88,7 +98,7 @@ func TestSessionsTableAndDrillIn(t *testing.T) {
 }
 
 func TestInspectorOverlay(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st)
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream (follow → last frame)
@@ -109,7 +119,7 @@ func TestInspectorOverlay(t *testing.T) {
 }
 
 func TestPause(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st)
 	m := ready(t, st)
 	m = typeRunes(t, m, "p")
@@ -122,7 +132,7 @@ func TestPause(t *testing.T) {
 }
 
 func TestStreamFilter(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st)
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
@@ -144,7 +154,7 @@ func TestStreamFilter(t *testing.T) {
 }
 
 func TestStreamQueryFilter(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st) // id1 initialize, id2 tools/call echo (ok)
 	// a tool-level error call
 	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add"}}`))
@@ -204,33 +214,37 @@ func TestStreamQueryFilter(t *testing.T) {
 }
 
 func TestStreamFooterShowsSignalCounts(t *testing.T) {
-	st := store.New(100 * time.Millisecond)
+	st := store.New()
 	seed(st)
 	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fail"}}`))
 	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"unknown tool"}}`))
 	st.Ingest(env(7, proxy.ServerToClient, `{"note":"stray line"}`))
 	st.Ingest(env(8, proxy.ClientToServer, `{"id":4,"method":"tools/list"}`))
 
+	// A 200ms call is just a normal completed call now, never a "slow" signal.
 	t0 := time.Now()
-	slowReq := env(9, proxy.ClientToServer, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"slow"}}`)
-	slowReq.TS = t0
-	st.Ingest(slowReq)
-	slowResp := env(10, proxy.ServerToClient, `{"jsonrpc":"2.0","id":5,"result":{"content":[]}}`)
-	slowResp.TS = t0.Add(200 * time.Millisecond)
-	st.Ingest(slowResp)
+	longReq := env(9, proxy.ClientToServer, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search"}}`)
+	longReq.TS = t0
+	st.Ingest(longReq)
+	longResp := env(10, proxy.ServerToClient, `{"jsonrpc":"2.0","id":5,"result":{"content":[]}}`)
+	longResp.TS = t0.Add(200 * time.Millisecond)
+	st.Ingest(longResp)
 
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
 	out := m.View()
-	for _, want := range []string{"10 frames", "1 err", "1 bad", "1 warn", "1 slow"} {
+	for _, want := range []string{"10 frames", "1 err", "1 bad", "1 warn"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stream footer missing %q\n%s", want, out)
 		}
 	}
+	if strings.Contains(out, "slow") {
+		t.Fatalf("the slow verdict should be gone\n%s", out)
+	}
 }
 
 func TestStreamFooterCountsSpanWholeSessionUnderFilter(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st) // id2 is a tools/call to echo that succeeds
 	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fail"}}`))
 	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"unknown tool"}}`))
@@ -292,7 +306,7 @@ func TestStatusRankInvalid(t *testing.T) {
 }
 
 func TestSessionFilterAndCommandJump(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st) // demo
 	st.Ingest(sessionEnv("s2", "search-api"))
 	st.Ingest(sessionEnv("s3", "github"))
@@ -326,21 +340,12 @@ func TestSessionFilterAndCommandJump(t *testing.T) {
 	}
 }
 
-func TestCapsContentShowsToolUsage(t *testing.T) {
-	st := store.New(0)
-	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"cli"}}}`))
-	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"demo"}}}`))
-	// The server advertises three tools.
-	st.Ingest(env(3, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
-	st.Ingest(env(4, proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo"},{"name":"sum"},{"name":"search"}]}}`))
-	// echo and search are called (used), sum never is (unused), ghost was never
-	// advertised (called but not advertised).
-	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo"}}`))
-	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`))
-	st.Ingest(env(7, proxy.ClientToServer, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search"}}`))
-	st.Ingest(env(8, proxy.ServerToClient, `{"jsonrpc":"2.0","id":4,"result":{"content":[]}}`))
-	st.Ingest(env(9, proxy.ClientToServer, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ghost"}}`))
-	st.Ingest(env(10, proxy.ServerToClient, `{"jsonrpc":"2.0","id":5,"result":{"content":[]}}`))
+func TestCapsContentShowsDeclaredCapabilities(t *testing.T) {
+	st := store.New()
+	// The client declares roots; the server declares tools (with a listChanged
+	// sub-flag) plus an experimental capability outside the known set.
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"cli"},"capabilities":{"roots":{}}}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true},"experimental":{}},"serverInfo":{"name":"demo","version":"1.0.0"}}}`))
 
 	m := ready(t, st)
 	m = typeRunes(t, m, "c")
@@ -350,15 +355,50 @@ func TestCapsContentShowsToolUsage(t *testing.T) {
 	// overlayRaw is the full unwrapped caps body, so a bottom section is never
 	// lost below the viewport fold the way it could be in View().
 	out := m.overlayRaw
-	for _, want := range []string{"unused", "called but not advertised", "echo", "search", "sum", "ghost"} {
+	// Title, both implementation rows, declared caps (●), known absent caps (○),
+	// and a declared cap outside the standard set are all present.
+	for _, want := range []string{"capabilities", "protocol", "2025-06-18", "client", "cli", "server", "demo", "1.0.0", "●", "○", "roots", "sampling", "tools", "resources", "experimental"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("caps tool usage missing %q\n%s", want, out)
+			t.Fatalf("caps body missing %q\n%s", want, out)
+		}
+	}
+	// The rebuilt screen shows only the marker: no per-row status text, no
+	// sub-flag detail, and no tool-usage block.
+	for _, absent := range []string{"not offered", "not negotiated", "listChanged", "unused", "unadvertised", "✓"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("caps body should not contain %q\n%s", absent, out)
 		}
 	}
 }
 
+func TestCapsOverlayUpdatesLive(t *testing.T) {
+	st := store.New()
+	// Only the client half of the handshake so far, so the server is still unknown.
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"cli"},"capabilities":{"roots":{}}}}`))
+	m := ready(t, st)
+	m = typeRunes(t, m, "c")
+	if m.overlay != overlayCaps {
+		t.Fatal("c should open capabilities")
+	}
+	// The session label is "demo", so assert on the distinct server impl name and
+	// the tools marker, both absent until the server's response is seen.
+	if strings.Contains(m.overlayRaw, "srv-impl") || strings.Contains(m.overlayRaw, "● tools") {
+		t.Fatalf("server should read unknown before its initialize response\n%s", m.overlayRaw)
+	}
+
+	// The server's initialize response arrives while the overlay stays open.
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"srv-impl"}}}`))
+	m = drive(t, m, frameMsg{})
+	if m.overlay != overlayCaps {
+		t.Fatal("a live frame must not close the overlay")
+	}
+	if !strings.Contains(m.overlayRaw, "srv-impl") || !strings.Contains(m.overlayRaw, "● tools") {
+		t.Fatalf("caps overlay did not pick up the server handshake live\n%s", m.overlayRaw)
+	}
+}
+
 func TestCapabilitiesAndHelp(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st)
 	m := ready(t, st)
 
@@ -367,7 +407,7 @@ func TestCapabilitiesAndHelp(t *testing.T) {
 		t.Fatal("c should open capabilities")
 	}
 	out := m.View()
-	for _, want := range []string{"capabilities", "protocolVersion", "client", "server"} {
+	for _, want := range []string{"capabilities", "protocol", "client", "server"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("caps missing %q\n%s", want, out)
 		}
@@ -385,7 +425,7 @@ func TestCapabilitiesAndHelp(t *testing.T) {
 }
 
 func TestInspectorModalSizesToContent(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st)                                        // short frames
 	m := ready(t, st)                               // 160x44
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
@@ -410,7 +450,7 @@ func TestInspectorModalSizesToContent(t *testing.T) {
 }
 
 func TestPairJump(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st) // includes a tools/call echo request and its response
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
@@ -444,7 +484,7 @@ func TestPairJump(t *testing.T) {
 }
 
 func TestReplayFromInspector(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st) // echo request (id2) + response
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream (follow -> last = a response)
@@ -454,19 +494,48 @@ func TestReplayFromInspector(t *testing.T) {
 		t.Fatalf("x should land on the request, got kind %v", m.full[m.inspect].Kind)
 	}
 	// r replays the inspected request. The seeded session has no recorded command,
-	// so it opens the replay overlay with a cannot-replay note rather than doing
-	// nothing, which proves r is wired and used the inspected frame.
+	// so it flashes the no-command note rather than the needs-a-request one, which
+	// proves r is wired and acted on the inspected request frame.
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
-	if m.overlay != overlayReplay {
-		t.Fatalf("r in the inspector should open the replay overlay, got overlay %d", m.overlay)
+	if m.overlay != overlayInspector {
+		t.Fatalf("r without a command should stay in the inspector, got overlay %d", m.overlay)
 	}
-	if strings.Contains(m.overlayRaw, "Select a request") {
-		t.Fatal("r treated the inspected request as non-replayable")
+	if !m.flashActive() || !strings.Contains(m.flash, "no recorded server command") {
+		t.Fatalf("r on the inspected request should flash the no-command note, got flash=%q", m.flash)
+	}
+}
+
+func TestInspectorFooterConditionalKeys(t *testing.T) {
+	st := store.New()
+	meta, _ := json.Marshal(proxy.SessionMeta{Command: []string{"true"}, CWD: "/tmp"})
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 0, TS: time.Now(), Direction: proxy.DirectionMeta, Raw: meta})
+	seed(st) // now the session has a recorded command
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector on the last frame (a response)
+
+	// A response frame has a pair (offer x) but is not a request (hide r).
+	out := m.View()
+	if !strings.Contains(out, "pair") {
+		t.Fatalf("a paired frame should offer x pair:\n%s", out)
+	}
+	if strings.Contains(out, "replay") {
+		t.Fatalf("a response frame should not offer r replay:\n%s", out)
+	}
+
+	// Jump to the request: replay is now offered (a request with a command).
+	m = typeRunes(t, m, "x")
+	out = m.View()
+	if !strings.Contains(out, "replay") {
+		t.Fatalf("a replayable request should offer r replay:\n%s", out)
+	}
+	if !strings.Contains(out, "pair") {
+		t.Fatalf("the request should still offer x pair:\n%s", out)
 	}
 }
 
 func TestReplayAgainFromResult(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	meta, _ := json.Marshal(proxy.SessionMeta{Command: []string{"true"}, CWD: "/tmp"})
 	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 0, TS: time.Now(), Direction: proxy.DirectionMeta, Raw: meta})
 	seed(st) // request/response frames on the same session, now with a command
@@ -474,9 +543,23 @@ func TestReplayAgainFromResult(t *testing.T) {
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector on the last frame (a response)
 	m = typeRunes(t, m, "x")                        // jump to the request
-	m = typeRunes(t, m, "r")                        // replay it
-	if m.overlay != overlayReplay {
-		t.Fatalf("r should open the replay overlay, got %d", m.overlay)
+	m = typeRunes(t, m, "r")                        // start the replay
+
+	// r starts an async replay shown as a footer spinner, not a placeholder window.
+	if !m.replaying {
+		t.Fatal("r should start a replay, not open a placeholder window")
+	}
+	if m.overlay == overlayReplay {
+		t.Fatal("the replay overlay should wait for the result, not open on a spinner")
+	}
+	if !strings.Contains(m.View(), "replaying") {
+		t.Fatalf("a footer spinner should show while replaying:\n%s", m.View())
+	}
+
+	// The result lands and opens the replay overlay.
+	m = drive(t, m, replayDoneMsg{res: replay.Result{Method: "get_sum", Response: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{}}`)}})
+	if m.overlay != overlayReplay || m.replaying {
+		t.Fatalf("the result should open the replay overlay, overlay=%d replaying=%v", m.overlay, m.replaying)
 	}
 	if m.replayReq.Method == "" {
 		t.Fatal("replay should remember the request so it can be re-run")
@@ -484,16 +567,66 @@ func TestReplayAgainFromResult(t *testing.T) {
 	if !strings.Contains(m.View(), "replay again") {
 		t.Fatalf("the replay overlay footer should offer replay again:\n%s", m.View())
 	}
+
 	// r straight from the result re-runs the same replay, no esc needed.
 	before := m.replayReq.Method
 	m = typeRunes(t, m, "r")
-	if m.overlay != overlayReplay || m.replayReq.Method != before {
-		t.Fatalf("r in the replay overlay should re-run the same replay, got overlay %d method %q", m.overlay, m.replayReq.Method)
+	if !m.replaying || m.replayReq.Method != before {
+		t.Fatalf("r in the replay overlay should re-run the same replay, replaying=%v method=%q", m.replaying, m.replayReq.Method)
+	}
+}
+
+func TestReplayAbandonedOnNavigation(t *testing.T) {
+	st := store.New()
+	meta, _ := json.Marshal(proxy.SessionMeta{Command: []string{"true"}, CWD: "/tmp"})
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 0, TS: time.Now(), Direction: proxy.DirectionMeta, Raw: meta})
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector on the response
+	m = typeRunes(t, m, "x")                        // to the request
+	m = typeRunes(t, m, "r")                        // start replaying
+	if !m.replaying {
+		t.Fatal("r should start replaying")
+	}
+
+	// Leaving the inspector abandons the in-flight replay, so its late result
+	// does not pop an overlay over whatever the user moved on to.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.replaying {
+		t.Fatal("closing the overlay should abandon the in-flight replay")
+	}
+	m = drive(t, m, replayDoneMsg{res: replay.Result{Method: "x", Response: json.RawMessage("{}")}})
+	if m.overlay == overlayReplay {
+		t.Fatal("an abandoned replay result should not open an overlay")
+	}
+}
+
+func TestStreamFooterReplayGatedOnCommand(t *testing.T) {
+	// Without a recorded server command a session can never replay, so the stream
+	// footer hides r, matching how the inspector already gates it.
+	noCmd := store.New()
+	seed(noCmd) // no meta frame
+	m := ready(t, noCmd)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream
+	if strings.Contains(m.View(), "replay") {
+		t.Fatalf("a session with no recorded command should not offer r replay:\n%s", m.View())
+	}
+
+	// With a command, the footer offers r replay.
+	withCmd := store.New()
+	meta, _ := json.Marshal(proxy.SessionMeta{Command: []string{"true"}, CWD: "/tmp"})
+	withCmd.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 0, TS: time.Now(), Direction: proxy.DirectionMeta, Raw: meta})
+	seed(withCmd)
+	m2 := ready(t, withCmd)
+	m2 = drive(t, m2, tea.KeyMsg{Type: tea.KeyEnter}) // stream
+	if !strings.Contains(m2.View(), "replay") {
+		t.Fatalf("a session with a recorded command should offer r replay:\n%s", m2.View())
 	}
 }
 
 func TestPairJumpReachesFilteredOutPair(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st) // echo request (id2) + its response
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
@@ -521,7 +654,7 @@ func TestPairJumpReachesFilteredOutPair(t *testing.T) {
 }
 
 func TestStreamStatsAndActivity(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st) // initialize + tools/call, both completed, timestamped now
 	m := ready(t, st)
 
@@ -543,7 +676,7 @@ func TestStreamStatsAndActivity(t *testing.T) {
 }
 
 func TestResizeFuzzNoPanic(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st)
 	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"x"}}`))
 	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{}}`))
@@ -577,7 +710,7 @@ func TestResizeFuzzNoPanic(t *testing.T) {
 }
 
 func TestSwitchSessionWithBrackets(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st) // demo
 	st.Ingest(sessionEnv("s2", "search-api"))
 	st.Ingest(sessionEnv("s3", "github"))
@@ -622,7 +755,7 @@ func TestFormatLatency(t *testing.T) {
 }
 
 func TestToolSummaryOverlay(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st)
 	m := ready(t, st)
 
@@ -631,9 +764,14 @@ func TestToolSummaryOverlay(t *testing.T) {
 		t.Fatal("s should open the tool summary")
 	}
 	out := m.View()
-	for _, want := range []string{"TOOL SUMMARY", "echo", "CALLS", "ERRORS", "P50", "SLOWEST CALLS"} {
+	for _, want := range []string{"tool summary", "echo", "CALLS", "ERR", "LATENCY"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("summary missing %q\n%s", want, out)
+		}
+	}
+	for _, absent := range []string{"P50", "P95", "P99", "SLOWEST CALLS"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("summary should no longer contain %q\n%s", absent, out)
 		}
 	}
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
@@ -647,8 +785,150 @@ func TestToolSummaryOverlay(t *testing.T) {
 	}
 }
 
+func TestToolSummaryListsEveryAdvertisedTool(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"cli"}}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"demo"}}}`))
+	// The server advertises echo, ping, and search.
+	st.Ingest(env(3, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+	st.Ingest(env(4, proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo"},{"name":"ping"},{"name":"search"}]}}`))
+	// echo is called; ping and search never are; ghost is called though it was
+	// never advertised (drift).
+	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo"}}`))
+	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`))
+	st.Ingest(env(7, proxy.ClientToServer, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ghost"}}`))
+	st.Ingest(env(8, proxy.ServerToClient, `{"jsonrpc":"2.0","id":4,"result":{"content":[]}}`))
+
+	m := ready(t, st)
+	m = typeRunes(t, m, "s")
+	if m.overlay != overlaySummary {
+		t.Fatal("s should open the tool summary")
+	}
+	// overlayRaw is the full unwrapped body, so no row is lost below the fold.
+	out := m.overlayRaw
+	// Every advertised tool is a table row, called (echo) or not (ping, search),
+	// and ghost shows too, flagged as drift.
+	for _, want := range []string{"echo", "ping", "search", "ghost", "undeclared"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing %q\n%s", want, out)
+		}
+	}
+	// The coverage and unused jargon lines are gone.
+	for _, absent := range []string{"coverage", "unused", "advertised tools called"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("summary should no longer contain %q\n%s", absent, out)
+		}
+	}
+	// An advertised-but-uncalled tool renders a 0-call row.
+	if !summaryHasRow(out, "ping", "0") {
+		t.Fatalf("ping should be a 0-call row\n%s", out)
+	}
+}
+
+// summaryHasRow reports whether a stripped summary line starts with name and
+// contains cell somewhere after it.
+func summaryHasRow(styled, name, cell string) bool {
+	for _, ln := range strings.Split(ansi.Strip(styled), "\n") {
+		trimmed := strings.TrimSpace(ln)
+		if strings.HasPrefix(trimmed, name+" ") && strings.Contains(trimmed, cell) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSummaryHeaderShowsOnlyCallsAndSort(t *testing.T) {
+	st := store.New()
+	base := time.Now()
+	st.Ingest(envAt(1, proxy.ClientToServer, base, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"good"}}`))
+	st.Ingest(envAt(2, proxy.ServerToClient, base.Add(time.Millisecond), `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
+	st.Ingest(envAt(3, proxy.ClientToServer, base.Add(2*time.Millisecond), `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"bad"}}`))
+	st.Ingest(envAt(4, proxy.ServerToClient, base.Add(3*time.Millisecond), `{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[]}}`))
+
+	m := ready(t, st)
+	m = typeRunes(t, m, "s")
+	out := ansi.Strip(m.overlayRaw)
+
+	// The header stat is only the call total, no err/slow/pending breakdown.
+	header := strings.SplitN(out, "\n", 2)[0]
+	if !strings.Contains(header, "2 calls") {
+		t.Fatalf("header should total the calls: %q", header)
+	}
+	for _, banned := range []string{"err", "slow", "pending"} {
+		if strings.Contains(header, banned) {
+			t.Fatalf("header should show only calls, found %q: %q", banned, header)
+		}
+	}
+	// The clean tool shows · for zero errors; the erroring tool shows a count.
+	if !summaryHasRow(out, "good", "·") || summaryHasRow(out, "bad", "·") {
+		t.Fatalf("ERR column should show · only for the clean tool\n%s", out)
+	}
+	// The erroring tool sorts above the clean one, not alphabetically.
+	if strings.Index(out, "bad") > strings.Index(out, "good") {
+		t.Fatalf("erroring tool should sort first\n%s", out)
+	}
+}
+
+func TestSummaryUpdatesLive(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
+	m := ready(t, st)
+	m = typeRunes(t, m, "s")
+	if m.overlay != overlaySummary {
+		t.Fatal("s should open the summary")
+	}
+	if strings.Contains(m.overlayRaw, "search") {
+		t.Fatalf("search should not appear before it is called\n%s", m.overlayRaw)
+	}
+
+	// A new tool call arrives while the summary stays open.
+	st.Ingest(env(3, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}`))
+	st.Ingest(env(4, proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`))
+	m = drive(t, m, frameMsg{})
+	if m.overlay != overlaySummary {
+		t.Fatal("a live frame must not close the summary")
+	}
+	if !strings.Contains(m.overlayRaw, "search") {
+		t.Fatalf("summary did not pick up the new call live\n%s", m.overlayRaw)
+	}
+}
+
+func TestSummaryPendingToolShowsSpinner(t *testing.T) {
+	st := store.New()
+	// A tool call requested but never answered: pending, with no latency yet.
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hang"}}`))
+	m := ready(t, st)
+	m = typeRunes(t, m, "s")
+	if m.overlay != overlaySummary {
+		t.Fatal("s should open the summary")
+	}
+
+	var row string
+	for _, ln := range strings.Split(ansi.Strip(m.overlayRaw), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(ln), "hang ") {
+			row = strings.TrimSpace(ln)
+			break
+		}
+	}
+	if row == "" {
+		t.Fatalf("hang row missing\n%s", ansi.Strip(m.overlayRaw))
+	}
+	// LATENCY is a spinner frame, not a dash, so the pending tool is obvious.
+	if strings.Contains(row, "-") || !strings.ContainsAny(row, string(spinnerFrames)) {
+		t.Fatalf("pending tool LATENCY should be a spinner, not a dash: %q", row)
+	}
+
+	// The spinner animates on the shared tick clock.
+	before := m.overlayRaw
+	m = drive(t, m, tickMsg(time.Now()))
+	if m.overlayRaw == before {
+		t.Fatal("a tick should advance the pending spinner")
+	}
+}
+
 func TestSortSessions(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	st.Ingest(sessionEnv("s1", "gamma"))
 	st.Ingest(sessionEnv("s2", "alpha"))
 	st.Ingest(sessionEnv("s3", "beta"))
@@ -667,7 +947,7 @@ func TestSortSessions(t *testing.T) {
 }
 
 func TestWrapAroundNavigation(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st) // demo
 	st.Ingest(sessionEnv("s2", "search-api"))
 	st.Ingest(sessionEnv("s3", "github"))
@@ -686,7 +966,7 @@ func TestWrapAroundNavigation(t *testing.T) {
 }
 
 func TestOnboardingEmptyState(t *testing.T) {
-	m := ready(t, store.New(0))
+	m := ready(t, store.New())
 	out := m.View()
 	for _, want := range []string{"waiting for MCP traffic", "mcpsnoop", "--"} {
 		if !strings.Contains(out, want) {
@@ -696,9 +976,9 @@ func TestOnboardingEmptyState(t *testing.T) {
 }
 
 func TestPendingCallShown(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	// A request with no response yet → in-flight.
-	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"slow"}}`))
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"search"}}`))
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into the stream
 	if !strings.Contains(m.View(), "pending") {
@@ -708,50 +988,71 @@ func TestPendingCallShown(t *testing.T) {
 
 func TestDeleteSession(t *testing.T) {
 	t.Setenv("MCPSNOOP_HOME", t.TempDir())
-	st := store.New(0)
+	st := store.New()
 	seed(st)
 	st.Ingest(sessionEnv("s2", "search-api"))
 	m := ready(t, st)
 	if len(m.sessions) != 2 {
 		t.Fatalf("want 2 sessions, got %d", len(m.sessions))
 	}
+	// ctrl-d deletes the selected session immediately, no confirmation.
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlD})
-	if !m.confirmDelete {
-		t.Fatal("ctrl-d should open a delete confirmation")
-	}
-	if len(m.sessions) != 2 {
-		t.Fatalf("nothing should be deleted before confirming, got %d", len(m.sessions))
-	}
-	m = typeRunes(t, m, "y")
-	if m.confirmDelete {
-		t.Fatal("y should close the confirmation")
-	}
 	if len(m.sessions) != 1 {
-		t.Fatalf("confirmed delete should remove the selected session, got %d", len(m.sessions))
+		t.Fatalf("ctrl-d should remove the selected session, got %d", len(m.sessions))
 	}
-	if !m.flashActive() {
-		t.Fatal("delete should set a flash message")
+	if !m.flashActive() || !strings.Contains(m.flash, "deleted") {
+		t.Fatalf("delete should flash which session went, got flash=%q", m.flash)
 	}
 }
 
-func TestDeleteSessionCancel(t *testing.T) {
-	t.Setenv("MCPSNOOP_HOME", t.TempDir())
-	st := store.New(0)
+func TestFlashClearsOnNavigation(t *testing.T) {
+	st := store.New()
 	seed(st)
-	st.Ingest(sessionEnv("s2", "search-api"))
 	m := ready(t, st)
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlD})
-	m = typeRunes(t, m, "n")
-	if m.confirmDelete {
-		t.Fatal("n should close the confirmation")
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+
+	// A flash from an action in the stream is dismissed by opening the inspector.
+	m.setFlash("✓ exported foo.html")
+	if !m.flashActive() {
+		t.Fatal("flash should be active before navigating")
 	}
-	if len(m.sessions) != 2 {
-		t.Fatalf("cancel should keep both sessions, got %d", len(m.sessions))
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector
+	if m.overlay != overlayInspector {
+		t.Fatal("enter should open the inspector")
+	}
+	if m.flashActive() {
+		t.Fatalf("opening the inspector should clear the stale flash, got %q", m.flash)
+	}
+
+	// esc back out clears any flash too, so nothing bleeds into the stream footer.
+	m.setFlash("✓ copied frame JSON")
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc}) // close inspector
+	if m.overlay != overlayNone || m.flashActive() {
+		t.Fatalf("closing the overlay should clear the flash, overlay=%v flash=%q", m.overlay, m.flash)
+	}
+}
+
+func TestDeleteFlashSurvivesViewChange(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	st := store.New()
+	seed(st)
+	st.Ingest(sessionEnv("s2", "other"))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the streamed session
+
+	// Deleting the streamed session drops back to the sessions list but keeps its
+	// own flash, since delete does not route through the navigation helpers.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	if m.view != viewSessions {
+		t.Fatal("deleting the streamed session should return to the sessions list")
+	}
+	if !m.flashActive() || !strings.Contains(m.flash, "deleted") {
+		t.Fatalf("the delete flash should survive the view change, got %q", m.flash)
 	}
 }
 
 func TestOverlaySearch(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st)
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream
@@ -780,20 +1081,27 @@ func TestOverlaySearch(t *testing.T) {
 }
 
 func TestReplayGuards(t *testing.T) {
-	st := store.New(0)
+	st := store.New()
 	seed(st) // no meta frame → command unknown
 	m := ready(t, st)
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into stream, follow → last frame (a response)
 
+	// r on a response frame flashes a hint instead of opening an error overlay.
 	m = typeRunes(t, m, "r")
-	if m.overlay != overlayReplay || !strings.Contains(m.View(), "Select a request") {
-		t.Fatalf("replay on a response should prompt for a request:\n%s", m.View())
+	if m.overlay != overlayNone {
+		t.Fatalf("replay on a response should not open an overlay, got %v", m.overlay)
 	}
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if !m.flashActive() || !strings.Contains(m.flash, "request frame") {
+		t.Fatalf("replay on a response should flash a hint, got flash=%q", m.flash)
+	}
 
+	// r on a request in a session with no recorded command flashes as well.
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyUp}) // to the request frame
 	m = typeRunes(t, m, "r")
-	if m.overlay != overlayReplay || !strings.Contains(m.View(), "Cannot replay") {
-		t.Fatalf("replay without a recorded command should say so:\n%s", m.View())
+	if m.overlay != overlayNone {
+		t.Fatalf("replay without a command should not open an overlay, got %v", m.overlay)
+	}
+	if !m.flashActive() || !strings.Contains(m.flash, "no recorded server command") {
+		t.Fatalf("replay without a recorded command should flash, got flash=%q", m.flash)
 	}
 }

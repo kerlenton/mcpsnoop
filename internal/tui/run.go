@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -17,8 +16,8 @@ import (
 // cancelled. The hub feeds the store and nudges the program on every frame, and
 // a periodic tick in the model catches anything sent before the program loop is
 // ready and keeps pending-call timers live.
-func Run(ctx context.Context, socketPath, sessionsDir string, slow time.Duration) error {
-	st := store.New(slow)
+func Run(ctx context.Context, socketPath, sessionsDir string) error {
+	st := store.New()
 	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx))
 
 	h := hub.New(socketPath, sessionsDir, func(e proxy.Envelope) {

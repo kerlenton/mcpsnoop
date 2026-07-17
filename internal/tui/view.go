@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,9 +20,6 @@ import (
 func (m Model) View() string {
 	if !m.ready {
 		return "starting mcpsnoop…"
-	}
-	if m.confirmDelete {
-		return m.renderConfirmDelete()
 	}
 	if m.showHelp {
 		return m.renderHelp()
@@ -74,18 +72,6 @@ func homeAbbrev(p string) string {
 	return p
 }
 
-// renderConfirmDelete is the centered red-bordered confirmation shown before a
-// session and its log are removed.
-func (m Model) renderConfirmDelete() string {
-	prompt := m.styles.bright.Render("delete session ") +
-		m.styles.infoVal.Render(`"`+m.deleteTargetLabel()+`"`) +
-		m.styles.bright.Render(" and its log?") + "    " +
-		m.styles.hintKey.Render("y") + m.styles.hintDesc.Render(" / ") + m.styles.hintKey.Render("n")
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).BorderForeground(m.theme.red).Padding(0, 2)
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box.Render(prompt))
-}
-
 // deleteTargetLabel names the session the confirmation is about.
 func (m Model) deleteTargetLabel() string {
 	if m.view == viewStream {
@@ -97,19 +83,41 @@ func (m Model) deleteTargetLabel() string {
 	return ""
 }
 
-// toastLine is a transient bottom-right notification one row above the footer,
-// green on surface for success and red for failure. It is blank when idle.
+// flashStyle colors a transient flash by kind: green for a success (leading ✓),
+// red for a failure, yellow for a nudge, so a hint reads as a warning rather
+// than fading into the background.
+func (m Model) flashStyle() lipgloss.Style {
+	switch {
+	case strings.Contains(m.flash, "failed"):
+		return m.styles.respErr
+	case strings.HasPrefix(m.flash, "✓"):
+		return m.styles.live
+	default:
+		return m.styles.warn
+	}
+}
+
+// replaySpinner is the in-flight replay indicator: an animated cyan spinner and
+// the method, shown in the footer instead of opening a placeholder window.
+func (m Model) replaySpinner() string {
+	return m.styles.pending.Render(m.spinnerFrame() + " replaying " + m.replayReq.Method + "…")
+}
+
+// toastLine is a transient notification one row above the footer, flat colored
+// text right-aligned to sit above the footer counters. It carries the replay
+// spinner while a replay is in flight, then a flash, and is blank when idle.
 func (m Model) toastLine() string {
-	if !m.flashActive() {
+	var msg string
+	switch {
+	case m.replaying:
+		msg = m.replaySpinner()
+	case m.flashActive():
+		msg = m.flashStyle().Render(m.flash)
+	default:
 		return ""
 	}
-	fg := m.theme.green
-	if strings.Contains(m.flash, "failed") {
-		fg = m.theme.red
-	}
-	toast := lipgloss.NewStyle().Foreground(fg).Background(m.theme.surface).Padding(0, 1).Render(m.flash)
-	gap := max(m.width-lipgloss.Width(toast)-1, 0)
-	return strings.Repeat(" ", gap) + toast
+	gap := max(m.width-lipgloss.Width(msg)-1, 0)
+	return strings.Repeat(" ", gap) + msg
 }
 
 // padLines pads s with blank lines up to n lines total.
@@ -165,10 +173,11 @@ func (m Model) footerHints() string {
 		{"ctrl-d", "delete"}, {"/", "filter"}, {":", "cmd"}, {"?", "help"},
 	}
 	if m.view == viewStream {
-		hs = []hint{
-			{"enter", "inspect"}, {"r", "replay"}, {"c", "caps"},
-			{"/", "filter"}, {"p", "pause"}, {"?", "help"},
+		hs = []hint{{"enter", "inspect"}}
+		if m.sessionReplayable() {
+			hs = append(hs, hint{"r", "replay"})
 		}
+		hs = append(hs, hint{"c", "caps"}, hint{"s", "summary"}, hint{"/", "filter"}, hint{"p", "pause"}, hint{"?", "help"})
 	}
 	return m.hintsRow(hs)
 }
@@ -183,17 +192,17 @@ func (m Model) hintsRow(hs []hint) string {
 }
 
 // footerCounters is the signal tally on the right, the frame or session count
-// then any nonzero err/bad/warn/slow/pending counts, each in its verdict color.
+// then any nonzero err/bad/warn/pending counts, each in its verdict color.
 func (m Model) footerCounters() string {
 	sep := m.styles.sep.Render(" · ")
 	if m.view != viewStream {
-		parts := []string{m.styles.dim.Render(countLabel(len(m.sessions), len(m.allSessions), "session"))}
+		parts := []string{m.styles.faint.Render(countLabel(len(m.sessions), len(m.allSessions), "session"))}
 		if e := m.totalErrors(); e > 0 {
 			parts = append(parts, m.styles.respErr.Render(fmt.Sprintf("%d err", e)))
 		}
 		return strings.Join(parts, sep)
 	}
-	parts := []string{m.styles.dim.Render(countLabel(len(m.timeline), m.total, "frame"))}
+	parts := []string{m.styles.faint.Render(countLabel(len(m.timeline), m.total, "frame"))}
 	c := m.streamSignals
 	for _, sig := range []struct {
 		n     int
@@ -203,7 +212,6 @@ func (m Model) footerCounters() string {
 		{c.errors, "err", m.styles.respErr},
 		{c.bad, "bad", m.styles.invalid},
 		{c.warn, "warn", m.styles.warn},
-		{c.slow, "slow", m.styles.slow},
 		{c.pending, "pending", m.styles.pending},
 	} {
 		if sig.n > 0 {
@@ -480,21 +488,21 @@ func seg(text string, style lipgloss.Style) cell { return cell{text: text, style
 func (m Model) rowLine(segs []cell, w int, selected bool) string {
 	var b strings.Builder
 	if selected {
-		b.WriteString(m.styles.req.Background(m.theme.surface).Render("▌"))
+		b.WriteString(m.styles.req.Background(m.theme.selection).Render("▌"))
 	} else {
 		b.WriteString(" ")
 	}
 	for _, s := range segs {
 		st := s.style
 		if selected {
-			st = st.Background(m.theme.surface)
+			st = st.Background(m.theme.selection)
 		}
 		b.WriteString(st.Render(s.text))
 	}
 	line := b.String()
 	if selected {
 		if pad := w - lipgloss.Width(line); pad > 0 {
-			line += lipgloss.NewStyle().Background(m.theme.surface).Render(strings.Repeat(" ", pad))
+			line += lipgloss.NewStyle().Background(m.theme.selection).Render(strings.Repeat(" ", pad))
 		}
 	}
 	if lipgloss.Width(line) > w {
@@ -540,8 +548,8 @@ func (m Model) streamRow(e store.EventView, lay streamLayout) []cell {
 	return segs
 }
 
-// durStyle colors the DUR value. The slow verdict already lives in STATUS, so
-// DUR only turns cyan for a live pending timer and is dim otherwise.
+// durStyle colors the DUR value. It only turns cyan for a live pending timer and
+// is dim otherwise, so latency reads as a plain number, not a verdict.
 func (m Model) durStyle(e store.EventView) lipgloss.Style {
 	if e.Call != nil && e.Call.State == store.Pending {
 		return m.styles.pending
@@ -622,9 +630,6 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			case e.Call.ToolErr:
 				c.status = "err"
 				c.detail = toolErrorText(e.Call.Result)
-			case e.Call.Slow(m.store.SlowThreshold()):
-				c.status = "slow"
-				c.detail = compactJSON(e.Call.Result)
 			default:
 				c.status = "ok"
 				c.detail = compactJSON(e.Call.Result)
@@ -716,8 +721,6 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 			return m.styles.pending
 		case e.Call.Failed():
 			return m.styles.respErr
-		case e.Call.Slow(m.store.SlowThreshold()):
-			return m.styles.slow
 		default:
 			return m.styles.resp
 		}
@@ -785,12 +788,12 @@ func (m Model) renderHelp() string {
 		{"y", "copy the frame JSON"},
 	}}
 	general := helpGroup{"GENERAL", [][2]string{
-		{":q · ctrl-c", "quit"},
+		{":q", "quit"},
 	}}
 	filter := helpGroup{"STREAM FILTER QUERY", [][2]string{
 		{"<text>", "substring over method, tool, id, payload"},
 		{"tool:echo", "by tool name"},
-		{"status:err|warn|slow|ok|pending|bad", "by outcome"},
+		{"status:err|warn|ok|pending|bad", "by outcome"},
 		{"kind:req|resp|notify|stderr|invalid", "by message type"},
 		{"dir:c2s|s2c", "by direction"},
 		{"method:tools/call", "by method"},
@@ -958,6 +961,11 @@ func dirLabel(d proxy.Direction) string {
 	return "c2s"
 }
 
+// overlayPadX insets every overlay's content from its border by a fixed number
+// of columns, so the inspector, capabilities, summary, and replay panels share
+// one comfortable left and right margin instead of each starting flush.
+const overlayPadX = 2
+
 // renderOverlay draws the active overlay, a centered rounded panel with fixed
 // chrome above a scrollable body and a hint footer below.
 func (m Model) renderOverlay() string {
@@ -968,10 +976,12 @@ func (m Model) renderOverlay() string {
 		inner = m.inspectorHeader(cw) + "\n" + inner
 	}
 	inner += "\n" + m.scrollLine(cw)
+	boxW := cw + 2*overlayPadX
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).BorderForeground(m.theme.blue).
-		Width(cw).Height(ch)
-	panel := lipgloss.JoinVertical(lipgloss.Left, box.Render(inner), m.overlayFooter(cw))
+		Padding(0, overlayPadX).
+		Width(boxW).Height(ch)
+	panel := lipgloss.JoinVertical(lipgloss.Left, box.Render(inner), m.overlayFooter(boxW))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
 }
 
@@ -1016,11 +1026,13 @@ func fitCell(s string, w int) string {
 }
 
 // overlayDims is the centered panel content width, capped near 110 columns, and
-// the maximum viewport height. The whole modal (two borders, the header, the
-// viewport, the indicator line, and the footer) is capped at rows-4, so a short
-// payload sizes to its content instead of stretching to full screen.
+// the maximum viewport height. The returned width is the text area, the box
+// interior less overlayPadX on each side. The whole modal (two borders, the
+// padding, the header, the viewport, the indicator line, and the footer) is
+// capped at rows-4, so a short payload sizes to its content instead of
+// stretching to full screen.
 func (m Model) overlayDims() (w, maxVpH int) {
-	w = max(min(110, m.width-4)-2, 1)
+	w = max(min(110, m.width-4)-2-2*overlayPadX, 1)
 	maxVpH = max(m.height-8-m.overlayHeaderH, 1) // borders(2) + header + indicator(1) + footer(1)
 	return w, maxVpH
 }
@@ -1037,16 +1049,35 @@ func (m Model) overlayFooter(w int) string {
 		}
 		return bar(w, m.styles.prompt.Render(m.input.View()), right)
 	}
-	hs := []hint{{"↑↓", "scroll"}, {"y", "copy"}, {"esc", "close"}}
+	// The scroll hint appears only when the body actually overflows the viewport,
+	// so every overlay reads the same way: a short digest that fits shows no scroll
+	// hint, a long one does. Overlay-specific keys follow.
+	var hs []hint
+	if m.vp.TotalLineCount() > m.vp.Height {
+		hs = append(hs, hint{"↑↓", "scroll"})
+	}
 	switch {
 	case m.overlay == overlayInspector:
-		hs = []hint{{"↑↓", "scroll"}, {"/", "search"}, {"n/N", "match"}, {"y", "copy"}, {"r", "replay"}, {"x", "pair"}, {"esc", "close"}}
+		hs = append(hs, hint{"/", "search"}, hint{"n/N", "match"}, hint{"y", "copy"})
+		// r and x are only offered when they can act on the inspected frame.
+		if m.canReplay() {
+			hs = append(hs, hint{"r", "replay"})
+		}
+		if _, ok := m.pairIndex(m.inspect); ok {
+			hs = append(hs, hint{"x", "pair"})
+		}
+		hs = append(hs, hint{"esc", "close"})
 	case m.overlay == overlayReplay && m.replayReq.Method != "":
-		hs = []hint{{"↑↓", "scroll"}, {"r", "replay again"}, {"y", "copy"}, {"esc", "close"}}
+		hs = append(hs, hint{"r", "replay again"}, hint{"y", "copy"}, hint{"esc", "close"})
+	default:
+		hs = append(hs, hint{"y", "copy"}, hint{"esc", "close"})
 	}
 	right := ""
-	if m.flashActive() {
-		right = m.styles.live.Render(m.flash)
+	switch {
+	case m.replaying:
+		right = m.replaySpinner()
+	case m.flashActive():
+		right = m.flashStyle().Render(m.flash)
 	}
 	return bar(w, m.hintsRow(hs), right)
 }
@@ -1064,76 +1095,155 @@ func (m Model) scrollLine(w int) string {
 	if hidden > 0 {
 		txt = fmt.Sprintf("▼ %d more lines · %d%%", hidden, pct)
 	}
-	return m.styles.faint.Render(" " + txt)
+	return m.styles.faint.Render(txt)
 }
 
 func (m Model) capsContent() string {
 	sid := m.currentSessionID()
-	label := m.streamLabel
-	if m.view == viewSessions && len(m.sessions) > 0 {
-		label = m.sessions[m.selSession].Label
-	}
+	label := m.currentLabel()
 	caps, ok := m.store.Capabilities(sid)
-	used, unused, unadvertised, hasTools := m.store.ToolUsage(sid)
-	if !ok && !hasTools {
-		return m.styles.faint.Render(" no handshake observed yet for this session")
+	if !ok {
+		return m.styles.faint.Render("no handshake observed yet for this session")
 	}
-	var b strings.Builder
-	// client and server share one style so the two roles read consistently, the
-	// dim label plus a neutral name matches the protocolVersion line above.
-	role := func(name, info string) string {
-		return " " + m.styles.dim.Render(name+" · ") + m.styles.neutral.Render(valueOr(info, "unknown")) + "\n"
-	}
-	b.WriteString(m.styles.panelTitle.Render(" capabilities · "+label) + "\n\n")
-	if ok {
-		b.WriteString(" " + m.styles.dim.Render("protocolVersion ") + m.styles.neutral.Render(valueOr(caps.ProtocolVersion, "unknown")) + "\n\n")
-		b.WriteString(role("client", infoLine(caps.ClientInfo)))
-		b.WriteString(m.capsBlock(caps.Client) + "\n\n")
-		b.WriteString(role("server", infoLine(caps.ServerInfo)))
-		b.WriteString(m.capsBlock(caps.Server))
-	} else {
-		b.WriteString(m.styles.faint.Render(" handshake not captured"))
-	}
-	if hasTools {
-		sections := []string{m.toolList("used", used), m.toolList("unused", unused)}
-		if len(unadvertised) > 0 {
-			sections = append(sections, m.toolList("called but not advertised", unadvertised))
-		}
-		b.WriteString("\n\n" + strings.Join(sections, "\n\n"))
-	}
-	return b.String()
+	// This screen answers one question, which capabilities did each side declare,
+	// with a marker per capability and nothing else. The raw handshake, with
+	// listChanged and any other sub-flags, is one keystroke away in the inspector
+	// on the initialize frame.
+	w, _ := m.overlayDims()
+	title := m.capsTitle(label, valueOr(caps.ProtocolVersion, "unknown"), w)
+	client := m.capSection("client", caps.ClientInfo, clientCapOrder, caps.Client)
+	server := m.capSection("server", caps.ServerInfo, serverCapOrder, caps.Server)
+	// A blank line under the title and one between the two groups.
+	return title + "\n\n" + client + "\n\n" + server
 }
+
+// capsTitle is the header line: the accent title and session label on the left,
+// the negotiated protocol version dim on the right, filling the content width so
+// the version sits flush against the panel's right margin.
+func (m Model) capsTitle(label, version string, w int) string {
+	left := m.styles.brand.Render("capabilities") + m.styles.faint.Render(" · ") + m.styles.bright.Render(label)
+	right := m.styles.dim.Render("protocol ") + m.styles.neutral.Render(version)
+	gap := max(w-lipgloss.Width(left)-lipgloss.Width(right), 1)
+	return left + strings.Repeat(" ", gap) + right
+}
+
+// summary table column widths, all padded with lipgloss.Width so styled cells
+// stay aligned.
+const (
+	sumToolW  = 18
+	sumCallsW = 7
+	sumErrW   = 6
+	sumLatW   = 10
+	covLabelW = 11
+)
 
 func (m Model) summaryContent() string {
 	sid := m.currentSessionID()
-	label := m.streamLabel
-	if m.view == viewSessions && len(m.sessions) > 0 {
-		label = m.sessions[m.selSession].Label
+	label := m.currentLabel()
+	summary, _ := m.store.ToolSummary(sid)
+	_, unused, undeclared, hasTools := m.store.ToolUsage(sid)
+	w, _ := m.overlayDims()
+
+	calls := 0
+	for _, t := range summary.Tools {
+		calls += t.Calls
 	}
-	var b strings.Builder
-	b.WriteString(m.styles.panelTitle.Render(" TOOL SUMMARY · "+label) + "\n\n")
-	summary, ok := m.store.ToolSummary(sid)
-	if !ok || len(summary.Tools) == 0 {
-		b.WriteString(m.styles.dim.Render(" no tool calls observed yet for this session"))
-		return b.String()
+	left := m.styles.brand.Render("tool summary") + m.styles.faint.Render(" · ") + m.styles.bright.Render(label)
+	right := ""
+	if calls > 0 {
+		right = m.styles.dim.Render(fmt.Sprintf("%d calls", calls))
 	}
-	b.WriteString(" TOOL                 CALLS  ERRORS  PENDING       P50       P95       P99\n")
-	for _, tool := range summary.Tools {
-		b.WriteString(fmt.Sprintf(" %s %5d  %6d  %7d  %8s  %8s  %8s\n",
-			cellL(tool.Name, 20), tool.Calls, tool.Errors, tool.Pending,
-			formatLatency(tool.P50), formatLatency(tool.P95), formatLatency(tool.P99)))
+	gap := max(w-lipgloss.Width(left)-lipgloss.Width(right), 1)
+	header := left + strings.Repeat(" ", gap) + right
+
+	if len(summary.Tools) == 0 && !hasTools {
+		return header + "\n\n" + m.styles.dim.Render("no tool calls observed yet for this session")
 	}
-	b.WriteString("\n" + m.styles.tableHead.Render(" SLOWEST CALLS") + "\n")
-	if len(summary.Slowest) == 0 {
-		b.WriteString(m.styles.dim.Render(" no completed tool calls"))
-		return b.String()
+
+	var sections []string
+
+	// TABLE: every advertised tool plus any called one, so the full tool set is
+	// visible from the start and its counts fill in as calls arrive. Uncalled
+	// tools are faint 0-call rows; problems sort to the top (errors first, then by
+	// the shown median latency descending), so idle tools sink to the bottom. The
+	// ERR column carries the only verdict color, plus the cyan pending spinner.
+	tools := slices.Clone(summary.Tools)
+	for _, name := range unused {
+		tools = append(tools, store.ToolStats{Name: name})
 	}
-	for _, call := range summary.Slowest {
-		status := "ok"
-		if call.Failed {
-			status = "error"
+	slices.SortStableFunc(tools, func(a, b store.ToolStats) int {
+		if ae, be := a.Errors > 0, b.Errors > 0; ae != be {
+			if ae {
+				return -1
+			}
+			return 1
 		}
-		b.WriteString(fmt.Sprintf(" %8s  %-5s  %s id=%s\n", formatLatency(call.Duration), status, cellL(call.ToolName, 20), call.ID))
+		switch {
+		case a.P50 > b.P50:
+			return -1
+		case a.P50 < b.P50:
+			return 1
+		default:
+			return 0
+		}
+	})
+	var t strings.Builder
+	t.WriteString(m.styles.dim.Render(cellL("TOOL", sumToolW) +
+		cellR("CALLS", sumCallsW) + cellR("ERR", sumErrW) + cellR("LATENCY", sumLatW)))
+	for _, tool := range tools {
+		base := m.styles.neutral
+		if tool.Calls == 0 {
+			base = m.styles.faint // an advertised-but-idle tool recedes until it is called
+		}
+		errCell := m.styles.faint.Render("·")
+		if tool.Errors > 0 {
+			errCell = m.styles.respErr.Render(fmt.Sprintf("%d", tool.Errors))
+		}
+		// LATENCY is the median (p50), a plain number the reader judges for
+		// themselves. A tool whose calls are all still in flight shows a live cyan
+		// spinner rather than a dash.
+		lat := base.Render(formatLatency(tool.P50))
+		if tool.Pending > 0 && tool.Pending == tool.Calls {
+			lat = m.styles.pending.Render(m.spinnerFrame())
+		}
+		t.WriteString("\n" + base.Render(cellL(tool.Name, sumToolW)) +
+			cellR(base.Render(fmt.Sprintf("%d", tool.Calls)), sumCallsW) +
+			cellR(errCell, sumErrW) +
+			cellR(lat, sumLatW))
+	}
+	sections = append(sections, t.String())
+
+	// DRIFT: tools the client called that the server never advertised in
+	// tools/list. They appear in the table too, but a red line flags them as a
+	// contract mismatch worth noticing.
+	if len(undeclared) > 0 {
+		indent := strings.Repeat(" ", covLabelW)
+		sections = append(sections, m.styles.dim.Render(cellL("undeclared", covLabelW))+m.styles.respErr.Render(wrapWords(undeclared, indent, w)))
+	}
+
+	return header + "\n\n" + strings.Join(sections, "\n\n")
+}
+
+// wrapWords lays space-separated words into lines no wider than width, each
+// continuation line prefixed with indent, so a long name list wraps at word
+// boundaries instead of splitting a name mid-way.
+func wrapWords(words []string, indent string, width int) string {
+	avail := max(width-lipgloss.Width(indent), 8)
+	var b strings.Builder
+	lineW := 0
+	for i, word := range words {
+		ww := lipgloss.Width(word)
+		switch {
+		case i == 0:
+			b.WriteString(word)
+			lineW = ww
+		case lineW+1+ww > avail:
+			b.WriteString("\n" + indent + word)
+			lineW = ww
+		default:
+			b.WriteString(" " + word)
+			lineW += 1 + ww
+		}
 	}
 	return b.String()
 }
@@ -1168,31 +1278,110 @@ func infoLine(raw json.RawMessage) string {
 	return info.Name
 }
 
-// capsBlock is one capability object, its pretty JSON syntax-highlighted and
-// indented, or a faint (none) when empty.
-func (m Model) capsBlock(raw json.RawMessage) string {
-	s := strings.TrimSpace(string(raw))
-	if s == "" || s == "null" || s == "{}" {
-		return "   " + m.styles.faint.Render("(none)")
-	}
-	var out []string
-	for _, ln := range strings.Split(prettyJSON(raw), "\n") {
-		out = append(out, "   "+m.highlightJSON(ln))
-	}
-	return strings.Join(out, "\n")
+// capLabelW is the label gutter, so the client and server implementation names
+// start at the same column under the title.
+const capLabelW = 8
+
+// clientCapOrder and serverCapOrder are the standard MCP capabilities per side,
+// in display order, so a capability a side did not declare still shows as a
+// hollow ○ row instead of silently missing. Capabilities are an open set, so a
+// side may also declare names outside these.
+var (
+	clientCapOrder = []string{"roots", "sampling", "elicitation"}
+	serverCapOrder = []string{"tools", "resources", "prompts", "logging", "completions"}
+)
+
+// capLabelRow is one gutter row, a dim label padded to the gutter then its value.
+// No trailing newline, the caller assembles the blocks.
+func (m Model) capLabelRow(label, value string) string {
+	return m.styles.dim.Render(cellL(label, capLabelW)) + value
 }
 
-// toolList renders one tool-usage group, a dim title over the tool names, or a
-// faint (none) when the group is empty. Names stay neutral, no verdict color.
-func (m Model) toolList(title string, tools []string) string {
-	rows := []string{" " + m.styles.dim.Render(title)}
-	if len(tools) == 0 {
-		rows = append(rows, "   "+m.styles.faint.Render("(none)"))
+// infoValue renders an implementation's name bright and its version faint, for
+// the client and server rows.
+func (m Model) infoValue(raw json.RawMessage) string {
+	name, version := infoNameVersion(raw)
+	switch {
+	case name == "":
+		return m.styles.faint.Render("unknown")
+	case version != "":
+		return m.styles.bright.Render(name) + " " + m.styles.faint.Render(version)
+	default:
+		return m.styles.bright.Render(name)
 	}
-	for _, t := range tools {
-		rows = append(rows, "   "+m.styles.neutral.Render(t))
+}
+
+func infoNameVersion(raw json.RawMessage) (name, version string) {
+	var info struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &info) != nil {
+		return "", ""
+	}
+	return info.Name, info.Version
+}
+
+// capSection renders one side of the handshake: the label and implementation
+// row, then a filled ● row for every declared capability (the known ones in
+// standard order, then any experimental extras) and a hollow ○ row for each
+// known capability the side did not declare.
+func (m Model) capSection(label string, info json.RawMessage, order []string, raw json.RawMessage) string {
+	declared := capNames(raw)
+	rows := []string{m.capLabelRow(label, m.infoValue(info))}
+
+	known := make(map[string]bool, len(order))
+	var absent []string
+	for _, name := range order {
+		known[name] = true
+		if declared[name] {
+			rows = append(rows, m.capRow(true, name))
+		} else {
+			absent = append(absent, name)
+		}
+	}
+	// Never hide a declared capability: surface any outside the known set as a
+	// present row too, so an experimental cap is visible rather than dropped.
+	var extra []string
+	for name := range declared {
+		if !known[name] {
+			extra = append(extra, name)
+		}
+	}
+	slices.Sort(extra)
+	for _, name := range extra {
+		rows = append(rows, m.capRow(true, name))
+	}
+	for _, name := range absent {
+		rows = append(rows, m.capRow(false, name))
 	}
 	return strings.Join(rows, "\n")
+}
+
+// capRow is one capability line: a two-space indent, a one-cell marker, then the
+// name. Declared is a green ● with the name in text, absent a faint ○ with the
+// name faint. ● and ○ share one cell width so the names align, and the
+// filled/hollow glyph carries the state on its own so NO_COLOR stays legible.
+func (m Model) capRow(present bool, name string) string {
+	if present {
+		return "  " + m.styles.resp.Render("●") + " " + m.styles.neutral.Render(name)
+	}
+	return "  " + m.styles.faint.Render("○") + " " + m.styles.faint.Render(name)
+}
+
+// capNames returns the set of capability names a side declared. Values are
+// ignored: this screen shows only whether a capability was declared, not its
+// sub-flags.
+func capNames(raw json.RawMessage) map[string]bool {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	set := make(map[string]bool, len(obj))
+	for name := range obj {
+		set[name] = true
+	}
+	return set
 }
 
 func valueOr(s, fallback string) string {
@@ -1239,7 +1428,7 @@ func highlightMatches(line, q string, style lipgloss.Style) string {
 func (m Model) numberBody(body string, width int, highlight bool) string {
 	const gutterW = 5 // a 3-wide number plus two spaces
 	textW := max(width-gutterW, 1)
-	num := lipgloss.NewStyle().Foreground(m.theme.dim).Faint(true)
+	num := lipgloss.NewStyle().Foreground(m.theme.faint)
 	var out []string
 	for i, line := range strings.Split(body, "\n") {
 		content := line
@@ -1265,13 +1454,13 @@ func (m Model) numberBody(body string, width int, highlight bool) string {
 // It scans runes so a color never lands inside a multibyte sequence.
 func (m Model) highlightJSON(line string) string {
 	// Only keys carry color. Values (strings, numbers, true/false/null) stay
-	// neutral so the verdict hues (yellow slow, red err) never leak into the body
+	// neutral so the verdict hues (red err, cyan pending) never leak into the body
 	// and read as false signals, and punctuation recedes.
 	key := lipgloss.NewStyle().Foreground(m.theme.blue)
 	str := lipgloss.NewStyle().Foreground(m.theme.fg)
 	num := str
 	lit := str
-	punc := lipgloss.NewStyle().Foreground(m.theme.dim).Faint(true)
+	punc := lipgloss.NewStyle().Foreground(m.theme.faint)
 
 	r := []rune(line)
 	var b strings.Builder
