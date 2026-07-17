@@ -64,17 +64,19 @@ func RunHTTP(ctx context.Context, cfg HTTPConfig) error {
 // mcpMethodHeader and mcpNameHeader are the SEP-2243 Streamable HTTP routing
 // headers a client sets so a gateway can route without parsing the JSON-RPC body.
 const (
-	mcpMethodHeader = "Mcp-Method"
-	mcpNameHeader   = "Mcp-Name"
+	mcpMethodHeader          = "Mcp-Method"
+	mcpNameHeader            = "Mcp-Name"
+	mcpProtocolVersionHeader = "MCP-Protocol-Version"
 )
 
 // route carries the routing headers observed on a request, both empty when the
 // frame is a response or the client did not send them. batch marks a frame
 // split out of a JSON-RPC batch array, which routing headers cannot address.
 type route struct {
-	method string // Mcp-Method
-	name   string // Mcp-Name
-	batch  bool
+	method          string // Mcp-Method
+	name            string // Mcp-Name
+	protocolVersion string // MCP-Protocol-Version (request-scoped, not per operation)
+	batch           bool
 }
 
 // newHTTPEmitter returns an emit function bound to a session and sink.
@@ -83,16 +85,17 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 	return func(dir Direction, body []byte, r route) {
 		raw, text := splitObserved(body)
 		env := Envelope{
-			SessionID:   cfg.SessionID,
-			ServerLabel: cfg.Label,
-			Seq:         seq.Add(1),
-			TS:          time.Now(),
-			Direction:   dir,
-			Transport:   "http",
-			Text:        text,
-			MCPMethod:   r.method,
-			MCPName:     r.name,
-			Batch:       r.batch,
+			SessionID:          cfg.SessionID,
+			ServerLabel:        cfg.Label,
+			Seq:                seq.Add(1),
+			TS:                 time.Now(),
+			Direction:          dir,
+			Transport:          "http",
+			Text:               text,
+			MCPMethod:          r.method,
+			MCPName:            r.name,
+			MCPProtocolVersion: r.protocolVersion,
+			Batch:              r.batch,
 		}
 		if raw != nil {
 			env.Raw = append([]byte(nil), raw...)
@@ -142,7 +145,7 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			body, err := io.ReadAll(r.Body)
 			_ = r.Body.Close()
 			if err == nil {
-				rt := route{method: r.Header.Get(mcpMethodHeader), name: r.Header.Get(mcpNameHeader)}
+				rt := route{method: r.Header.Get(mcpMethodHeader), name: r.Header.Get(mcpNameHeader), protocolVersion: r.Header.Get(mcpProtocolVersionHeader)}
 				emitFrames(emit, ClientToServer, body, rt)
 				r.Body = io.NopCloser(bytes.NewReader(body))
 				r.ContentLength = int64(len(body))
@@ -156,8 +159,9 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 // array into its elements. A request's routing headers describe a single
 // operation, so they cannot be copied onto every batch element (that would
 // fabricate a method mismatch on all but the matching one). Instead each element
-// is flagged as batched and the headers ride only the first, letting the store
-// surface a single "invalid on a batch" warning rather than per-element noise.
+// is flagged as batched and the routing headers ride only the first, letting the
+// store surface a single "invalid on a batch" warning rather than per-element
+// noise. The protocol version is request-scoped, so it rides every element.
 func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte, rt route) {
 	b := bytes.TrimSpace(body)
 	if len(b) == 0 {
@@ -167,7 +171,7 @@ func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte,
 		var arr []json.RawMessage
 		if json.Unmarshal(b, &arr) == nil {
 			for i, m := range arr {
-				er := route{batch: true}
+				er := route{batch: true, protocolVersion: rt.protocolVersion}
 				if i == 0 {
 					er.method, er.name = rt.method, rt.name
 				}

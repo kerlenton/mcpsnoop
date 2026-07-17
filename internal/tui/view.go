@@ -903,16 +903,20 @@ func (m Model) inspectorHeader(w int) string {
 	left := m.styles.infoVal.Render(fmt.Sprintf("FRAME %d/%d", m.inspect+1, len(m.full))) + "  " + strings.Join(parts, sep)
 	right := m.pairWidget() + sep + m.styles.faint.Render(e.TS.Format("15:04:05.000"))
 	head := bar(w, left, right)
-	// A second chrome line carries the Streamable HTTP routing headers (SEP-2243)
-	// verbatim when the request had them, so the busy meta line stays readable and
-	// older transports show nothing. overlayHeaderH tracks the extra line.
-	if e.MCPMethod != "" || e.MCPName != "" {
+	// A second chrome line carries the Streamable HTTP request headers (SEP-2243
+	// routing plus MCP-Protocol-Version) verbatim when the request had them, so the
+	// busy meta line stays readable and older transports show nothing. overlayHeaderH
+	// tracks the extra line.
+	if e.MCPMethod != "" || e.MCPName != "" || e.MCPProtocolVersion != "" {
 		var rp []string
 		if e.MCPMethod != "" {
 			rp = append(rp, m.styles.dim.Render("Mcp-Method ")+m.styles.neutral.Render(e.MCPMethod))
 		}
 		if e.MCPName != "" {
 			rp = append(rp, m.styles.dim.Render("Mcp-Name ")+m.styles.neutral.Render(e.MCPName))
+		}
+		if e.MCPProtocolVersion != "" {
+			rp = append(rp, m.styles.dim.Render("MCP-Protocol-Version ")+m.styles.neutral.Render(e.MCPProtocolVersion))
 		}
 		head += "\n" + bar(w, strings.Join(rp, sep), "")
 	}
@@ -923,7 +927,7 @@ func (m Model) inspectorHeader(w int) string {
 // the meta line, plus a routing-headers line when the inspected frame has them.
 func (m Model) inspectorHeaderH() int {
 	if m.inspect >= 0 && m.inspect < len(m.full) {
-		if e := m.full[m.inspect]; e.MCPMethod != "" || e.MCPName != "" {
+		if e := m.full[m.inspect]; e.MCPMethod != "" || e.MCPName != "" || e.MCPProtocolVersion != "" {
 			return 2
 		}
 	}

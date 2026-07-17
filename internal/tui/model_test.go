@@ -97,6 +97,21 @@ func TestSessionsTableAndDrillIn(t *testing.T) {
 	}
 }
 
+func TestInspectorHeaderHSyncsWithProtocolVersionOnly(t *testing.T) {
+	// A frame carrying ONLY MCP-Protocol-Version (no Mcp-Method/Mcp-Name) must still
+	// reserve the second chrome line, so the height gate stays in lockstep with the
+	// render gate in inspectorHeader. If they diverge the body is clipped or misplaced.
+	m := Model{full: []store.EventView{{MCPProtocolVersion: "2026-07-28"}}, inspect: 0}
+	if got := m.inspectorHeaderH(); got != 2 {
+		t.Fatalf("inspectorHeaderH() = %d, want 2 for a protocol-version-only frame", got)
+	}
+	// A frame with no request headers reserves no extra line.
+	m.full = []store.EventView{{}}
+	if got := m.inspectorHeaderH(); got != 1 {
+		t.Fatalf("inspectorHeaderH() = %d, want 1 for a header-less frame", got)
+	}
+}
+
 func TestInspectorOverlay(t *testing.T) {
 	st := store.New()
 	seed(st)

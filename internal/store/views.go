@@ -56,6 +56,8 @@ type EventView struct {
 	// set on request frames captured over the streamable-HTTP transport.
 	MCPMethod string
 	MCPName   string
+	// MCPProtocolVersion is the MCP-Protocol-Version request header.
+	MCPProtocolVersion string
 	// RoutingMismatch is true when a routing header disagrees with the body (or is
 	// present on a batch). It is a structured handle for the same condition the
 	// warning describes, so filters and exporters need not match warning text.
@@ -117,18 +119,19 @@ type SessionToolSummary struct {
 // view builds the snapshot for an event. Caller holds at least the read lock.
 func (e *event) view(_ *session) EventView {
 	v := EventView{
-		Seq:             e.seq,
-		TS:              e.ts,
-		Dir:             e.dir,
-		Kind:            e.kind,
-		Method:          e.method,
-		ID:              e.id,
-		Raw:             e.raw,
-		Text:            e.text,
-		Warning:         e.warning,
-		MCPMethod:       e.mcpMethod,
-		MCPName:         e.mcpName,
-		RoutingMismatch: e.mismatch,
+		Seq:                e.seq,
+		TS:                 e.ts,
+		Dir:                e.dir,
+		Kind:               e.kind,
+		Method:             e.method,
+		ID:                 e.id,
+		Raw:                e.raw,
+		Text:               e.text,
+		Warning:            e.warning,
+		MCPMethod:          e.mcpMethod,
+		MCPName:            e.mcpName,
+		MCPProtocolVersion: e.mcpProtocolVersion,
+		RoutingMismatch:    e.mismatch,
 	}
 	if e.call != nil {
 		cv := e.call.view()

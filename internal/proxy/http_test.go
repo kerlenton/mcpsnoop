@@ -13,7 +13,7 @@ import (
 // emitterTo adapts a captureSink into the emit func httpProxyHandler expects.
 func emitterTo(sink *captureSink) func(Direction, []byte, route) {
 	return func(d Direction, raw []byte, rt route) {
-		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, Batch: rt.batch})
+		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, MCPProtocolVersion: rt.protocolVersion, Batch: rt.batch})
 	}
 }
 
@@ -87,6 +87,40 @@ func TestHTTPProxyForwardsAndCapturesRoutingHeaders(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyForwardsAndCapturesProtocolVersion(t *testing.T) {
+	var gotVersion string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotVersion = r.Header.Get("MCP-Protocol-Version")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Protocol-Version", "2026-07-28")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	// Forwarded verbatim to the target.
+	if gotVersion != "2026-07-28" {
+		t.Fatalf("target received MCP-Protocol-Version=%q, want 2026-07-28", gotVersion)
+	}
+	// Captured onto the observed client->server frame.
+	c2s := sink.byDir(ClientToServer)
+	if len(c2s) != 1 || c2s[0].MCPProtocolVersion != "2026-07-28" {
+		t.Fatalf("captured frame protocol version = %+v", c2s)
+	}
+}
+
 func TestHTTPProxyWithoutRoutingHeadersDegrades(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -106,7 +140,7 @@ func TestHTTPProxyWithoutRoutingHeadersDegrades(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	c2s := sink.byDir(ClientToServer)
-	if len(c2s) != 1 || c2s[0].MCPMethod != "" || c2s[0].MCPName != "" {
+	if len(c2s) != 1 || c2s[0].MCPMethod != "" || c2s[0].MCPName != "" || c2s[0].MCPProtocolVersion != "" {
 		t.Fatalf("absent headers should stay empty, got %+v", c2s)
 	}
 }

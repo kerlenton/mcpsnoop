@@ -85,20 +85,21 @@ type call struct {
 
 // event is the mutable internal timeline entry.
 type event struct {
-	seq       uint64
-	ts        time.Time
-	dir       proxy.Direction
-	kind      EventKind
-	method    string
-	id        string
-	raw       json.RawMessage
-	text      string
-	warning   string
-	mcpMethod string // Mcp-Method routing header (HTTP transport, SEP-2243)
-	mcpName   string // Mcp-Name routing header
-	batch     bool   // one element of a JSON-RPC batch (routing headers cannot address it)
-	mismatch  bool   // a routing header disagrees with the body (structured flag for warning)
-	call      *call  // set for request/response events
+	seq                uint64
+	ts                 time.Time
+	dir                proxy.Direction
+	kind               EventKind
+	method             string
+	id                 string
+	raw                json.RawMessage
+	text               string
+	warning            string
+	mcpMethod          string // Mcp-Method routing header (HTTP transport, SEP-2243)
+	mcpName            string // Mcp-Name routing header
+	mcpProtocolVersion string // MCP-Protocol-Version request header
+	batch              bool   // one element of a JSON-RPC batch (routing headers cannot address it)
+	mismatch           bool   // a routing header disagrees with the body (structured flag for warning)
+	call               *call  // set for request/response events
 }
 
 // capabilities holds what each side declared, whether through the legacy
@@ -182,7 +183,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		return EventView{Kind: EventOther} // control frame, not shown in the stream
 	}
 
-	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName, batch: e.Batch}
+	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName, mcpProtocolVersion: e.MCPProtocolVersion, batch: e.Batch}
 
 	if e.Direction == proxy.ServerStderr {
 		ev.kind = EventStderr
