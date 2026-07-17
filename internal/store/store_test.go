@@ -362,8 +362,9 @@ func TestCapabilitiesFromStatelessMeta(t *testing.T) {
 		t.Fatalf("client capabilities not read from _meta: %s", caps.Client)
 	}
 
-	// The server side arrives in a server/discover response; serverInfo travels in
-	// the result's _meta per the draft schema.
+	// The server side arrives in a server/discover response. serverInfo rides the
+	// result's _meta, the canonical location per the draft schema (servers SHOULD
+	// send io.modelcontextprotocol/serverInfo on every response).
 	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
 		`"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{},"resources":{}},"instructions":"Call search before answering.","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"ExampleServer","version":"2.0"}}}`))
 	caps, _ = s.Capabilities("s1")
@@ -382,8 +383,8 @@ func TestCapabilitiesDiscoverOnlyFallsBackToSupportedVersion(t *testing.T) {
 	s := New()
 	t0 := time.Now()
 	// A server/discover response with no prior client _meta: the protocol version
-	// falls back to the first supported version, and serverInfo is also honored at
-	// the top level (as some servers place it).
+	// falls back to the first supported version. This also covers the defensive
+	// top-level serverInfo path (not in the schema, but honored if a server sends it).
 	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "server/discover", ""))
 	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
 		`"result":{"supportedVersions":["2026-07-28","2025-11-25"],"capabilities":{"tools":{}},"serverInfo":{"name":"Srv","version":"9"}}`))
