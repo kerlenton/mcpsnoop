@@ -71,7 +71,7 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0\ncheck passed\n" {
+	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0\nrecorded first-seen tool baseline (trusted, not verified)\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -221,6 +221,39 @@ func TestCheckFailsOnToolDefinitionDriftWhenSelected(t *testing.T) {
 	code, stdout, stderr = executeCheck(t, []string{"-"}, changed)
 	if code != 0 || stderr != "" || !strings.Contains(stdout, "description changed: search") {
 		t.Fatalf("default check = code %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
+func TestCheckBaselineFlagRecordsThenDetectsDrift(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir()) // exercise --baseline, not the state dir
+	dir := t.TempDir()
+	baseline := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search docs","inputSchema":{"type":"object"}}]}}`),
+	)
+
+	// First run against an empty baseline dir records; it does not verify.
+	code, stdout, stderr := executeCheck(t, []string{"--fail-on", "drift", "--baseline", dir, "-"}, baseline)
+	if code != 0 || stderr != "" {
+		t.Fatalf("first run = code %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "recorded first-seen tool baseline") {
+		t.Fatalf("first run should announce it only recorded a baseline, got %q", stdout)
+	}
+
+	// The persisted directory lets the second run actually verify, and catch drift.
+	changed := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search private docs","inputSchema":{"type":"object"}}]}}`),
+	)
+	code, stdout, stderr = executeCheck(t, []string{"--fail-on", "drift", "--baseline", dir, "-"}, changed)
+	if code != 1 || stderr != "" {
+		t.Fatalf("second run = code %d, stderr %q", code, stderr)
+	}
+	for _, want := range []string{"description changed: search", "check failed: drift"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("second run missing %q\n%s", want, stdout)
+		}
 	}
 }
 

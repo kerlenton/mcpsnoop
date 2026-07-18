@@ -3,6 +3,7 @@ package toolbaseline
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -227,6 +228,83 @@ func storeWithDefinitions(description string) *store.Store {
 		SessionID: "s1", ServerLabel: "docs", Seq: 2, Direction: proxy.ServerToClient, Raw: result,
 	})
 	return st
+}
+
+// ingestToolList seeds a session that advertised one tool, so ObserveAll and
+// ObserveSession have a complete tools/list to work from.
+func ingestToolList(st *store.Store, sessionID, label, description string) {
+	st.Ingest(proxy.Envelope{
+		SessionID: sessionID, ServerLabel: label, Seq: 1, Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+	})
+	result, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1,
+		"result": map[string]any{"tools": []any{map[string]any{
+			"name": "search", "description": description, "inputSchema": map[string]any{"type": "object"},
+		}}},
+	})
+	st.Ingest(proxy.Envelope{
+		SessionID: sessionID, ServerLabel: label, Seq: 2, Direction: proxy.ServerToClient, Raw: result,
+	})
+}
+
+func TestCorruptBaselineErrorsWithResetHintAndResetRecovers(t *testing.T) {
+	m := New(t.TempDir())
+	// A truncated baseline, as a crash mid-write once left behind.
+	if err := os.WriteFile(m.Path("docs"), []byte(`{"version":1,"server":"docs","tools":[`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defs := []store.ToolDefinition{{Name: "search", InputSchema: json.RawMessage(`{}`)}}
+
+	_, _, err := m.Observe("docs", defs)
+	if err == nil || !strings.Contains(err.Error(), "--reset") {
+		t.Fatalf("corrupt baseline error = %v, want one naming --reset", err)
+	}
+
+	// --reset clears it, and the next observation trusts a fresh definition set.
+	if err := m.Reset("docs"); err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := m.Observe("docs", defs); err != nil || !created {
+		t.Fatalf("after reset = created %v, err %v", created, err)
+	}
+}
+
+func TestObserveAllContinuesPastACorruptBaseline(t *testing.T) {
+	m := New(t.TempDir())
+	st := store.New()
+	ingestToolList(st, "s1", "alpha", "Search docs")
+	ingestToolList(st, "s2", "beta", "Search docs")
+
+	// A corrupt baseline for the first session's label must not block the second.
+	if err := os.WriteFile(m.Path("alpha"), []byte("{bad json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ObserveAll(m, st)
+
+	bad, ok := st.ToolDrift("s1")
+	if !ok || bad.BaselineError == "" {
+		t.Fatalf("s1 drift = %+v, ok %v, want a recorded BaselineError", bad, ok)
+	}
+	if good, ok := st.ToolDrift("s2"); !ok || good.BaselineError != "" {
+		t.Fatalf("s2 drift = %+v, ok %v, want it processed with no error", good, ok)
+	}
+}
+
+func TestObserveSessionNeedsAStableLabel(t *testing.T) {
+	m := New(t.TempDir())
+	st := store.New()
+	ingestToolList(st, "s1", "", "Search docs") // no server label
+
+	_, _, err := ObserveSession(m, st, "s1")
+	if err == nil || !strings.Contains(err.Error(), "label") {
+		t.Fatalf("empty-label observation = %v, want an error about a stable label", err)
+	}
+	// Nothing was keyed on the session id, so no baseline file was written.
+	if entries, _ := os.ReadDir(m.dir); len(entries) != 0 {
+		t.Fatalf("baseline dir should be empty, got %d entries", len(entries))
+	}
 }
 
 func equalStrings(got, want []string) bool {

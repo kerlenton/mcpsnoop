@@ -263,8 +263,9 @@ By default, duration changes must differ by at least 100 ms and 2x; use
 `--duration-threshold` and `--duration-ratio` to adjust those cutoffs.
 
 Pass `--exit-code` to gate CI on regressions: it exits non-zero when the after
-session drops a tool, changes an input schema, has a call whose status got worse,
-or slows down. Improvements (added tools, fixed calls, speedups) still exit zero.
+session drops a tool, changes a tool description or input schema, has a call whose
+status got worse, or slows down. A description-only change now counts as a
+regression too. Improvements (added tools, fixed calls, speedups) still exit zero.
 
 ## Checking sessions in CI
 
@@ -303,6 +304,15 @@ mcpsnoop check --fail-on drift session.jsonl
 mcpsnoop baseline session.jsonl
 mcpsnoop baseline --accept session.jsonl  # trust a legitimate definition change
 mcpsnoop baseline --reset session.jsonl   # trust the next complete tools/list
+```
+
+In ephemeral CI the state directory starts empty, so the first run only records
+the baseline and reports no drift. The baseline has to persist across runs for
+later runs to verify against it. Point `--baseline` at a checked-in or cached
+directory, or set `MCPSNOOP_HOME` to a persisted path.
+
+```bash
+mcpsnoop check --fail-on drift --baseline .mcpsnoop/baselines session.jsonl
 ```
 
 `drift` is opt-in for `check`; the default `error,invalid,warn` gate is unchanged.

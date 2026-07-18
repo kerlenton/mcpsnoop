@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
-	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/store"
 	"github.com/kerlenton/mcpsnoop/internal/toolbaseline"
 )
@@ -26,17 +25,19 @@ const (
 var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift}
 
 type checkSummary struct {
-	sessionID  string
-	errors     int
-	invalid    int
-	warnings   int
-	mismatches int
-	pending    int
-	drift      store.ToolDrift
+	sessionID       string
+	errors          int
+	invalid         int
+	warnings        int
+	mismatches      int
+	pending         int
+	drift           store.ToolDrift
+	baselineCreated bool
 }
 
 func newCheckCmd() *cobra.Command {
 	var failOn string
+	var baselineDir string
 	cmd := &cobra.Command{
 		Use:   "check [session-id|log.jsonl|-]",
 		Short: "Fail when a captured session contains selected signals",
@@ -59,7 +60,7 @@ func newCheckCmd() *cobra.Command {
 				return exitCode(1)
 			}
 
-			summaries, err := summarizeCheck(st, toolbaseline.New(paths.ToolBaselinesDir()))
+			summaries, err := summarizeCheck(st, toolbaseline.New(resolveBaselineDir(baselineDir)))
 			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
 				return exitCode(1)
@@ -68,6 +69,12 @@ func newCheckCmd() *cobra.Command {
 			for _, summary := range summaries {
 				fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d\n",
 					summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending)
+				if summary.baselineCreated {
+					// No baseline existed, so this run trusted the current definitions
+					// rather than verifying them. Say so, or an ephemeral CI reads green
+					// while having checked nothing.
+					fmt.Fprintln(cmd.OutOrStdout(), "recorded first-seen tool baseline (trusted, not verified)")
+				}
 				if !summary.drift.Empty() {
 					writeToolDrift(cmd.OutOrStdout(), summary.drift)
 				}
@@ -85,6 +92,7 @@ func newCheckCmd() *cobra.Command {
 	}
 	cmd.Flags().SortFlags = false
 	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, drift")
+	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
 	return cmd
 }
 
@@ -121,11 +129,12 @@ func summarizeCheck(st *store.Store, baselines *toolbaseline.Manager) ([]checkSu
 	for _, header := range st.Sessions() {
 		summary := checkSummary{sessionID: header.ID, errors: header.Errors, pending: header.Pending}
 		if _, ok := st.ToolDefinitions(header.ID); ok {
-			report, _, err := toolbaseline.ObserveSession(baselines, st, header.ID)
+			report, created, err := toolbaseline.ObserveSession(baselines, st, header.ID)
 			if err != nil {
 				return nil, err
 			}
 			summary.drift = report
+			summary.baselineCreated = created
 		}
 		for _, event := range st.Timeline(header.ID) {
 			if event.Kind == store.EventInvalid {
