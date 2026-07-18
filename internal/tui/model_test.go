@@ -885,6 +885,47 @@ func TestToolSummaryListsEveryAdvertisedTool(t *testing.T) {
 	}
 }
 
+func TestDefinitionDriftIsVisibleInSessionsAndToolSummary(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search"}]}}`))
+	st.SetToolDrift("s1", store.ToolDrift{
+		ChangedDescriptions: []string{"search"},
+		AddedTools:          []string{"write"},
+	})
+
+	m := ready(t, st)
+	if out := ansi.Strip(m.View()); !strings.Contains(out, "! drift") {
+		t.Fatalf("sessions view did not surface drift\n%s", out)
+	}
+	m = typeRunes(t, m, "s")
+	out := ansi.Strip(m.overlayRaw)
+	for _, want := range []string{"tool definition drift", "description changed", "search", "added", "write"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestToolBaselineErrorsAreVisible(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+	st.SetToolDrift("s1", store.ToolDrift{BaselineError: "baseline file is invalid"})
+
+	m := ready(t, st)
+	if out := ansi.Strip(m.View()); !strings.Contains(out, "! baseline") {
+		t.Fatalf("sessions view did not surface the baseline error\n%s", out)
+	}
+	m = typeRunes(t, m, "s")
+	out := ansi.Strip(m.overlayRaw)
+	for _, want := range []string{"tool baseline error", "baseline file is invalid"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing %q\n%s", want, out)
+		}
+	}
+}
+
 // summaryHasRow reports whether a stripped summary line starts with name and
 // contains cell somewhere after it.
 func summaryHasRow(styled, name, cell string) bool {

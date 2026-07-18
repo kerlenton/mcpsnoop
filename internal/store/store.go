@@ -124,8 +124,12 @@ type session struct {
 	last  time.Time
 	caps  capabilities
 
-	advertisedTools []string
-	advertisedSet   map[string]struct{}
+	advertisedTools  []string
+	advertisedSet    map[string]struct{}
+	toolDefinitions  map[string]ToolDefinition
+	toolListComplete bool
+	toolDrift        ToolDrift
+	toolDriftSet     bool
 
 	command []string
 	cwd     string
@@ -300,11 +304,12 @@ func (s *Store) sessionFor(e proxy.Envelope) *session {
 	sess, ok := s.sessions[e.SessionID]
 	if !ok {
 		sess = &session{
-			id:            e.SessionID,
-			label:         e.ServerLabel,
-			first:         e.TS,
-			advertisedSet: make(map[string]struct{}),
-			calls:         make(map[callKey]*call),
+			id:              e.SessionID,
+			label:           e.ServerLabel,
+			first:           e.TS,
+			advertisedSet:   make(map[string]struct{}),
+			toolDefinitions: make(map[string]ToolDefinition),
+			calls:           make(map[callKey]*call),
 		}
 		s.sessions[e.SessionID] = sess
 		s.order = append(s.order, e.SessionID)
@@ -516,8 +521,11 @@ func (c *capabilities) applyResponseMeta(result json.RawMessage) {
 func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 	var r struct {
 		Tools []struct {
-			Name string `json:"name"`
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"inputSchema"`
 		} `json:"tools"`
+		NextCursor string `json:"nextCursor"`
 	}
 
 	if json.Unmarshal(result, &r) != nil {
@@ -526,6 +534,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 
 	if !hasListCursor(reqParams) {
 		clear(sess.advertisedSet)
+		clear(sess.toolDefinitions)
 		sess.advertisedTools = nil
 	}
 
@@ -539,7 +548,13 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 
 		sess.advertisedSet[tool.Name] = struct{}{}
 		sess.advertisedTools = append(sess.advertisedTools, tool.Name)
+		sess.toolDefinitions[tool.Name] = ToolDefinition{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: append(json.RawMessage(nil), tool.InputSchema...),
+		}
 	}
+	sess.toolListComplete = r.NextCursor == ""
 }
 
 // hasListCursor reports whether a tools/list request carries a pagination cursor,

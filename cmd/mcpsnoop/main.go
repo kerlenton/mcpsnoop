@@ -287,7 +287,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 	flags.SetInterspersed(false)
 
 	cmd.SetVersionTemplate("mcpsnoop {{.Version}}\n")
-	cmd.AddCommand(newHTTPCmd(), newExportCmd(), newCheckCmd(), newDiffCmd(), newOpenCmd(), newRemoteCmd(), newDemoCmd(), newVersionCmd())
+	cmd.AddCommand(newHTTPCmd(), newExportCmd(), newCheckCmd(), newBaselineCmd(), newDiffCmd(), newOpenCmd(), newRemoteCmd(), newDemoCmd(), newVersionCmd())
 	return cmd
 }
 

@@ -19,13 +19,13 @@ func TestDiffCommandComparesTwoLogPaths(t *testing.T) {
 	after := filepath.Join(dir, "after.jsonl")
 	writeDiffLog(t, before,
 		diffEnvelope("before", 1, time.Unix(1, 0), proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
-		diffEnvelope("before", 2, time.Unix(2, 0), proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","inputSchema":{"type":"object"}}]}}`),
+		diffEnvelope("before", 2, time.Unix(2, 0), proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search docs","inputSchema":{"type":"object"}}]}}`),
 		diffEnvelope("before", 3, time.Unix(3, 0), proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"query":"ruff"}}}`),
 		diffEnvelope("before", 4, time.Unix(3, 0).Add(100*time.Millisecond), proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`),
 	)
 	writeDiffLog(t, after,
 		diffEnvelope("after", 1, time.Unix(1, 0), proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
-		diffEnvelope("after", 2, time.Unix(2, 0), proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","inputSchema":{"type":"object","required":["query"]}}]}}`),
+		diffEnvelope("after", 2, time.Unix(2, 0), proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search private docs","inputSchema":{"type":"object","required":["query"]}}]}}`),
 		diffEnvelope("after", 3, time.Unix(3, 0), proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"query":"ruff"}}}`),
 		diffEnvelope("after", 4, time.Unix(3, 0).Add(350*time.Millisecond), proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[]}}`),
 	)
@@ -36,6 +36,7 @@ func TestDiffCommandComparesTwoLogPaths(t *testing.T) {
 	}
 	for _, want := range []string{
 		"mcpsnoop diff before -> after",
+		"description changed: search",
 		"schema changed: search",
 		`status changed: search {"query":"ruff"} ok -> error`,
 		`slower: search {"query":"ruff"} 100ms -> 350ms`,

@@ -746,3 +746,46 @@ func TestToolUsageReportsCalledButNotAdvertised(t *testing.T) {
 		t.Fatalf("unadvertised = %v, want [search weather]", unadvertised)
 	}
 }
+
+func TestToolDefinitionsCaptureDescriptionsSchemasAndCompletePagination(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", ""))
+	s.Ingest(resp(2, t0, proxy.ServerToClient, "1", `"result":{"tools":[{"name":"search","description":"Search docs","inputSchema":{"type":"object","properties":{"query":{"type":"string"}}}}],"nextCursor":"p2"}`))
+	if _, ok := s.ToolDefinitions("s1"); ok {
+		t.Fatal("partial tools/list pagination must not be treated as a complete definition set")
+	}
+
+	s.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/list", `{"cursor":"p2"}`))
+	s.Ingest(resp(4, t0, proxy.ServerToClient, "2", `"result":{"tools":[{"name":"fetch","description":"Fetch a page","inputSchema":{"type":"object"}}]}`))
+
+	definitions, ok := s.ToolDefinitions("s1")
+	if !ok {
+		t.Fatal("complete paginated tools/list was not exposed")
+	}
+	if len(definitions) != 2 {
+		t.Fatalf("definitions = %+v, want two tools", definitions)
+	}
+	if definitions[0].Name != "search" || definitions[0].Description != "Search docs" || string(definitions[0].InputSchema) == "" {
+		t.Fatalf("search definition = %+v", definitions[0])
+	}
+	if definitions[1].Name != "fetch" || definitions[1].Description != "Fetch a page" {
+		t.Fatalf("fetch definition = %+v", definitions[1])
+	}
+}
+
+func TestToolDriftIsExposedOnSessionHeader(t *testing.T) {
+	s := New()
+	s.Ingest(req(1, time.Now(), proxy.ClientToServer, "1", "tools/list", ""))
+	s.SetToolDrift("s1", ToolDrift{ChangedDescriptions: []string{"search"}})
+
+	headers := s.Sessions()
+	if len(headers) != 1 || !headers[0].HasToolDrift {
+		t.Fatalf("session header drift = %+v", headers)
+	}
+	report, ok := s.ToolDrift("s1")
+	if !ok || len(report.ChangedDescriptions) != 1 || report.ChangedDescriptions[0] != "search" {
+		t.Fatalf("tool drift = %+v, ok=%v", report, ok)
+	}
+}
