@@ -85,6 +85,36 @@ func TestSessionsTableDriftMarkerKeepsLabel(t *testing.T) {
 	}
 }
 
+func TestStreamRowShowsSupersededStatusInWarnStyle(t *testing.T) {
+	st := store.New()
+	// Two requests reuse id 1 while the first is still in flight, so the first is
+	// superseded.
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	st.Ingest(env(2, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+
+	if len(m.full) == 0 || m.full[0].Call == nil || m.full[0].Call.State != store.Superseded {
+		t.Fatalf("first frame should be a superseded call, got %+v", m.full[0].Call)
+	}
+	// The request row now carries an in-row superseded status rather than an empty
+	// cell (the STATUS column truncates it, so assert the cell before truncation).
+	if got := m.streamCells(m.full[0]).status; got != "superseded" {
+		t.Fatalf("superseded request status = %q, want superseded", got)
+	}
+	// And it is styled as a warning (yellow), not a success (green). Compare the
+	// style foreground, which survives the color-stripping the test env applies to
+	// rendered output.
+	fg := m.statusStyle(m.full[0]).GetForeground()
+	if fg != m.styles.warn.GetForeground() {
+		t.Fatal("superseded status should use the warn style")
+	}
+	if fg == m.styles.resp.GetForeground() {
+		t.Fatal("superseded status must not use the success style")
+	}
+}
+
 func TestRefreshClampsInspectWhenTimelineShrinks(t *testing.T) {
 	st := store.New()
 	seed(st)

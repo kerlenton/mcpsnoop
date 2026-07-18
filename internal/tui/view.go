@@ -628,6 +628,9 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			if e.Call.State == store.Pending {
 				c.status = "pending"
 				c.dur = m.spinnerFrame() + " " + e.Call.Duration().Round(100*time.Millisecond).String()
+			} else if e.Call.State == store.Superseded {
+				// Its id was reused while in flight, so it will never be answered.
+				c.status = "superseded"
 			}
 		}
 	case store.EventResponse:
@@ -731,6 +734,8 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 		switch {
 		case e.Call.State == store.Pending:
 			return m.styles.pending
+		case e.Call.State == store.Superseded:
+			return m.styles.warn // never answered, not a success
 		case e.Call.Failed():
 			return m.styles.respErr
 		default:

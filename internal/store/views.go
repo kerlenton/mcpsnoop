@@ -423,6 +423,11 @@ func (s *Store) ToolSummary(sessionID string) (SessionToolSummary, bool) {
 			agg.stats.Pending++
 			continue
 		}
+		if c.state == Superseded {
+			// Its id was reused, so it was never answered. It still counts as a call
+			// (like a pending one), but has no real latency to feed the percentiles.
+			continue
+		}
 		if c.err != nil || c.toolErr {
 			agg.stats.Errors++
 		}
