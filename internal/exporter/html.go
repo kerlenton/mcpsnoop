@@ -36,6 +36,7 @@ main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
 .status.ok { color:var(--resp); }
 .status.error { color:var(--err); }
 .status.warn { color:var(--warn); }
+.status.superseded { color:var(--warn); }
 .status.pending { color:var(--pending); }
 .status.bad { color:var(--invalid); }
 /* Per-event tone by kind/status, matching the TUI stream colors. */
@@ -167,7 +168,7 @@ const statusOf = (ev, call) => {
     if (call.status === "error") return "error";
     return call.status;
   }
-  return call.status === "pending" ? "pending" : "";
+  return call.status === "pending" || call.status === "superseded" ? call.status : "";
 };
 const renderEvent = (ev) => {
   const call = ev.call_index == null ? null : calls[ev.call_index];

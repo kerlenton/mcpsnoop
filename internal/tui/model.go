@@ -796,6 +796,10 @@ func (m *Model) refresh() {
 	full := m.store.Timeline(m.streamSessionID)
 	m.full = full
 	m.total = len(full)
+	// m.inspect indexes m.full, and several inspector readers index it directly, so
+	// keep it in range when the timeline shrinks (e.g. a session delete), the same
+	// way m.selEvent is clamped below.
+	m.inspect = clamp(m.inspect, 0, max(len(m.full)-1, 0))
 	m.timeline = m.filterEvents(full)
 	// Count signals over the whole session, not the filtered view, so a stream
 	// filter never hides the session's health in the footer.

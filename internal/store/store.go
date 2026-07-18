@@ -27,6 +27,9 @@ const (
 	Completed
 	// Failed means an error response arrived.
 	Failed
+	// Superseded means the request's id was reused by a later in-flight request, so
+	// this one can never be matched to a response. It is no longer pending.
+	Superseded
 )
 
 func (s CallState) String() string {
@@ -35,6 +38,8 @@ func (s CallState) String() string {
 		return "completed"
 	case Failed:
 		return "failed"
+	case Superseded:
+		return "superseded"
 	default:
 		return "pending"
 	}
@@ -328,6 +333,15 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 	key := callKey{dir: e.Direction, id: id}
 	prev, ok := sess.calls[key]
 	reused := ok && prev.state == Pending
+	if reused {
+		// The earlier in-flight call keeps this id, so it will never be matched now.
+		// Mark it superseded (not pending) so the timeline stops rendering it as a
+		// hanging request and agrees with the pending counter, which Ingest leaves
+		// unchanged on a reuse. The "reuses an id already in flight" warning on the
+		// new request is the explanation.
+		prev.state = Superseded
+		prev.end = e.TS
+	}
 	c := &call{
 		id:     id,
 		method: msg.Method,

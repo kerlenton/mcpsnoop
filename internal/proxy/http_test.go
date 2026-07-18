@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,6 +50,76 @@ func TestHTTPProxyJSON(t *testing.T) {
 	}
 	if len(s2c) != 1 || string(s2c[0].Raw) != wantResp {
 		t.Fatalf("s2c = %+v", s2c)
+	}
+}
+
+func TestHTTPProxyObservesIdentityDespiteClientGzip(t *testing.T) {
+	const msg = `{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			// A server that would compress if asked. mcpsnoop must have forced
+			// identity in the Director, so this branch should not be taken.
+			w.Header().Set("Content-Encoding", "gzip")
+			gz := gzip.NewWriter(w)
+			_, _ = gz.Write([]byte(msg))
+			_ = gz.Close()
+			return
+		}
+		_, _ = io.WriteString(w, msg)
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip") // the client prefers gzip
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	s2c := sink.byDir(ServerToClient)
+	if len(s2c) != 1 {
+		t.Fatalf("s2c frames = %d, want 1", len(s2c))
+	}
+	if string(s2c[0].Raw) != msg {
+		t.Fatalf("observed frame = raw %q text %q, want the decoded JSON %q", s2c[0].Raw, s2c[0].Text, msg)
+	}
+}
+
+func TestHTTPProxySkipsObservingAStillCompressedBody(t *testing.T) {
+	const msg = `{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A stubborn server that compresses even though identity was requested.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		_, _ = gz.Write([]byte(msg))
+		_ = gz.Close()
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	resp, err := http.Post(front.URL, "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	// The body is still compressed, so mcpsnoop observes nothing for it rather than
+	// pushing binary noise into a frame.
+	if s2c := sink.byDir(ServerToClient); len(s2c) != 0 {
+		t.Fatalf("expected no observed s2c frame for a compressed body, got %+v", s2c)
 	}
 }
 

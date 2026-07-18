@@ -161,6 +161,38 @@ func resp(seq uint64, ts time.Time, dir proxy.Direction, id, body string) proxy.
 	return proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: ts, Direction: dir, Raw: json.RawMessage(raw)}
 }
 
+func TestReusedRequestIdKeepsPendingCounterAndTimelineInSync(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	// Two requests reuse id 1 while the first is still in flight (no response).
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"a"}`))
+	s.Ingest(req(2, t0.Add(time.Millisecond), proxy.ClientToServer, "1", "tools/call", `{"name":"b"}`))
+
+	header := s.Sessions()[0]
+	events := s.Timeline("s1")
+	timelinePending := 0
+	for _, ev := range events {
+		if ev.Kind == EventRequest && ev.Call != nil && ev.Call.State == Pending {
+			timelinePending++
+		}
+	}
+	// The counter and the timeline must tell the same story.
+	if header.Pending != timelinePending {
+		t.Fatalf("pending disagree: header %d, timeline %d", header.Pending, timelinePending)
+	}
+	if header.Pending != 1 {
+		t.Fatalf("header pending = %d, want 1", header.Pending)
+	}
+	// The superseded first request is no longer pending, and the reuse is explained
+	// on the second request.
+	if events[0].Call == nil || events[0].Call.State != Superseded {
+		t.Fatalf("first call should be superseded, got %+v", events[0].Call)
+	}
+	if !strings.Contains(events[1].Warning, "reuses an id already in flight") {
+		t.Fatalf("second request should warn about id reuse, got %q", events[1].Warning)
+	}
+}
+
 func TestActivityBuckets(t *testing.T) {
 	st := New()
 	now := time.Now()
@@ -303,6 +335,46 @@ func TestToolLevelError(t *testing.T) {
 	}
 	if h := s.Sessions()[0]; h.Errors != 1 {
 		t.Fatalf("session errors = %d, want 1", h.Errors)
+	}
+}
+
+func TestToolSummarySkipsSupersededCallLatency(t *testing.T) {
+	t0 := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+
+	withSuperseded := New()
+	// One completed echo call at 25ms.
+	withSuperseded.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"echo"}`))
+	withSuperseded.Ingest(resp(2, t0.Add(25*time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[]}`))
+	// id 2 is reused a full second later, so the first of the pair is superseded.
+	withSuperseded.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/call", `{"name":"echo"}`))
+	withSuperseded.Ingest(req(4, t0.Add(time.Second), proxy.ClientToServer, "2", "tools/call", `{"name":"echo"}`))
+
+	sum, ok := withSuperseded.ToolSummary("s1")
+	if !ok || len(sum.Tools) != 1 {
+		t.Fatalf("ToolSummary = %+v ok %v", sum, ok)
+	}
+	echo := sum.Tools[0]
+	// The superseded call still counts as a call (like a pending one) but feeds no
+	// duration and no error, so the percentiles come only from the completed call.
+	if echo.Calls != 3 || echo.Pending != 1 || echo.Errors != 0 {
+		t.Fatalf("echo calls/pending/errors = %d/%d/%d, want 3/1/0", echo.Calls, echo.Pending, echo.Errors)
+	}
+	if echo.P50 != 25*time.Millisecond || echo.P95 != 25*time.Millisecond {
+		t.Fatalf("echo percentiles = %s/%s, want 25ms from the completed call only", echo.P50, echo.P95)
+	}
+	for _, sc := range sum.Slowest {
+		if sc.Duration >= time.Second {
+			t.Fatalf("a fabricated superseded duration leaked into slowest: %+v", sc)
+		}
+	}
+
+	// The percentiles match a run without the superseded call at all.
+	control := New()
+	control.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"echo"}`))
+	control.Ingest(resp(2, t0.Add(25*time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[]}`))
+	cs, _ := control.ToolSummary("s1")
+	if cs.Tools[0].P50 != echo.P50 || cs.Tools[0].P95 != echo.P95 || cs.Tools[0].P99 != echo.P99 {
+		t.Fatalf("percentiles differ from a run without the superseded call: %+v vs %+v", echo, cs.Tools[0])
 	}
 }
 

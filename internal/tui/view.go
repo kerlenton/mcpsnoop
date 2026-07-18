@@ -628,6 +628,9 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			if e.Call.State == store.Pending {
 				c.status = "pending"
 				c.dur = m.spinnerFrame() + " " + e.Call.Duration().Round(100*time.Millisecond).String()
+			} else if e.Call.State == store.Superseded {
+				// Its id was reused while in flight, so it will never be answered.
+				c.status = "superseded"
 			}
 		}
 	case store.EventResponse:
@@ -731,6 +734,8 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 		switch {
 		case e.Call.State == store.Pending:
 			return m.styles.pending
+		case e.Call.State == store.Superseded:
+			return m.styles.warn // never answered, not a success
 		case e.Call.Failed():
 			return m.styles.respErr
 		default:
@@ -898,6 +903,9 @@ func (m Model) inspectorBody() string {
 // meta joined by faint dots on the left and the pair widget plus timestamp on the
 // right, sized to width w.
 func (m Model) inspectorHeader(w int) string {
+	if m.inspect < 0 || m.inspect >= len(m.full) {
+		return ""
+	}
 	e := m.full[m.inspect]
 	c := m.streamCells(e)
 	sep := m.styles.faint.Render(" · ")
@@ -951,6 +959,9 @@ func (m Model) inspectorHeaderH() int {
 // pending in cyan while a request awaits its response, or a plain seq N for a
 // frame with no pair.
 func (m Model) pairWidget() string {
+	if m.inspect < 0 || m.inspect >= len(m.full) {
+		return ""
+	}
 	e := m.full[m.inspect]
 	plain := m.styles.faint.Render(fmt.Sprintf("seq %d", e.Seq))
 	if e.Call == nil {
