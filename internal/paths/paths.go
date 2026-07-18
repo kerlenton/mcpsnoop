@@ -54,6 +54,13 @@ func ExportsDir() string {
 	return d
 }
 
+// ToolBaselinesDir holds trust-on-first-use tool definitions per server label.
+func ToolBaselinesDir() string {
+	d := filepath.Join(Base(), "tool-baselines")
+	_ = os.MkdirAll(d, 0o700)
+	return d
+}
+
 // SessionLogPath returns the JSONL trace path for a given session id.
 func SessionLogPath(sessionID string) string {
 	return filepath.Join(SessionsDir(), sessionID+".jsonl")

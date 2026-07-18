@@ -391,7 +391,16 @@ func (m Model) renderSessionsTable(w, h int) string {
 				break
 			}
 		}
-		segs := []cell{seg(cellL(s.Label, nameW), m.styles.neutral)}
+		name := s.Label
+		nameStyle := m.styles.neutral
+		if s.HasToolBaselineError {
+			name = "! baseline " + name
+			nameStyle = m.styles.respErr
+		} else if s.HasToolDrift {
+			name = "! drift " + name
+			nameStyle = m.styles.warn
+		}
+		segs := []cell{seg(cellL(name, nameW), nameStyle)}
 		if showClient {
 			client := valueOr(m.clients[s.ID], "-")
 			segs = append(segs, gap, seg(cellL(client, clientW), m.styles.dim))
@@ -1165,11 +1174,12 @@ func (m Model) capsTitle(label, version string, w int) string {
 // summary table column widths, all padded with lipgloss.Width so styled cells
 // stay aligned.
 const (
-	sumToolW  = 18
-	sumCallsW = 7
-	sumErrW   = 6
-	sumLatW   = 10
-	covLabelW = 11
+	sumToolW    = 18
+	sumCallsW   = 7
+	sumErrW     = 6
+	sumLatW     = 10
+	covLabelW   = 11
+	driftLabelW = 20
 )
 
 func (m Model) summaryContent() string {
@@ -1177,6 +1187,7 @@ func (m Model) summaryContent() string {
 	label := m.currentLabel()
 	summary, _ := m.store.ToolSummary(sid)
 	_, unused, undeclared, hasTools := m.store.ToolUsage(sid)
+	drift, hasDrift := m.store.ToolDrift(sid)
 	w, _ := m.overlayDims()
 
 	calls := 0
@@ -1191,11 +1202,19 @@ func (m Model) summaryContent() string {
 	gap := max(w-lipgloss.Width(left)-lipgloss.Width(right), 1)
 	header := left + strings.Repeat(" ", gap) + right
 
-	if len(summary.Tools) == 0 && !hasTools {
+	if len(summary.Tools) == 0 && !hasTools && !hasDrift {
 		return header + "\n\n" + m.styles.dim.Render("no tool calls observed yet for this session")
 	}
 
 	var sections []string
+	if hasDrift && drift.BaselineError != "" {
+		sections = append(sections, m.styles.respErr.Render("tool baseline error")+"\n"+m.styles.warn.Render(drift.BaselineError))
+	}
+	if hasDrift && !drift.Empty() {
+		if drift.Count() > 0 {
+			sections = append(sections, m.definitionDriftSection(drift, w))
+		}
+	}
 
 	// TABLE: every advertised tool plus any called one, so the full tool set is
 	// visible from the start and its counts fill in as calls arrive. Uncalled
@@ -1257,6 +1276,26 @@ func (m Model) summaryContent() string {
 	}
 
 	return header + "\n\n" + strings.Join(sections, "\n\n")
+}
+
+func (m Model) definitionDriftSection(drift store.ToolDrift, width int) string {
+	var lines []string
+	for _, change := range []struct {
+		label string
+		names []string
+	}{
+		{"added", drift.AddedTools},
+		{"removed", drift.RemovedTools},
+		{"description changed", drift.ChangedDescriptions},
+		{"schema changed", drift.ChangedSchemas},
+	} {
+		if len(change.names) == 0 {
+			continue
+		}
+		indent := strings.Repeat(" ", driftLabelW)
+		lines = append(lines, m.styles.dim.Render(cellL(change.label, driftLabelW))+m.styles.warn.Render(wrapWords(change.names, indent, width)))
+	}
+	return m.styles.warn.Render("tool definition drift") + "\n" + strings.Join(lines, "\n")
 }
 
 // wrapWords lays space-separated words into lines no wider than width, each

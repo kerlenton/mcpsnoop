@@ -97,6 +97,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, or otlp |
 | `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, or hung calls |
+| `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
 | `mcpsnoop remote <user@host>` | print the SSH tunnel command |
@@ -112,6 +113,7 @@ Run `mcpsnoop help` for the full list, or `mcpsnoop help <command>` for the flag
 | Flags hung calls and stream errors | no | yes |
 | Flags stray output that corrupts the stream | no | yes |
 | Flags malformed JSON-RPC frames | no | yes |
+| Detects tool definition drift after approval | no | yes |
 | Interactive terminal UI | no | yes |
 | Zero-config, no flags or ordering | no | yes |
 | Capability inspector | partial | yes |
@@ -254,9 +256,9 @@ mcpsnoop diff before-session after-session
 mcpsnoop diff old.jsonl new.jsonl
 ```
 
-The report shows tools that were added or removed, `inputSchema` changes,
-matching tool calls whose status changed, and notable duration shifts. Calls are
-matched by tool name and arguments, so reordered calls still compare correctly.
+The report shows tools that were added or removed, description and `inputSchema`
+changes, matching tool calls whose status changed, and notable duration shifts. Calls
+are matched by tool name and arguments, so reordered calls still compare correctly.
 By default, duration changes must differ by at least 100 ms and 2x; use
 `--duration-threshold` and `--duration-ratio` to adjust those cutoffs.
 
@@ -284,6 +286,26 @@ mcpsnoop check build-agent
 mcpsnoop check --fail-on error,invalid artifacts/session.jsonl
 mcpsnoop check --fail-on mismatch gateway-run.jsonl
 ```
+
+### Detect tool definition drift
+
+The first complete `tools/list` observed for a server label becomes its trusted
+baseline. Later sessions compare tool descriptions and input schemas with that
+baseline, including tools that were added or removed. The sessions table and
+tool summary flag drift without blocking or changing MCP traffic.
+
+Use a stable, unique `--label` for each server whose command name or target host
+would otherwise collide. Baselines are stored under the normal mcpsnoop state
+directory, so `MCPSNOOP_HOME` and `XDG_STATE_HOME` apply.
+
+```bash
+mcpsnoop check --fail-on drift session.jsonl
+mcpsnoop baseline session.jsonl
+mcpsnoop baseline --accept session.jsonl  # trust a legitimate definition change
+mcpsnoop baseline --reset session.jsonl   # trust the next complete tools/list
+```
+
+`drift` is opt-in for `check`; the default `error,invalid,warn` gate is unchanged.
 
 ## Watching from another machine
 

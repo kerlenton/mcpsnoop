@@ -16,14 +16,14 @@ func TestCompareReportsToolCallAndDurationChanges(t *testing.T) {
 	before := exporter.SessionExport{
 		Session: exporter.SessionSummary{ID: "before"},
 		Calls: []exporter.CallExport{
-			listCall(`{"tools":[{"name":"search","inputSchema":{"type":"object","properties":{"query":{"type":"string"}}}},{"name":"old","inputSchema":{}}]}`),
+			listCall(`{"tools":[{"name":"search","description":"Search docs","inputSchema":{"type":"object","properties":{"query":{"type":"string"}}}},{"name":"old","inputSchema":{}}]}`),
 			toolCall("search", `{"name":"search","arguments":{"limit":5,"query":"ruff"}}`, "ok", &beforeDuration),
 		},
 	}
 	after := exporter.SessionExport{
 		Session: exporter.SessionSummary{ID: "after"},
 		Calls: []exporter.CallExport{
-			listCall(`{"tools":[{"name":"search","inputSchema":{"properties":{"query":{"minLength":1,"type":"string"}},"type":"object"}},{"name":"summarize","inputSchema":{}}]}`),
+			listCall(`{"tools":[{"name":"search","description":"Search private docs","inputSchema":{"properties":{"query":{"minLength":1,"type":"string"}},"type":"object"}},{"name":"summarize","inputSchema":{}}]}`),
 			toolCall("search", `{"arguments":{"query":"ruff","limit":5},"name":"search"}`, "error", &afterDuration),
 		},
 	}
@@ -39,6 +39,9 @@ func TestCompareReportsToolCallAndDurationChanges(t *testing.T) {
 	if !slices.Equal(report.RemovedTools, []string{"old"}) {
 		t.Fatalf("removed tools = %v", report.RemovedTools)
 	}
+	if !slices.Equal(report.ChangedDescriptions, []string{"search"}) {
+		t.Fatalf("changed descriptions = %v", report.ChangedDescriptions)
+	}
 	if !slices.Equal(report.ChangedSchemas, []string{"search"}) {
 		t.Fatalf("changed schemas = %v", report.ChangedSchemas)
 	}
@@ -53,6 +56,22 @@ func TestCompareReportsToolCallAndDurationChanges(t *testing.T) {
 	}
 	if got := report.DurationChanges[0]; got.Before != 100*time.Millisecond || got.After != 350*time.Millisecond {
 		t.Fatalf("duration change = %+v", got)
+	}
+}
+
+func TestCompareToolDefinitionsDetectsDescriptionOnlyChanges(t *testing.T) {
+	before := []ToolDefinition{{
+		Name: "search", Description: "Search docs",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`),
+	}}
+	after := []ToolDefinition{{
+		Name: "search", Description: "Search private docs",
+		InputSchema: json.RawMessage(`{"properties":{"q":{"type":"string"}},"type":"object"}`),
+	}}
+
+	changes := CompareToolDefinitions(before, after)
+	if !slices.Equal(changes.ChangedDescriptions, []string{"search"}) || len(changes.ChangedSchemas) != 0 {
+		t.Fatalf("tool changes = %+v", changes)
 	}
 }
 
@@ -106,6 +125,7 @@ func TestHasRegression(t *testing.T) {
 		{"empty", Report{}, false},
 		{"added tool only", Report{AddedTools: []string{"x"}}, false},
 		{"removed tool", Report{RemovedTools: []string{"x"}}, true},
+		{"description changed", Report{ChangedDescriptions: []string{"x"}}, true},
 		{"schema changed", Report{ChangedSchemas: []string{"x"}}, true},
 		{"status worse", Report{CallChanges: []CallChange{{Before: "ok", After: "error"}}}, true},
 		{"status better", Report{CallChanges: []CallChange{{Before: "error", After: "ok"}}}, false},

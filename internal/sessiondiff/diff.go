@@ -25,13 +25,29 @@ type Options struct {
 }
 
 type Report struct {
-	BeforeSession   string
-	AfterSession    string
-	AddedTools      []string
-	RemovedTools    []string
-	ChangedSchemas  []string
-	CallChanges     []CallChange
-	DurationChanges []DurationChange
+	BeforeSession       string
+	AfterSession        string
+	AddedTools          []string
+	RemovedTools        []string
+	ChangedDescriptions []string
+	ChangedSchemas      []string
+	CallChanges         []CallChange
+	DurationChanges     []DurationChange
+}
+
+// ToolDefinition is the behavior-affecting contract advertised for one MCP tool.
+type ToolDefinition struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
+}
+
+// ToolChanges contains definition differences between two complete tool lists.
+type ToolChanges struct {
+	AddedTools          []string
+	RemovedTools        []string
+	ChangedDescriptions []string
+	ChangedSchemas      []string
 }
 
 type CallChange struct {
@@ -51,6 +67,7 @@ type DurationChange struct {
 func (r Report) Empty() bool {
 	return len(r.AddedTools) == 0 &&
 		len(r.RemovedTools) == 0 &&
+		len(r.ChangedDescriptions) == 0 &&
 		len(r.ChangedSchemas) == 0 &&
 		len(r.CallChanges) == 0 &&
 		len(r.DurationChanges) == 0
@@ -61,7 +78,7 @@ func (r Report) Empty() bool {
 // change), a call whose status got worse, or a call that got notably slower.
 // Improvements, added tools, fixed calls, and speedups do not count.
 func (r Report) HasRegression() bool {
-	if len(r.RemovedTools) > 0 || len(r.ChangedSchemas) > 0 {
+	if len(r.RemovedTools) > 0 || len(r.ChangedDescriptions) > 0 || len(r.ChangedSchemas) > 0 {
 		return true
 	}
 	for _, change := range r.CallChanges {
@@ -102,25 +119,11 @@ func Compare(before, after exporter.SessionExport, opts Options) Report {
 		BeforeSession: before.Session.ID,
 		AfterSession:  after.Session.ID,
 	}
-	beforeTools := listedTools(before)
-	afterTools := listedTools(after)
-	for name, beforeSchema := range beforeTools {
-		afterSchema, ok := afterTools[name]
-		switch {
-		case !ok:
-			report.RemovedTools = append(report.RemovedTools, name)
-		case beforeSchema != afterSchema:
-			report.ChangedSchemas = append(report.ChangedSchemas, name)
-		}
-	}
-	for name := range afterTools {
-		if _, ok := beforeTools[name]; !ok {
-			report.AddedTools = append(report.AddedTools, name)
-		}
-	}
-	slices.Sort(report.AddedTools)
-	slices.Sort(report.RemovedTools)
-	slices.Sort(report.ChangedSchemas)
+	toolChanges := CompareToolDefinitions(listedTools(before), listedTools(after))
+	report.AddedTools = toolChanges.AddedTools
+	report.RemovedTools = toolChanges.RemovedTools
+	report.ChangedDescriptions = toolChanges.ChangedDescriptions
+	report.ChangedSchemas = toolChanges.ChangedSchemas
 
 	beforeCalls := callsBySignature(before)
 	afterCalls := callsBySignature(after)
@@ -165,7 +168,7 @@ func WriteText(w io.Writer, report Report) error {
 		_, err := fmt.Fprintln(w, "no differences found")
 		return err
 	}
-	if len(report.AddedTools)+len(report.RemovedTools)+len(report.ChangedSchemas) > 0 {
+	if len(report.AddedTools)+len(report.RemovedTools)+len(report.ChangedDescriptions)+len(report.ChangedSchemas) > 0 {
 		if _, err := fmt.Fprintln(w, "tools:"); err != nil {
 			return err
 		}
@@ -176,6 +179,11 @@ func WriteText(w io.Writer, report Report) error {
 		}
 		for _, name := range report.RemovedTools {
 			if _, err := fmt.Fprintf(w, "  removed: %s\n", name); err != nil {
+				return err
+			}
+		}
+		for _, name := range report.ChangedDescriptions {
+			if _, err := fmt.Fprintf(w, "  description changed: %s\n", name); err != nil {
 				return err
 			}
 		}
@@ -214,8 +222,54 @@ func WriteText(w io.Writer, report Report) error {
 	return nil
 }
 
-func listedTools(session exporter.SessionExport) map[string]string {
-	tools := make(map[string]string)
+// CompareToolDefinitions reports behavior-affecting differences between two
+// complete tool lists. Schema JSON is canonicalized before comparison.
+func CompareToolDefinitions(before, after []ToolDefinition) ToolChanges {
+	beforeTools := toolDefinitionsByName(before)
+	afterTools := toolDefinitionsByName(after)
+	var changes ToolChanges
+	for name, trusted := range beforeTools {
+		observed, ok := afterTools[name]
+		switch {
+		case !ok:
+			changes.RemovedTools = append(changes.RemovedTools, name)
+		default:
+			if trusted.Description != observed.Description {
+				changes.ChangedDescriptions = append(changes.ChangedDescriptions, name)
+			}
+			if canonicalJSON(trusted.InputSchema) != canonicalJSON(observed.InputSchema) {
+				changes.ChangedSchemas = append(changes.ChangedSchemas, name)
+			}
+		}
+	}
+	for name := range afterTools {
+		if _, ok := beforeTools[name]; !ok {
+			changes.AddedTools = append(changes.AddedTools, name)
+		}
+	}
+	slices.Sort(changes.AddedTools)
+	slices.Sort(changes.RemovedTools)
+	slices.Sort(changes.ChangedDescriptions)
+	slices.Sort(changes.ChangedSchemas)
+	return changes
+}
+
+func toolDefinitionsByName(definitions []ToolDefinition) map[string]ToolDefinition {
+	tools := make(map[string]ToolDefinition, len(definitions))
+	for _, definition := range definitions {
+		if definition.Name == "" {
+			continue
+		}
+		if _, exists := tools[definition.Name]; exists {
+			continue
+		}
+		tools[definition.Name] = definition
+	}
+	return tools
+}
+
+func listedTools(session exporter.SessionExport) []ToolDefinition {
+	tools := make(map[string]ToolDefinition)
 	for _, call := range session.Calls {
 		if call.Method != "tools/list" {
 			continue
@@ -223,6 +277,7 @@ func listedTools(session exporter.SessionExport) map[string]string {
 		var result struct {
 			Tools []struct {
 				Name        string          `json:"name"`
+				Description string          `json:"description"`
 				InputSchema json.RawMessage `json:"inputSchema"`
 			} `json:"tools"`
 		}
@@ -239,10 +294,19 @@ func listedTools(session exporter.SessionExport) map[string]string {
 			if _, exists := tools[tool.Name]; exists {
 				continue
 			}
-			tools[tool.Name] = canonicalJSON(tool.InputSchema)
+			tools[tool.Name] = ToolDefinition{
+				Name:        tool.Name,
+				Description: tool.Description,
+				InputSchema: append(json.RawMessage(nil), tool.InputSchema...),
+			}
 		}
 	}
-	return tools
+	definitions := make([]ToolDefinition, 0, len(tools))
+	for _, definition := range tools {
+		definitions = append(definitions, definition)
+	}
+	slices.SortFunc(definitions, func(a, b ToolDefinition) int { return strings.Compare(a.Name, b.Name) })
+	return definitions
 }
 
 func hasCursor(params json.RawMessage) bool {

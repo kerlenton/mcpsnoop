@@ -8,8 +8,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/kerlenton/mcpsnoop/internal/hub"
+	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
+	"github.com/kerlenton/mcpsnoop/internal/toolbaseline"
 )
 
 // Run starts the hub and the live TUI. It blocks until the user quits or ctx is
@@ -18,10 +20,18 @@ import (
 // ready and keeps pending-call timers live.
 func Run(ctx context.Context, socketPath, sessionsDir string) error {
 	st := store.New()
+	baselines := toolbaseline.New(paths.ToolBaselinesDir())
 	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx))
 
 	h := hub.New(socketPath, sessionsDir, func(e proxy.Envelope) {
-		st.Ingest(e)
+		event := st.Ingest(e)
+		if event.Kind == store.EventResponse && event.Call != nil && event.Call.Method == "tools/list" {
+			if _, complete := st.ToolDefinitions(e.SessionID); complete {
+				if _, _, err := toolbaseline.ObserveSession(baselines, st, e.SessionID); err != nil {
+					st.SetToolDrift(e.SessionID, store.ToolDrift{BaselineError: err.Error()})
+				}
+			}
+		}
 		p.Send(frameMsg{})
 	})
 
@@ -39,6 +49,9 @@ func Run(ctx context.Context, socketPath, sessionsDir string) error {
 
 // RunOpen starts the TUI using a preloaded store without starting the live hub.
 func RunOpen(ctx context.Context, st *store.Store) error {
+	if err := toolbaseline.ObserveAll(toolbaseline.New(paths.ToolBaselinesDir()), st); err != nil {
+		return err
+	}
 	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx))
 
 	_, err := p.Run()
@@ -50,6 +63,9 @@ func RunOpen(ctx context.Context, st *store.Store) error {
 
 // RunOpenWithInput starts the TUI using a preloaded store and a custom input reader (e.g., controlling TTY).
 func RunOpenWithInput(ctx context.Context, st *store.Store, in io.Reader) error {
+	if err := toolbaseline.ObserveAll(toolbaseline.New(paths.ToolBaselinesDir()), st); err != nil {
+		return err
+	}
 	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx), tea.WithInput(in))
 	_, err := p.Run()
 	if errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, context.Canceled) {

@@ -68,16 +68,41 @@ type EventView struct {
 
 // SessionHeader is a lightweight per-session summary for the left panel.
 type SessionHeader struct {
-	ID            string
-	Label         string
-	First         time.Time
-	Last          time.Time
-	Requests      int
-	Responses     int
-	Notifications int
-	Errors        int
-	Pending       int
-	HasCaps       bool
+	ID                   string
+	Label                string
+	First                time.Time
+	Last                 time.Time
+	Requests             int
+	Responses            int
+	Notifications        int
+	Errors               int
+	Pending              int
+	HasCaps              bool
+	HasToolDrift         bool
+	HasToolBaselineError bool
+}
+
+// ToolDefinition is the contract a server advertised for one MCP tool.
+type ToolDefinition struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
+}
+
+// ToolDrift is the difference between the current complete tool list and the
+// persisted trust-on-first-use baseline for the session's server label.
+type ToolDrift struct {
+	AddedTools          []string
+	RemovedTools        []string
+	ChangedDescriptions []string
+	ChangedSchemas      []string
+	BaselineError       string
+}
+
+func (d ToolDrift) Empty() bool { return d.Count() == 0 && d.BaselineError == "" }
+
+func (d ToolDrift) Count() int {
+	return len(d.AddedTools) + len(d.RemovedTools) + len(d.ChangedDescriptions) + len(d.ChangedSchemas)
 }
 
 // CapsView is an immutable snapshot of the negotiated capabilities.
@@ -166,19 +191,70 @@ func (s *Store) Sessions() []SessionHeader {
 	for _, id := range s.order {
 		sess := s.sessions[id]
 		out = append(out, SessionHeader{
-			ID:            sess.id,
-			Label:         sess.label,
-			First:         sess.first,
-			Last:          sess.last,
-			Requests:      sess.requests,
-			Responses:     sess.responses,
-			Notifications: sess.notifications,
-			Errors:        sess.errors,
-			Pending:       sess.pending,
-			HasCaps:       sess.caps.set,
+			ID:                   sess.id,
+			Label:                sess.label,
+			First:                sess.first,
+			Last:                 sess.last,
+			Requests:             sess.requests,
+			Responses:            sess.responses,
+			Notifications:        sess.notifications,
+			Errors:               sess.errors,
+			Pending:              sess.pending,
+			HasCaps:              sess.caps.set,
+			HasToolDrift:         sess.toolDrift.Count() > 0,
+			HasToolBaselineError: sess.toolDrift.BaselineError != "",
 		})
 	}
 	return out
+}
+
+// ToolDefinitions returns the current complete tools/list definition set in
+// server order. ok is false until the final page of a listing has arrived.
+func (s *Store) ToolDefinitions(sessionID string) ([]ToolDefinition, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok || !sess.toolListComplete {
+		return nil, false
+	}
+	definitions := make([]ToolDefinition, 0, len(sess.advertisedTools))
+	for _, name := range sess.advertisedTools {
+		definition := sess.toolDefinitions[name]
+		definition.InputSchema = append(json.RawMessage(nil), definition.InputSchema...)
+		definitions = append(definitions, definition)
+	}
+	return definitions, true
+}
+
+// SetToolDrift attaches the current baseline comparison to a session.
+func (s *Store) SetToolDrift(sessionID string, drift ToolDrift) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[sessionID]; ok {
+		sess.toolDrift = drift
+		sess.toolDriftSet = true
+	}
+}
+
+// ToolDrift returns the current baseline comparison for a session.
+func (s *Store) ToolDrift(sessionID string) (ToolDrift, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok || !sess.toolDriftSet {
+		return ToolDrift{}, false
+	}
+	return cloneToolDrift(sess.toolDrift), true
+}
+
+func cloneToolDrift(drift ToolDrift) ToolDrift {
+	return ToolDrift{
+		AddedTools:          slices.Clone(drift.AddedTools),
+		RemovedTools:        slices.Clone(drift.RemovedTools),
+		ChangedDescriptions: slices.Clone(drift.ChangedDescriptions),
+		ChangedSchemas:      slices.Clone(drift.ChangedSchemas),
+		BaselineError:       drift.BaselineError,
+	}
 }
 
 // Timeline returns a snapshot of a session's events, oldest first. A nil slice
