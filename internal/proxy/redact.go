@@ -209,16 +209,33 @@ func (r Redactor) redactValue(v any) bool {
 		return changed
 	case []any:
 		changed := false
-		for i, child := range x {
-			if s, ok := child.(string); ok {
-				redacted := r.redactString(s)
-				if redacted != s {
-					x[i] = redacted
+		for i := 0; i < len(x); i++ {
+			s, ok := x[i].(string)
+			if !ok {
+				if r.redactValue(x[i]) {
 					changed = true
 				}
 				continue
 			}
-			if r.redactValue(child) {
+			// Best-effort argv redaction so a wrapped server started as
+			// `npx server --api-key=sk-x` does not write the secret in clear text.
+			// The "--flag=value" form redacts the value and keeps the flag.
+			if flag, _, found := strings.Cut(s, "="); found && r.argvFlagKey(flag) {
+				x[i] = flag + "=" + redactedValue
+				changed = true
+				continue
+			}
+			// The "--flag" form with its value in the next element redacts that one.
+			if r.argvFlagKey(s) && i+1 < len(x) {
+				if _, isStr := x[i+1].(string); isStr {
+					x[i+1] = redactedValue
+					changed = true
+					i++ // the value element is consumed
+					continue
+				}
+			}
+			if redacted := r.redactString(s); redacted != s {
+				x[i] = redacted
 				changed = true
 			}
 		}
@@ -226,6 +243,24 @@ func (r Redactor) redactValue(v any) bool {
 	default:
 		return false
 	}
+}
+
+// argvFlagKey reports whether arg is a command-line flag whose name is a redact
+// key. It only matches dashed tokens (so plain array strings are left to value
+// patterns), and normalizes the name the way object keys are, stripping the
+// leading dashes, turning dashes into underscores, and lowercasing, so `--api-key`
+// hits the api_key entry. It is best effort, an argument without a recognizable
+// flag name cannot be detected.
+func (r Redactor) argvFlagKey(arg string) bool {
+	if !strings.HasPrefix(arg, "-") {
+		return false
+	}
+	name := strings.ToLower(strings.ReplaceAll(strings.TrimLeft(arg, "-"), "-", "_"))
+	if name == "" {
+		return false
+	}
+	_, ok := r.keys[name]
+	return ok
 }
 
 func (r Redactor) redactString(s string) string {
@@ -257,3 +292,11 @@ func (s *redactingSink) Emit(env Envelope) {
 }
 
 func (s *redactingSink) Close() error { return s.next.Close() }
+
+// Dropped forwards the wrapped sink's drop count, so redaction does not hide it.
+func (s *redactingSink) Dropped() uint64 {
+	if d, ok := s.next.(DropCounter); ok {
+		return d.Dropped()
+	}
+	return 0
+}

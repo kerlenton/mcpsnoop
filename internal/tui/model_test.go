@@ -138,6 +138,46 @@ func TestRefreshClampsInspectWhenTimelineShrinks(t *testing.T) {
 	_ = m.pairWidget()
 }
 
+func TestFrameMsgDefersRefreshToThrottledTick(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+	// Settle by running one refresh cycle so dirty clears and m.full is current.
+	for range refreshEvery {
+		m = drive(t, m, tickMsg(time.Now()))
+	}
+	before := len(m.full)
+	if m.dirty {
+		t.Fatal("dirty should be clear after a settling tick")
+	}
+
+	// Deliver a frameMsg per envelope, exactly as the hub callback does.
+	for i := range 20 {
+		st.Ingest(env(uint64(5+i), proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/progress"}`))
+		m = drive(t, m, frameMsg{})
+	}
+	// Not one of them triggered a refresh. The timeline is unchanged and the model
+	// is only marked dirty, so the cost of a burst is bounded rather than per frame.
+	if len(m.full) != before {
+		t.Fatalf("frameMsg refreshed per frame: full %d -> %d", before, len(m.full))
+	}
+	if !m.dirty {
+		t.Fatal("frameMsg should mark the model dirty")
+	}
+
+	// One throttled tick cycle performs a single refresh and clears the flag.
+	for range refreshEvery {
+		m = drive(t, m, tickMsg(time.Now()))
+	}
+	if len(m.full) <= before {
+		t.Fatalf("a throttled tick should refresh once, full still %d", len(m.full))
+	}
+	if m.dirty {
+		t.Fatal("refresh should clear the dirty flag")
+	}
+}
+
 func TestSessionsTableAndDrillIn(t *testing.T) {
 	st := store.New()
 	seed(st)
@@ -527,6 +567,8 @@ func TestCapsOverlayUpdatesLive(t *testing.T) {
 	if m.overlay != overlayCaps {
 		t.Fatal("a live frame must not close the overlay")
 	}
+	// The live overlay refreshes on the tick, not per frame, so advance one tick.
+	m = drive(t, m, tickMsg(time.Now()))
 	if !strings.Contains(m.overlayRaw, "srv-impl") || !strings.Contains(m.overlayRaw, "● tools") {
 		t.Fatalf("caps overlay did not pick up the server handshake live\n%s", m.overlayRaw)
 	}
@@ -1069,6 +1111,8 @@ func TestSummaryUpdatesLive(t *testing.T) {
 	if m.overlay != overlaySummary {
 		t.Fatal("a live frame must not close the summary")
 	}
+	// The live overlay refreshes on the tick, not per frame, so advance one tick.
+	m = drive(t, m, tickMsg(time.Now()))
 	if !strings.Contains(m.overlayRaw, "search") {
 		t.Fatalf("summary did not pick up the new call live\n%s", m.overlayRaw)
 	}

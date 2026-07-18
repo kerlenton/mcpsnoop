@@ -193,15 +193,37 @@ func TestReusedRequestIdKeepsPendingCounterAndTimelineInSync(t *testing.T) {
 	}
 }
 
+func TestSessionReportsSeqGapAsMissingFrames(t *testing.T) {
+	now := time.Now()
+
+	gap := New()
+	gap.Ingest(req(1, now, proxy.ClientToServer, "1", "tools/list", ""))
+	gap.Ingest(req(2, now, proxy.ClientToServer, "2", "tools/list", ""))
+	// A jump from 2 to 5 means seq 3 and 4 were dropped upstream.
+	gap.Ingest(req(5, now, proxy.ClientToServer, "3", "tools/list", ""))
+	if h := gap.Sessions()[0]; h.MissingFrames != 2 {
+		t.Fatalf("missing frames = %d, want 2 for a seq gap of two", h.MissingFrames)
+	}
+
+	contiguous := New()
+	for seq := uint64(1); seq <= 4; seq++ {
+		contiguous.Ingest(req(seq, now, proxy.ClientToServer, fmt.Sprintf("%d", seq), "tools/list", ""))
+	}
+	if h := contiguous.Sessions()[0]; h.MissingFrames != 0 {
+		t.Fatalf("a contiguous session should report zero missing, got %d", h.MissingFrames)
+	}
+}
+
 func TestActivityBuckets(t *testing.T) {
 	st := New()
 	now := time.Now()
-	// Two frames in the most recent bucket, one about a minute old, and one well
-	// outside the two minute window that must be ignored.
-	st.Ingest(req(1, now, proxy.ClientToServer, "1", "tools/list", ""))
-	st.Ingest(req(2, now, proxy.ClientToServer, "2", "tools/list", ""))
-	st.Ingest(req(3, now.Add(-60*time.Second), proxy.ClientToServer, "3", "tools/list", ""))
-	st.Ingest(req(4, now.Add(-10*time.Minute), proxy.ClientToServer, "4", "tools/list", ""))
+	// Frames arrive oldest first, as a real session does. One is well outside the
+	// two minute window and must be ignored, one is about a minute old, then two
+	// land in the most recent bucket.
+	st.Ingest(req(1, now.Add(-10*time.Minute), proxy.ClientToServer, "1", "tools/list", ""))
+	st.Ingest(req(2, now.Add(-60*time.Second), proxy.ClientToServer, "2", "tools/list", ""))
+	st.Ingest(req(3, now, proxy.ClientToServer, "3", "tools/list", ""))
+	st.Ingest(req(4, now, proxy.ClientToServer, "4", "tools/list", ""))
 
 	buckets := st.Activity("s1", 8, 2*time.Minute)
 	if len(buckets) != 8 {

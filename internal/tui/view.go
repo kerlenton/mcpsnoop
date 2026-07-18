@@ -203,6 +203,10 @@ func (m Model) footerCounters() string {
 		return strings.Join(parts, sep)
 	}
 	parts := []string{m.styles.faint.Render(countLabel(len(m.timeline), m.total, "frame"))}
+	// Dropped frames leave a Seq gap and mean the trace is incomplete, so flag them.
+	if missing := m.currentMissingFrames(); missing > 0 {
+		parts = append(parts, m.styles.respErr.Render(fmt.Sprintf("%d missing", missing)))
+	}
 	c := m.streamSignals
 	for _, sig := range []struct {
 		n     int
@@ -219,6 +223,17 @@ func (m Model) footerCounters() string {
 		}
 	}
 	return strings.Join(parts, sep)
+}
+
+// currentMissingFrames returns the dropped-frame count for the session being
+// streamed, inferred from Seq gaps by the store.
+func (m Model) currentMissingFrames() uint64 {
+	for _, s := range m.allSessions {
+		if s.ID == m.streamSessionID {
+			return s.MissingFrames
+		}
+	}
+	return 0
 }
 
 // countLabel renders a plain total, or shown/total when a filter is hiding some

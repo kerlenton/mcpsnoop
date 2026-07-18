@@ -142,6 +142,9 @@ type session struct {
 	events  []*event
 
 	requests, responses, notifications, errors, pending int
+
+	lastSeq uint64 // highest per-session Seq seen, for gap detection
+	missing uint64 // envelopes dropped upstream, inferred from Seq gaps
 }
 
 // Store is the concurrency-safe collector the hub feeds and the TUI reads.
@@ -182,6 +185,17 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	defer s.mu.Unlock()
 
 	sess := s.sessionFor(e)
+
+	// Track gaps in the monotonic per-session Seq. A jump larger than one means
+	// envelopes were dropped upstream (a full sink buffer) or lost from the log.
+	// Doing it here surfaces drops whether the frames arrive live or are read back
+	// from a gappy file through open or export.
+	if e.Seq > sess.lastSeq {
+		if expected := sess.lastSeq + 1; e.Seq > expected {
+			sess.missing += e.Seq - expected
+		}
+		sess.lastSeq = e.Seq
+	}
 
 	if e.Direction == proxy.DirectionMeta {
 		var meta proxy.SessionMeta

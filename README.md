@@ -77,9 +77,13 @@ label = "filesystem"
 trace-file = "trace.jsonl"
 redact-secrets = true
 redact-key = "token,authorization"
+redact-value = "sk-[A-Za-z0-9]+"
 redact-path = "$.params.arguments.password"
 no-trace = false
 ```
+
+Repeat `redact-key`, `redact-value`, and `redact-path` on their own lines to add
+more than one of each.
 
 Those are all the keys it supports.
 
@@ -389,7 +393,11 @@ your client config.
 Captured frames can include prompts, tool arguments, credentials, and tool
 results. If payloads can carry secrets, opt in to redaction to scrub the
 observed trace copies while the proxied bytes still pass through unchanged.
-Key-based redaction replaces whole values under matching JSON object keys.
+Key-based redaction replaces whole values under matching JSON object keys, and
+the same key set is applied best effort to the wrapped server's command-line
+arguments, so `--api-key=sk-x` and `--token sk-x` are scrubbed under
+`--redact-secrets`. An argument that carries a secret without a recognizable flag
+name cannot be detected.
 Path-based redaction replaces only values selected by a JSONPath expression,
 which is useful when a common key name is sensitive in one location but safe in
 another. Repeat `--redact-path` to scrub more than one location.

@@ -34,6 +34,18 @@ func (m *MultiSink) Close() error {
 	return first
 }
 
+// Dropped totals the drops of every child sink that counts them, so a caller can
+// report data loss without every sink implementing the optional interface.
+func (m *MultiSink) Dropped() uint64 {
+	var total uint64
+	for _, s := range m.sinks {
+		if d, ok := s.(DropCounter); ok {
+			total += d.Dropped()
+		}
+	}
+	return total
+}
+
 // SocketSink streams envelopes to the hub over a unix socket. It is best-effort
 // by design. If the hub isn't running yet it keeps retrying in the background
 // (the client spawns the shim whenever it likes, the user opens the TUI whenever
