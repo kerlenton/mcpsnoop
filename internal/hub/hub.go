@@ -28,21 +28,47 @@ type Handler func(proxy.Envelope)
 
 // Hub collects envelopes from shims (socket) and past sessions (files).
 type Hub struct {
-	socketPath  string
-	sessionsDir string
-	handler     Handler
+	socketPath    string
+	sessionsDir   string
+	handler       Handler
+	backfillLimit int
+	onBackfill    func(BackfillReport)
 
 	mu   sync.Mutex
 	seen map[string]uint64 // session id -> highest seq forwarded
 }
 
+// DefaultBackfillLimit bounds startup work while keeping recent history useful.
+const DefaultBackfillLimit = 100
+
+// Options controls hub startup behavior. BackfillLimit 0 replays all history.
+type Options struct {
+	BackfillLimit int
+	OnBackfill    func(BackfillReport)
+}
+
+// BackfillReport describes how much saved history was replayed at startup.
+type BackfillReport struct {
+	Loaded int
+	Total  int
+}
+
 // New creates a hub. handler is invoked for every deduplicated envelope.
 func New(socketPath, sessionsDir string, handler Handler) *Hub {
+	return NewWithOptions(socketPath, sessionsDir, handler, Options{
+		BackfillLimit: DefaultBackfillLimit,
+	})
+}
+
+// NewWithOptions creates a hub with explicit startup behavior.
+func NewWithOptions(socketPath, sessionsDir string, handler Handler, opts Options) *Hub {
 	return &Hub{
-		socketPath:  socketPath,
-		sessionsDir: sessionsDir,
-		handler:     handler,
-		seen:        make(map[string]uint64),
+		socketPath:    socketPath,
+		sessionsDir:   sessionsDir,
+		handler:       handler,
+		backfillLimit: opts.BackfillLimit,
+		onBackfill:    opts.OnBackfill,
+		seen:          make(map[string]uint64),
 	}
 }
 
@@ -62,7 +88,10 @@ func (h *Hub) Run(ctx context.Context) error {
 	// from disk so a live shim that reconnects (e.g. after a hub restart) can't
 	// race its high-Seq frames ahead of the file's history and cause the gate to
 	// drop it. Shims keep retrying their connection until we accept.
-	h.backfill(ctx)
+	report := h.backfill(ctx)
+	if h.onBackfill != nil {
+		h.onBackfill(report)
+	}
 
 	// Stop accepting when the context is done.
 	go func() {
@@ -119,11 +148,11 @@ func (h *Hub) handleConn(conn net.Conn) {
 	}
 }
 
-// backfill replays envelopes from every session log on disk.
-func (h *Hub) backfill(ctx context.Context) {
+// backfill replays envelopes from the newest configured session logs on disk.
+func (h *Hub) backfill(ctx context.Context) BackfillReport {
 	entries, err := os.ReadDir(h.sessionsDir)
 	if err != nil {
-		return
+		return BackfillReport{}
 	}
 	// Oldest first, so historical order roughly matches real time.
 	files := make([]string, 0, len(entries))
@@ -133,12 +162,18 @@ func (h *Hub) backfill(ctx context.Context) {
 		}
 	}
 	slices.Sort(files)
+	report := BackfillReport{Total: len(files)}
+	if h.backfillLimit > 0 && len(files) > h.backfillLimit {
+		files = files[len(files)-h.backfillLimit:]
+	}
+	report.Loaded = len(files)
 	for _, f := range files {
 		if ctx.Err() != nil {
-			return
+			return report
 		}
 		h.replayFile(f)
 	}
+	return report
 }
 
 func (h *Hub) replayFile(path string) {

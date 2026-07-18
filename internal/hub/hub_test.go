@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -96,5 +97,33 @@ func TestHubBackfillLiveDedup(t *testing.T) {
 	case e := <-got:
 		t.Fatalf("unexpected extra frame: %+v", e)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestHubBackfillLimitReplaysNewestSessions(t *testing.T) {
+	sessionsDir := t.TempDir()
+	writeLog(t, sessionsDir, "001-oldest", env("001-oldest", 1, "initialize"))
+	writeLog(t, sessionsDir, "002-middle", env("002-middle", 1, "initialize"))
+	writeLog(t, sessionsDir, "003-newest", env("003-newest", 1, "initialize"))
+
+	var got []string
+	h := NewWithOptions("", sessionsDir, func(e proxy.Envelope) {
+		got = append(got, e.SessionID)
+	}, Options{BackfillLimit: 2})
+
+	report := h.backfill(context.Background())
+
+	want := []string{"002-middle", "003-newest"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("backfilled sessions = %v, want %v", got, want)
+	}
+	if report.Loaded != 2 || report.Total != 3 {
+		t.Fatalf("backfill report = %+v, want loaded=2 total=3", report)
+	}
+	if _, ok := h.seen["001-oldest"]; ok {
+		t.Fatal("out-of-bound session should not consume a seen entry")
+	}
+	if _, err := os.Stat(filepath.Join(sessionsDir, "001-oldest.jsonl")); err != nil {
+		t.Fatalf("out-of-bound session should remain openable on disk: %v", err)
 	}
 }

@@ -157,6 +157,12 @@ shim your client spawns, forwarding bytes verbatim while shipping a copy of ever
 frame to the hub. `mcpsnoop` with no arguments is that hub and its live TUI. They
 pair through a well-known socket and on-disk logs, so neither has to start first.
 
+The hub loads the newest 100 saved sessions by default, keeping startup work
+bounded without deleting older traces. Use `mcpsnoop --history-limit N` to pick
+another limit, or `mcpsnoop --history-limit 0` to load the full history. Older
+sessions remain available through `mcpsnoop open <session-id>` and
+`mcpsnoop export <session-id>`.
+
 Because it sits in the actual pipe, not off to the side like the Inspector, it
 sees exactly what your real client and server say to each other, whatever the
 server is written in.

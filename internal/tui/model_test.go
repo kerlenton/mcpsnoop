@@ -1074,6 +1074,20 @@ func TestSummaryUpdatesLive(t *testing.T) {
 	}
 }
 
+func TestHistoryTruncatedMessageIsVisible(t *testing.T) {
+	m := ready(t, store.New())
+	m = drive(t, m, historyTruncatedMsg{loaded: 100, total: 243})
+
+	if !m.flashActive() {
+		t.Fatal("truncated history should show a visible notice")
+	}
+	for _, want := range []string{"100", "243", "older traces stay on disk"} {
+		if !strings.Contains(m.flash, want) {
+			t.Fatalf("history notice %q does not contain %q", m.flash, want)
+		}
+	}
+}
+
 func TestSummaryPendingToolShowsSpinner(t *testing.T) {
 	st := store.New()
 	// A tool call requested but never answered: pending, with no latency yet.

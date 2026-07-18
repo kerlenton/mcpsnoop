@@ -19,11 +19,17 @@ import (
 // a periodic tick in the model catches anything sent before the program loop is
 // ready and keeps pending-call timers live.
 func Run(ctx context.Context, socketPath, sessionsDir string) error {
+	return RunWithHistoryLimit(ctx, socketPath, sessionsDir, hub.DefaultBackfillLimit)
+}
+
+// RunWithHistoryLimit starts the live TUI with a bounded history replay.
+// A historyLimit of 0 loads every session log.
+func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, historyLimit int) error {
 	st := store.New()
 	baselines := toolbaseline.New(paths.ToolBaselinesDir())
 	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx))
 
-	h := hub.New(socketPath, sessionsDir, func(e proxy.Envelope) {
+	h := hub.NewWithOptions(socketPath, sessionsDir, func(e proxy.Envelope) {
 		event := st.Ingest(e)
 		if event.Kind == store.EventResponse && event.Call != nil && event.Call.Method == "tools/list" {
 			if _, complete := st.ToolDefinitions(e.SessionID); complete {
@@ -33,6 +39,13 @@ func Run(ctx context.Context, socketPath, sessionsDir string) error {
 			}
 		}
 		p.Send(frameMsg{})
+	}, hub.Options{
+		BackfillLimit: historyLimit,
+		OnBackfill: func(report hub.BackfillReport) {
+			if report.Loaded < report.Total {
+				p.Send(historyTruncatedMsg{loaded: report.Loaded, total: report.Total})
+			}
+		},
 	})
 
 	hubCtx, cancel := context.WithCancel(ctx)
