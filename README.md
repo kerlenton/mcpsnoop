@@ -270,7 +270,7 @@ Gate a recorded agent run on errors, stream corruption, protocol warnings,
 routing-header mismatches, or calls that never got a response.
 
 ```bash
-mcpsnoop check [--fail-on error,invalid,warn,mismatch,pending] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
@@ -278,11 +278,26 @@ to gate on calls that never got a response, or `mismatch` to gate specifically o
 a routing header (Mcp-Method or Mcp-Name) disagreeing with the body. Pass a
 comma-separated subset to select only the conditions relevant to a job. Omit the
 session to check the newest capture, or use `-` to read JSONL from stdin.
+Use `--format junit` to write one JUnit `<testcase>` per signal and session;
+failures follow the same `--fail-on` selection as the text output.
 
 ```bash
 mcpsnoop check build-agent
 mcpsnoop check --fail-on error,invalid artifacts/session.jsonl
 mcpsnoop check --fail-on mismatch gateway-run.jsonl
+```
+
+```yaml
+- name: Check captured MCP session
+  run: |
+    mkdir -p test-results
+    mcpsnoop check --format junit artifacts/session.jsonl > test-results/mcpsnoop.xml
+- name: Upload mcpsnoop JUnit report
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: mcpsnoop-junit
+    path: test-results/mcpsnoop.xml
 ```
 
 ## Watching from another machine

@@ -22,6 +22,13 @@ const (
 
 var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending}
 
+type checkOutputFormat string
+
+const (
+	checkFormatText  checkOutputFormat = "text"
+	checkFormatJUnit checkOutputFormat = "junit"
+)
+
 type checkSummary struct {
 	sessionID  string
 	errors     int
@@ -32,7 +39,7 @@ type checkSummary struct {
 }
 
 func newCheckCmd() *cobra.Command {
-	var failOn string
+	var failOn, formatFlag string
 	cmd := &cobra.Command{
 		Use:   "check [session-id|log.jsonl|-]",
 		Short: "Fail when a captured session contains selected signals",
@@ -40,6 +47,11 @@ func newCheckCmd() *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			signals, err := parseCheckSignals(failOn)
+			if err != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
+				return exitCode(2)
+			}
+			format, err := parseCheckOutputFormat(formatFlag)
 			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
 				return exitCode(2)
@@ -56,23 +68,35 @@ func newCheckCmd() *cobra.Command {
 			}
 
 			anyFailed := false
-			for _, summary := range summarizeCheck(st) {
-				fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d\n",
-					summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending)
-				if failed := summary.failed(signals); len(failed) > 0 {
-					fmt.Fprintf(cmd.OutOrStdout(), "check failed: %s\n", strings.Join(failed, ","))
-					anyFailed = true
+			summaries := summarizeCheck(st)
+			if format == checkFormatJUnit {
+				if err := writeCheckJUnit(cmd.OutOrStdout(), summaries, signals); err != nil {
+					fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
+					return exitCode(1)
+				}
+				anyFailed = checkFailed(summaries, signals)
+			} else {
+				for _, summary := range summaries {
+					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d\n",
+						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending)
+					if failed := summary.failed(signals); len(failed) > 0 {
+						fmt.Fprintf(cmd.OutOrStdout(), "check failed: %s\n", strings.Join(failed, ","))
+						anyFailed = true
+					}
 				}
 			}
 			if anyFailed {
 				return exitCode(1)
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "check passed")
+			if format == checkFormatText {
+				fmt.Fprintln(cmd.OutOrStdout(), "check passed")
+			}
 			return nil
 		},
 	}
 	cmd.Flags().SortFlags = false
 	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending")
+	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text or junit")
 	return cmd
 }
 
@@ -88,6 +112,17 @@ func parseCheckSignals(value string) (map[checkSignal]bool, error) {
 		}
 	}
 	return signals, nil
+}
+
+func parseCheckOutputFormat(value string) (checkOutputFormat, error) {
+	switch checkOutputFormat(strings.ToLower(strings.TrimSpace(value))) {
+	case checkFormatText:
+		return checkFormatText, nil
+	case checkFormatJUnit:
+		return checkFormatJUnit, nil
+	default:
+		return "", fmt.Errorf("--format must be text or junit, got %q", value)
+	}
 }
 
 func loadCheckSession(cmd *cobra.Command, arg string) (*store.Store, string, error) {
@@ -124,17 +159,36 @@ func summarizeCheck(st *store.Store) []checkSummary {
 	return summaries
 }
 
-func (s checkSummary) failed(selected map[checkSignal]bool) []string {
-	counts := map[checkSignal]int{
-		checkError:    s.errors,
-		checkInvalid:  s.invalid,
-		checkWarn:     s.warnings,
-		checkMismatch: s.mismatches,
-		checkPending:  s.pending,
+func checkFailed(summaries []checkSummary, selected map[checkSignal]bool) bool {
+	for _, summary := range summaries {
+		if len(summary.failed(selected)) > 0 {
+			return true
+		}
 	}
+	return false
+}
+
+func (s checkSummary) count(signal checkSignal) int {
+	switch signal {
+	case checkError:
+		return s.errors
+	case checkInvalid:
+		return s.invalid
+	case checkWarn:
+		return s.warnings
+	case checkMismatch:
+		return s.mismatches
+	case checkPending:
+		return s.pending
+	default:
+		return 0
+	}
+}
+
+func (s checkSummary) failed(selected map[checkSignal]bool) []string {
 	var failed []string
 	for _, signal := range checkSignalOrder {
-		if selected[signal] && counts[signal] > 0 {
+		if selected[signal] && s.count(signal) > 0 {
 			failed = append(failed, string(signal))
 		}
 	}

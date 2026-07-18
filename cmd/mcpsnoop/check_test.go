@@ -76,6 +76,71 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 	}
 }
 
+func TestCheckWritesJUnitGolden(t *testing.T) {
+	log := encodeCheckLog(t, checkSignalEnvelopes()...)
+
+	code, stdout, stderr := executeCheck(t, []string{"--format", "junit", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	const want = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="mcpsnoop check" tests="5" failures="3" errors="0" skipped="0" time="0">
+  <testsuite name="s1" tests="5" failures="3" errors="0" skipped="0" time="0">
+    <testcase classname="mcpsnoop.check" name="s1/error" time="0">
+      <failure message="session s1 has 2 errors" type="mcpsnoop.check.error">session s1 has 2 errors</failure>
+    </testcase>
+    <testcase classname="mcpsnoop.check" name="s1/invalid" time="0">
+      <failure message="session s1 has 1 invalid frame" type="mcpsnoop.check.invalid">session s1 has 1 invalid frame</failure>
+    </testcase>
+    <testcase classname="mcpsnoop.check" name="s1/warn" time="0">
+      <failure message="session s1 has 1 warning" type="mcpsnoop.check.warn">session s1 has 1 warning</failure>
+    </testcase>
+    <testcase classname="mcpsnoop.check" name="s1/mismatch" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/pending" time="0"></testcase>
+  </testsuite>
+</testsuites>
+`
+	if stdout != want {
+		t.Fatalf("stdout mismatch\nwant:\n%s\ngot:\n%s", want, stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
+func TestCheckJUnitHonorsFailOn(t *testing.T) {
+	log := encodeCheckLog(t, checkErrorEnvelopes()...)
+
+	code, stdout, stderr := executeCheck(t, []string{"--format", "junit", "--fail-on", "invalid,warn", "-"}, log)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 because errors are not selected", code)
+	}
+	for _, want := range []string{`tests="5"`, `failures="0"`, `name="s1/error"`} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "<failure") {
+		t.Fatalf("stdout should not contain failures:\n%s", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
+func TestCheckRejectsUnknownFormat(t *testing.T) {
+	code, stdout, stderr := executeCheck(t, []string{"--format", "json", "-"}, "{}\n")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "mcpsnoop check: --format must be text or junit") {
+		t.Fatalf("stderr = %q, want --format error", stderr)
+	}
+}
+
 func TestCheckRejectsUnknownOrEmptyFailOnValues(t *testing.T) {
 	for _, value := range []string{"error,bogus", ""} {
 		t.Run(value, func(t *testing.T) {
