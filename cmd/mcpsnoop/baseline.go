@@ -12,8 +12,19 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/toolbaseline"
 )
 
+// resolveBaselineDir returns the tool-baseline directory to use: an explicit
+// --baseline override, or the mcpsnoop state directory. CI points it at a
+// persisted or checked-in directory so a baseline survives across runs.
+func resolveBaselineDir(dir string) string {
+	if dir != "" {
+		return dir
+	}
+	return paths.ToolBaselinesDir()
+}
+
 func newBaselineCmd() *cobra.Command {
 	var accept, reset bool
+	var baselineDir string
 	cmd := &cobra.Command{
 		Use:   "baseline [session-id|log.jsonl|-]",
 		Short: "Inspect or update the trusted tool-definition baseline",
@@ -33,7 +44,7 @@ func newBaselineCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop baseline:", err)
 				return exitCode(1)
 			}
-			manager := toolbaseline.New(paths.ToolBaselinesDir())
+			manager := toolbaseline.New(resolveBaselineDir(baselineDir))
 			switch {
 			case accept:
 				server, err := toolbaseline.AcceptSession(manager, st, sessionID)
@@ -73,6 +84,7 @@ func newBaselineCmd() *cobra.Command {
 	cmd.Flags().SortFlags = false
 	cmd.Flags().BoolVar(&accept, "accept", false, "replace the baseline with this session's complete tool definitions")
 	cmd.Flags().BoolVar(&reset, "reset", false, "remove the baseline for this session's server label")
+	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory (default: the mcpsnoop state dir)")
 	return cmd
 }
 

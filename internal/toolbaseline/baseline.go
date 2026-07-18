@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/sessiondiff"
 	"github.com/kerlenton/mcpsnoop/internal/store"
@@ -55,9 +54,6 @@ func (m *Manager) Observe(server string, current []store.ToolDefinition) (Report
 	defer m.mu.Unlock()
 
 	baseline, err := m.load(server)
-	if isIncompleteBaseline(err) {
-		baseline, err = m.loadAfterConcurrentCreate(server)
-	}
 	if errors.Is(err, os.ErrNotExist) {
 		candidate := snapshot{Version: baselineVersion, Server: server, Tools: normalize(current)}
 		if err := m.writeNew(candidate); err == nil {
@@ -65,7 +61,9 @@ func (m *Manager) Observe(server string, current []store.ToolDefinition) (Report
 		} else if !errors.Is(err, os.ErrExist) {
 			return Report{}, false, err
 		}
-		baseline, err = m.loadAfterConcurrentCreate(server)
+		// Another writer linked the baseline first. Because writeNew links a fully
+		// written file atomically, the target is complete and a plain load succeeds.
+		baseline, err = m.load(server)
 	}
 	if err != nil {
 		return Report{}, false, err
@@ -108,16 +106,18 @@ func ObserveSession(m *Manager, st *store.Store, sessionID string) (Report, bool
 	return report, created, err
 }
 
-func ObserveAll(m *Manager, st *store.Store) error {
+// ObserveAll observes every session that has a complete tool list, recording a
+// per-session BaselineError rather than returning on the first failure, so one
+// bad baseline file never blocks the TUI from opening or hides other sessions.
+func ObserveAll(m *Manager, st *store.Store) {
 	for _, session := range st.Sessions() {
 		if _, ok := st.ToolDefinitions(session.ID); !ok {
 			continue
 		}
 		if _, _, err := ObserveSession(m, st, session.ID); err != nil {
-			return err
+			st.SetToolDrift(session.ID, store.ToolDrift{BaselineError: err.Error()})
 		}
 	}
-	return nil
 }
 
 func AcceptSession(m *Manager, st *store.Store, sessionID string) (string, error) {
@@ -159,11 +159,13 @@ func sessionDefinitions(st *store.Store, sessionID string) (string, []store.Tool
 func sessionLabel(st *store.Store, sessionID string) (string, error) {
 	for _, session := range st.Sessions() {
 		if session.ID == sessionID {
-			server := session.Label
-			if server == "" {
-				server = session.ID
+			// A baseline is keyed on the server label. Falling back to the session id
+			// would key it per run, so drift would never be detected and the directory
+			// would fill with orphan files. Fail clearly instead.
+			if session.Label == "" {
+				return "", fmt.Errorf("session %q has no server label; a tool baseline needs a stable label, set one with --label", sessionID)
 			}
-			return server, nil
+			return session.Label, nil
 		}
 	}
 	return "", fmt.Errorf("session %q not found", sessionID)
@@ -176,29 +178,13 @@ func (m *Manager) load(server string) (snapshot, error) {
 	}
 	var baseline snapshot
 	if err := json.Unmarshal(data, &baseline); err != nil {
-		return snapshot{}, fmt.Errorf("tool baseline %q: %w", server, err)
+		return snapshot{}, fmt.Errorf("tool baseline %q is corrupt (%w); run mcpsnoop baseline --reset to trust the next complete tools/list", server, err)
 	}
 	if baseline.Version != baselineVersion || baseline.Server != server {
 		return snapshot{}, fmt.Errorf("tool baseline %q: unsupported or mismatched baseline", server)
 	}
 	baseline.Tools = normalizeStored(baseline.Tools)
 	return baseline, nil
-}
-
-func (m *Manager) loadAfterConcurrentCreate(server string) (snapshot, error) {
-	for range 100 {
-		baseline, err := m.load(server)
-		if err == nil || !isIncompleteBaseline(err) {
-			return baseline, err
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return m.load(server)
-}
-
-func isIncompleteBaseline(err error) bool {
-	var syntaxError *json.SyntaxError
-	return errors.As(err, &syntaxError)
 }
 
 func (m *Manager) write(baseline snapshot) error {
@@ -231,6 +217,12 @@ func (m *Manager) write(baseline snapshot) error {
 	return os.Rename(name, m.Path(baseline.Server))
 }
 
+// writeNew persists a first-seen baseline without ever exposing a partial file.
+// It fully writes a temp file in the same directory, then hard-links it onto the
+// target. Link is atomic and returns os.ErrExist when the target already exists,
+// which the caller treats as a concurrent create, so the trust-on-first-use race
+// is decided by the filesystem rather than by an O_EXCL open that a crash could
+// leave truncated. Same directory means same filesystem, so the link is valid.
 func (m *Manager) writeNew(baseline snapshot) error {
 	if strings.TrimSpace(baseline.Server) == "" {
 		return errors.New("tool baseline: empty server label")
@@ -238,32 +230,35 @@ func (m *Manager) writeNew(baseline snapshot) error {
 	if err := os.MkdirAll(m.dir, 0o700); err != nil {
 		return err
 	}
-	path := m.Path(baseline.Server)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	tmp, err := os.CreateTemp(m.dir, ".tool-baseline-*")
 	if err != nil {
 		return err
 	}
-	complete := false
-	defer func() {
-		file.Close()
-		if !complete {
-			os.Remove(path)
-		}
-	}()
-	encoder := json.NewEncoder(file)
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	encoder := json.NewEncoder(tmp)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(baseline); err != nil {
-		file.Close()
+		tmp.Close()
 		return err
 	}
-	if err := file.Sync(); err != nil {
-		file.Close()
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
 		return err
 	}
-	if err := file.Close(); err != nil {
+	if err := tmp.Close(); err != nil {
 		return err
 	}
-	complete = true
+	if err := os.Link(name, m.Path(baseline.Server)); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return err // a concurrent writer won the race; caller reloads the winner
+		}
+		return fmt.Errorf("tool baseline %q: %w", baseline.Server, err)
+	}
 	return nil
 }
 

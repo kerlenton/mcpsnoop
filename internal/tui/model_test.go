@@ -63,6 +63,28 @@ func ready(t *testing.T, st *store.Store) Model {
 	return drive(t, m, frameMsg{})
 }
 
+func TestSessionsTableDriftMarkerKeepsLabel(t *testing.T) {
+	st := store.New()
+	// A label long enough that the old wide "! drift " marker truncated its tail
+	// inside the fixed name column; the one-char marker must keep the whole label.
+	label := "filesystem-server1"
+	st.Ingest(proxy.Envelope{
+		SessionID: "sess", ServerLabel: label, Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer, Transport: "stdio",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+	})
+	st.SetToolDrift("sess", store.ToolDrift{ChangedDescriptions: []string{"search"}})
+
+	m := ready(t, st)
+	out := m.View()
+	if !strings.Contains(out, "! "+label) {
+		t.Fatalf("drift row should keep the full label with a one-char marker\n%s", out)
+	}
+	if strings.Contains(out, "! drift ") {
+		t.Fatalf("marker should no longer be the wide '! drift '\n%s", out)
+	}
+}
+
 func TestSessionsTableAndDrillIn(t *testing.T) {
 	st := store.New()
 	seed(st)
@@ -895,7 +917,9 @@ func TestDefinitionDriftIsVisibleInSessionsAndToolSummary(t *testing.T) {
 	})
 
 	m := ready(t, st)
-	if out := ansi.Strip(m.View()); !strings.Contains(out, "! drift") {
+	// The sessions row carries the compact "!" marker (drift is warn-colored); the
+	// full "tool definition drift" wording lives in the summary overlay below.
+	if out := ansi.Strip(m.View()); !strings.Contains(out, "! demo") {
 		t.Fatalf("sessions view did not surface drift\n%s", out)
 	}
 	m = typeRunes(t, m, "s")
@@ -914,7 +938,9 @@ func TestToolBaselineErrorsAreVisible(t *testing.T) {
 	st.SetToolDrift("s1", store.ToolDrift{BaselineError: "baseline file is invalid"})
 
 	m := ready(t, st)
-	if out := ansi.Strip(m.View()); !strings.Contains(out, "! baseline") {
+	// The compact "!" marker is respErr-colored for a baseline error; the full
+	// "tool baseline error" wording lives in the summary overlay below.
+	if out := ansi.Strip(m.View()); !strings.Contains(out, "! demo") {
 		t.Fatalf("sessions view did not surface the baseline error\n%s", out)
 	}
 	m = typeRunes(t, m, "s")

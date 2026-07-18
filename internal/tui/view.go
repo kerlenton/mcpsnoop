@@ -393,11 +393,14 @@ func (m Model) renderSessionsTable(w, h int) string {
 		}
 		name := s.Label
 		nameStyle := m.styles.neutral
+		// A one-character "!" marker flags a baseline error (red) or drift (yellow)
+		// without stealing width from the label. The full wording lives in the tool
+		// summary overlay where there is room.
 		if s.HasToolBaselineError {
-			name = "! baseline " + name
+			name = "! " + name
 			nameStyle = m.styles.respErr
 		} else if s.HasToolDrift {
-			name = "! drift " + name
+			name = "! " + name
 			nameStyle = m.styles.warn
 		}
 		segs := []cell{seg(cellL(name, nameW), nameStyle)}

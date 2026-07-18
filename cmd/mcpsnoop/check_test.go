@@ -11,6 +11,7 @@ import (
 
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/toolbaseline"
 )
 
 func TestCheckFailsOnSelectedSessionSignals(t *testing.T) {
@@ -71,7 +72,7 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0\ncheck passed\n" {
+	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0\nrecorded first-seen tool baseline (trusted, not verified)\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -221,6 +222,97 @@ func TestCheckFailsOnToolDefinitionDriftWhenSelected(t *testing.T) {
 	code, stdout, stderr = executeCheck(t, []string{"-"}, changed)
 	if code != 0 || stderr != "" || !strings.Contains(stdout, "description changed: search") {
 		t.Fatalf("default check = code %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
+func TestCheckBaselineFlagRecordsThenDetectsDrift(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir()) // exercise --baseline, not the state dir
+	dir := t.TempDir()
+	baseline := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search docs","inputSchema":{"type":"object"}}]}}`),
+	)
+
+	// First run against an empty baseline dir records; it does not verify.
+	code, stdout, stderr := executeCheck(t, []string{"--fail-on", "drift", "--baseline", dir, "-"}, baseline)
+	if code != 0 || stderr != "" {
+		t.Fatalf("first run = code %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "recorded first-seen tool baseline") {
+		t.Fatalf("first run should announce it only recorded a baseline, got %q", stdout)
+	}
+
+	// The persisted directory lets the second run actually verify, and catch drift.
+	changed := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search private docs","inputSchema":{"type":"object"}}]}}`),
+	)
+	code, stdout, stderr = executeCheck(t, []string{"--fail-on", "drift", "--baseline", dir, "-"}, changed)
+	if code != 1 || stderr != "" {
+		t.Fatalf("second run = code %d, stderr %q", code, stderr)
+	}
+	for _, want := range []string{"description changed: search", "check failed: drift"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("second run missing %q\n%s", want, stdout)
+		}
+	}
+}
+
+func TestCheckReportsCorruptBaselineWithoutFailingUnlessDriftSelected(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	dir := t.TempDir()
+	// A corrupt baseline for the session's server label, as a crash once left behind.
+	if err := os.WriteFile(toolbaseline.New(dir).Path("srv"), []byte("{bad json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","inputSchema":{"type":"object"}}]}}`),
+	)
+
+	// The default gate does not select drift, so the baseline problem is reported
+	// but does not fail the run.
+	code, stdout, stderr := executeCheck(t, []string{"--baseline", dir, "-"}, log)
+	if code != 0 || stderr != "" {
+		t.Fatalf("default gate = code %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "tool baseline error:") || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("expected a reported baseline error and a pass, got %q", stdout)
+	}
+
+	// Selecting drift makes the same unverifiable baseline fail.
+	code, stdout, stderr = executeCheck(t, []string{"--fail-on", "drift", "--baseline", dir, "-"}, log)
+	if code != 1 || stderr != "" {
+		t.Fatalf("drift gate = code %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "tool baseline error:") || !strings.Contains(stdout, "check failed: drift") {
+		t.Fatalf("drift should fail on a baseline error, got %q", stdout)
+	}
+}
+
+func TestCheckReportsMissingLabelBaselineWithoutFailingUnlessDriftSelected(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// A session with no server label cannot key a baseline, but that must not fail
+	// a run that did not ask for drift.
+	noLabel := func(seq uint64, dir proxy.Direction, raw string) proxy.Envelope {
+		return proxy.Envelope{SessionID: "s1", ServerLabel: "", Seq: seq, TS: time.Unix(int64(seq), 0), Direction: dir, Raw: json.RawMessage(raw)}
+	}
+	log := encodeCheckLog(t,
+		noLabel(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		noLabel(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","inputSchema":{"type":"object"}}]}}`),
+	)
+
+	code, stdout, _ := executeCheck(t, []string{"-"}, log)
+	if code != 0 {
+		t.Fatalf("a missing label should not fail the default gate, code %d", code)
+	}
+	if !strings.Contains(stdout, "tool baseline error:") || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("expected a reported baseline error and a pass, got %q", stdout)
+	}
+
+	code, stdout, _ = executeCheck(t, []string{"--fail-on", "drift", "-"}, log)
+	if code != 1 || !strings.Contains(stdout, "check failed: drift") {
+		t.Fatalf("drift should fail on a missing-label baseline, got code %d stdout %q", code, stdout)
 	}
 }
 
