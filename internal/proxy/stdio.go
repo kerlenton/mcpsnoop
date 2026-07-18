@@ -112,16 +112,22 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 		emit(DirectionMeta, meta, "")
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(3)
-
-	// client -> server
+	// client -> server. Deliberately NOT awaited below. This pump blocks reading the
+	// client's stdin, which stays open as long as the client is alive, so if the
+	// server exits on its own this read never returns. Waiting on it would hang
+	// cmd.Wait and the exit code would never be reported. We wait only on the two
+	// server-side pumps, which end when the server closes its stdout/stderr (i.e.
+	// when it exits). The detached write racing cmd.Wait closing the pipe is safe.
+	// os.File is internally locked and the write just returns an error, ending the
+	// pump. The process exits right after RunStdio returns anyway.
 	go func() {
-		defer wg.Done()
 		// Closing the server's stdin signals EOF so it can shut down cleanly.
 		defer srvStdin.Close()
 		pumpFrames(in, srvStdin, func(line []byte) { observe(ClientToServer, line) })
 	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
 
 	// server -> client
 	go func() {

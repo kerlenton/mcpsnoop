@@ -8,7 +8,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
+
+// readerFunc adapts a function to an io.Reader.
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
 // captureSink collects envelopes for assertions.
 type captureSink struct {
@@ -87,6 +93,45 @@ func TestStdioTransparency(t *testing.T) {
 	msg2, _ := ParseRPC(c2s[1].Raw)
 	if !msg2.IsNotification() {
 		t.Fatalf("second frame should be a notification, got %+v", msg2)
+	}
+}
+
+// TestStdioReportsExitCodeWhenServerExitsWithClientIdle guards the hang where the
+// wrapped server exits on its own while the client keeps stdin open. The
+// client->server pump blocks on that idle stdin forever, so RunStdio must await
+// only the server-side pumps or it never reaps the process or reports the code.
+func TestStdioReportsExitCodeWhenServerExitsWithClientIdle(t *testing.T) {
+	blocked := make(chan struct{})
+	defer close(blocked) // release the detached pump at test end
+	in := readerFunc(func([]byte) (int, error) { <-blocked; return 0, io.EOF })
+
+	type result struct {
+		code int
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, err := RunStdio(context.Background(), StdioConfig{
+			Command:   []string{"sh", "-c", "exit 3"},
+			SessionID: "exit-test",
+			Sink:      &captureSink{},
+			In:        in,
+			Out:       &bytes.Buffer{},
+			Err:       &bytes.Buffer{},
+		})
+		done <- result{code, err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("RunStdio: %v", r.err)
+		}
+		if r.code != 3 {
+			t.Fatalf("exit code = %d, want 3", r.code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunStdio hung waiting on the idle client->server pump")
 	}
 }
 

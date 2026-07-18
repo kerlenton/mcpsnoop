@@ -85,6 +85,29 @@ func TestSessionsTableDriftMarkerKeepsLabel(t *testing.T) {
 	}
 }
 
+func TestRefreshClampsInspectWhenTimelineShrinks(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+	m.inspect = len(m.full) - 1
+	if m.inspect <= 0 {
+		t.Fatal("expected a multi-frame timeline to inspect")
+	}
+
+	// The inspected session's timeline vanishes out from under the inspector.
+	st.Delete(m.streamSessionID)
+	m.refresh()
+
+	if m.inspect < 0 || (len(m.full) > 0 && m.inspect >= len(m.full)) {
+		t.Fatalf("inspect %d not clamped into range for full len %d", m.inspect, len(m.full))
+	}
+	// The direct m.full[m.inspect] readers must not panic on the shrunk timeline.
+	_ = m.inspectorHeader(80)
+	_ = m.inspectorHeaderH()
+	_ = m.pairWidget()
+}
+
 func TestSessionsTableAndDrillIn(t *testing.T) {
 	st := store.New()
 	seed(st)

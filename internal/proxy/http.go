@@ -115,10 +115,21 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			if target.Path != "" && target.Path != "/" {
 				req.URL.Path = target.Path
 			}
+			// mcpsnoop has to read the response body to observe it, so it must not
+			// arrive compressed. Force identity rather than let the client's gzip
+			// preference reach the target and turn every observed frame into noise.
+			// identity is always acceptable to the client.
+			req.Header.Set("Accept-Encoding", "identity")
 			// The routing headers are not hop-by-hop, so the reverse proxy forwards
 			// them to the target verbatim; the Director leaves them untouched.
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			// Defensive fallback. If the target ignored the identity request and
+			// still compressed the body, skip observation rather than push binary
+			// into a frame. Forwarding is untouched, the client gets the original body.
+			if enc := resp.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+				return nil
+			}
 			if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 				// Streaming case, tap SSE data frames as bytes flow to the client.
 				resp.Body = newSSETap(resp.Body, func(data []byte) {

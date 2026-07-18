@@ -161,6 +161,38 @@ func resp(seq uint64, ts time.Time, dir proxy.Direction, id, body string) proxy.
 	return proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: ts, Direction: dir, Raw: json.RawMessage(raw)}
 }
 
+func TestReusedRequestIdKeepsPendingCounterAndTimelineInSync(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	// Two requests reuse id 1 while the first is still in flight (no response).
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"a"}`))
+	s.Ingest(req(2, t0.Add(time.Millisecond), proxy.ClientToServer, "1", "tools/call", `{"name":"b"}`))
+
+	header := s.Sessions()[0]
+	events := s.Timeline("s1")
+	timelinePending := 0
+	for _, ev := range events {
+		if ev.Kind == EventRequest && ev.Call != nil && ev.Call.State == Pending {
+			timelinePending++
+		}
+	}
+	// The counter and the timeline must tell the same story.
+	if header.Pending != timelinePending {
+		t.Fatalf("pending disagree: header %d, timeline %d", header.Pending, timelinePending)
+	}
+	if header.Pending != 1 {
+		t.Fatalf("header pending = %d, want 1", header.Pending)
+	}
+	// The superseded first request is no longer pending, and the reuse is explained
+	// on the second request.
+	if events[0].Call == nil || events[0].Call.State != Superseded {
+		t.Fatalf("first call should be superseded, got %+v", events[0].Call)
+	}
+	if !strings.Contains(events[1].Warning, "reuses an id already in flight") {
+		t.Fatalf("second request should warn about id reuse, got %q", events[1].Warning)
+	}
+}
+
 func TestActivityBuckets(t *testing.T) {
 	st := New()
 	now := time.Now()
