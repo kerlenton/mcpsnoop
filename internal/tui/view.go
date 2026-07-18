@@ -1783,6 +1783,11 @@ func window(sel, n, rows int) (int, int) {
 	return start, start + rows
 }
 
+// truncate shortens s to at most w terminal cells, appending an ellipsis when it
+// cuts. It measures in cells throughout (the unit lipgloss.Width uses), never rune
+// counts, so a wide rune (CJK, emoji) is two cells and cannot overrun the budget.
+// With wide runes an exact fit is not always possible, so the result may be a cell
+// narrower than w; callers (cellL, cellR) pad the remainder.
 func truncate(s string, w int) string {
 	if w <= 0 {
 		return ""
@@ -1790,11 +1795,22 @@ func truncate(s string, w int) string {
 	if lipgloss.Width(s) <= w {
 		return s
 	}
-	r := []rune(s)
-	if w <= 1 || len(r) <= 1 {
-		return string(r[:max(0, min(len(r), w))])
+	// One cell is reserved for the ellipsis. Take runes until the next one would
+	// push the accumulated width past that budget.
+	budget := w - 1
+	width, end := 0, 0
+	for i, r := range s {
+		rw := lipgloss.Width(string(r))
+		if width+rw > budget {
+			break
+		}
+		width += rw
+		end = i + len(string(r))
 	}
-	return string(r[:w-1]) + "…"
+	if end == 0 {
+		return "" // the budget cannot fit even one rune, so no bare ellipsis
+	}
+	return s[:end] + "…"
 }
 
 // softWrap hard-wraps any line wider than width so long values (e.g. a big JSON
