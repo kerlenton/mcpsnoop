@@ -20,6 +20,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
 
@@ -121,6 +122,9 @@ func (h *Hub) Run(ctx context.Context) error {
 // listen binds the unix socket, clearing a stale socket left by a dead hub but
 // refusing to steal one from a live hub.
 func (h *Hub) listen() (net.Listener, error) {
+	if err := paths.CheckSocketPath(h.socketPath); err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(h.socketPath); err == nil {
 		// Something is there. If we can dial it, a hub is alive.
 		if c, derr := net.Dial("unix", h.socketPath); derr == nil {

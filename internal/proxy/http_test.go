@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -8,14 +9,110 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/iotest"
+	"time"
 )
+
+// slowByteReader yields one byte per Read with a small delay, so a Read and a
+// concurrent Close overlap long enough for the race detector to see the tap's
+// shared state if it is unguarded.
+type slowByteReader struct {
+	data  []byte
+	pos   int
+	delay time.Duration
+}
+
+func (r *slowByteReader) Read(p []byte) (int, error) {
+	time.Sleep(r.delay)
+	if r.pos >= len(r.data) || len(p) == 0 {
+		if r.pos >= len(r.data) {
+			return 0, io.EOF
+		}
+		return 0, nil
+	}
+	p[0] = r.data[r.pos]
+	r.pos++
+	return 1, nil
+}
+
+func (r *slowByteReader) Close() error { return nil }
+
+// TestBodyTapConcurrentReadAndClose drives Read and Close from two goroutines,
+// which net/http can do on a request body. onDone must fire exactly once, and the
+// shared buffer and done flag must not race (fails under -race before the fix).
+func TestBodyTapConcurrentReadAndClose(t *testing.T) {
+	var count atomic.Int32
+	tap := newBodyTap(&slowByteReader{data: bytes.Repeat([]byte("x"), 400), delay: 20 * time.Microsecond}, 10,
+		func([]byte, bool) { count.Add(1) })
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = io.Copy(io.Discard, tap) }()
+	go func() {
+		defer wg.Done()
+		time.Sleep(time.Millisecond) // let some reads run first, then close mid-stream
+		_ = tap.Close()
+	}()
+	wg.Wait()
+
+	if got := count.Load(); got != 1 {
+		t.Fatalf("onDone fired %d times, want exactly 1", got)
+	}
+}
 
 // emitterTo adapts a captureSink into the emit func httpProxyHandler expects.
 func emitterTo(sink *captureSink) func(Direction, []byte, route) {
 	return func(d Direction, raw []byte, rt route) {
-		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, MCPProtocolVersion: rt.protocolVersion, Batch: rt.batch})
+		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, MCPProtocolVersion: rt.protocolVersion, Batch: rt.batch, Truncated: rt.truncated})
 	}
+}
+
+// TestBodyTapForwardsFullyAndBoundsObservation covers the memory bound: the tap
+// yields every byte to the forwarder while copying at most cap bytes for
+// observation, flagging the copy truncated once the body runs past cap. Bytes are
+// checked against the original, never against the (bounded) observed copy.
+func TestBodyTapForwardsFullyAndBoundsObservation(t *testing.T) {
+	run := func(t *testing.T, rc io.ReadCloser, input []byte, cap int, wantTrunc bool) {
+		var observed []byte
+		var truncated bool
+		tap := newBodyTap(rc, cap, func(o []byte, tr bool) {
+			observed = append([]byte(nil), o...)
+			truncated = tr
+		})
+		got, err := io.ReadAll(tap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = tap.Close()
+		// Byte-for-byte forwarding is unchanged, whether or not the copy was cut.
+		if !bytes.Equal(got, input) {
+			t.Fatalf("forwarded %q, want the full %q", got, input)
+		}
+		if truncated != wantTrunc {
+			t.Fatalf("truncated = %v, want %v", truncated, wantTrunc)
+		}
+		want := input
+		if wantTrunc {
+			want = input[:cap]
+		}
+		if !bytes.Equal(observed, want) {
+			t.Fatalf("observed %q, want %q", observed, want)
+		}
+	}
+
+	input := []byte("0123456789abcdef") // 16 bytes
+	t.Run("under cap", func(t *testing.T) {
+		run(t, io.NopCloser(bytes.NewReader(input)), input, 100, false)
+	})
+	t.Run("over cap", func(t *testing.T) {
+		run(t, io.NopCloser(bytes.NewReader(input)), input, 10, true)
+	})
+	t.Run("over cap across single-byte reads", func(t *testing.T) {
+		run(t, io.NopCloser(iotest.OneByteReader(bytes.NewReader(input))), input, 10, true)
+	})
 }
 
 func TestHTTPProxyJSON(t *testing.T) {

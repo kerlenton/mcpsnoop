@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -77,6 +77,7 @@ type route struct {
 	name            string // Mcp-Name
 	protocolVersion string // MCP-Protocol-Version (request-scoped, not per operation)
 	batch           bool
+	truncated       bool // the observed copy was cut at the frame-size cap
 }
 
 // newHTTPEmitter returns an emit function bound to a session and sink.
@@ -96,12 +97,87 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 			MCPName:            r.name,
 			MCPProtocolVersion: r.protocolVersion,
 			Batch:              r.batch,
+			Truncated:          r.truncated,
 		}
 		if raw != nil {
 			env.Raw = append([]byte(nil), raw...)
 		}
 		sink.Emit(env)
 	}
+}
+
+// bodyTap forwards an HTTP body verbatim while copying at most cap bytes for
+// observation, so a huge upload or response is never held whole in memory. When
+// the body runs past cap the extra bytes still forward, but the observed copy is
+// flagged truncated. onDone fires exactly once, on EOF or Close, with the copy.
+type bodyTap struct {
+	rc     io.ReadCloser
+	cap    int
+	onDone func(observed []byte, truncated bool)
+
+	// net/http may Close a request body from a goroutine other than the one
+	// reading it (e.g. on cancellation), so the buffer and done flag are guarded.
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	cut  bool
+	done bool
+}
+
+func newBodyTap(rc io.ReadCloser, cap int, onDone func([]byte, bool)) *bodyTap {
+	return &bodyTap{rc: rc, cap: cap, onDone: onDone}
+}
+
+func (t *bodyTap) Read(p []byte) (int, error) {
+	n, err := t.rc.Read(p)
+	if n > 0 {
+		t.mu.Lock()
+		if room := t.cap - t.buf.Len(); room <= 0 {
+			t.cut = true
+		} else if n > room {
+			t.buf.Write(p[:room])
+			t.cut = true
+		} else {
+			t.buf.Write(p[:n])
+		}
+		t.mu.Unlock()
+	}
+	if err != nil { // EOF or a read error both end the body
+		t.finish()
+	}
+	return n, err
+}
+
+func (t *bodyTap) Close() error {
+	t.finish()
+	return t.rc.Close()
+}
+
+// finish delivers the observed copy exactly once, on EOF, a read error, or Close,
+// whichever comes first. The snapshot is taken under the lock so it is never read
+// while Read is writing, but onDone runs outside the lock since it emits into the
+// sink and must not hold the tap.
+func (t *bodyTap) finish() {
+	t.mu.Lock()
+	if t.done {
+		t.mu.Unlock()
+		return
+	}
+	t.done = true
+	observed := append([]byte(nil), t.buf.Bytes()...)
+	truncated := t.cut
+	t.mu.Unlock()
+	t.onDone(observed, truncated)
+}
+
+// observeBody emits the observed copy of a body. A truncated copy is incomplete,
+// so it is emitted as one flagged frame rather than split and parsed as if whole.
+func observeBody(emit func(Direction, []byte, route), dir Direction, observed []byte, truncated bool, rt route) {
+	if truncated {
+		rt.truncated = true
+		emit(dir, observed, rt)
+		return
+	}
+	emitFrames(emit, dir, observed, rt)
 }
 
 // httpProxyHandler builds the reverse-proxy handler that taps request and
@@ -137,30 +213,24 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 				})
 				return nil
 			}
-			// Plain JSON case, buffer, observe, restore.
-			body, err := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if err != nil {
-				return err
-			}
-			emitFrames(emit, ServerToClient, body, route{})
-			resp.Body = io.NopCloser(bytes.NewReader(body))
-			resp.ContentLength = int64(len(body))
-			resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+			// Plain JSON case. Stream the body through a tap that copies at most
+			// maxFrameBytes for observation, so it is never buffered whole. The body
+			// passes through unchanged, so Content-Length stays correct with no rewrite.
+			resp.Body = newBodyTap(resp.Body, maxFrameBytes, func(observed []byte, truncated bool) {
+				observeBody(emit, ServerToClient, observed, truncated, route{})
+			})
 			return nil
 		},
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil && r.Method == http.MethodPost {
-			body, err := io.ReadAll(r.Body)
-			_ = r.Body.Close()
-			if err == nil {
-				rt := route{method: r.Header.Get(mcpMethodHeader), name: r.Header.Get(mcpNameHeader), protocolVersion: r.Header.Get(mcpProtocolVersionHeader)}
-				emitFrames(emit, ClientToServer, body, rt)
-				r.Body = io.NopCloser(bytes.NewReader(body))
-				r.ContentLength = int64(len(body))
-			}
+			rt := route{method: r.Header.Get(mcpMethodHeader), name: r.Header.Get(mcpNameHeader), protocolVersion: r.Header.Get(mcpProtocolVersionHeader)}
+			// Same streaming tap for the request body, so a large upload is forwarded
+			// without being held in memory whole.
+			r.Body = newBodyTap(r.Body, maxFrameBytes, func(observed []byte, truncated bool) {
+				observeBody(emit, ClientToServer, observed, truncated, rt)
+			})
 		}
 		rp.ServeHTTP(w, r)
 	})

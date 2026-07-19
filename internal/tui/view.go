@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -203,6 +204,10 @@ func (m Model) footerCounters() string {
 		return strings.Join(parts, sep)
 	}
 	parts := []string{m.styles.faint.Render(countLabel(len(m.timeline), m.total, "frame"))}
+	// Dropped frames leave a Seq gap and mean the trace is incomplete, so flag them.
+	if missing := m.currentMissingFrames(); missing > 0 {
+		parts = append(parts, m.styles.respErr.Render(fmt.Sprintf("%d missing", missing)))
+	}
 	c := m.streamSignals
 	for _, sig := range []struct {
 		n     int
@@ -219,6 +224,17 @@ func (m Model) footerCounters() string {
 		}
 	}
 	return strings.Join(parts, sep)
+}
+
+// currentMissingFrames returns the dropped-frame count for the session being
+// streamed, inferred from Seq gaps by the store.
+func (m Model) currentMissingFrames() uint64 {
+	for _, s := range m.allSessions {
+		if s.ID == m.streamSessionID {
+			return s.MissingFrames
+		}
+	}
+	return 0
 }
 
 // countLabel renders a plain total, or shown/total when a filter is hiding some
@@ -677,6 +693,17 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = e.Warning + " · " + c.detail
 		}
 	}
+	// A capped observed copy is a caution, not a protocol warning, so it carries a
+	// structured flag (never failing check) but reads the same in the row.
+	if e.Truncated {
+		c.status = "warn"
+		const msg = "observed copy truncated at the frame cap, forwarding unaffected"
+		if c.detail == "" {
+			c.detail = msg
+		} else {
+			c.detail = msg + " · " + c.detail
+		}
+	}
 	return c
 }
 
@@ -728,6 +755,11 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 		return m.styles.invalid
 	}
 	if e.Warning != "" {
+		return m.styles.warn
+	}
+	// A truncated observation reads "warn" in the row, so its cell must be warn
+	// colored too. It no longer rides the Warning field, so check it explicitly.
+	if e.Truncated {
 		return m.styles.warn
 	}
 	if e.Call != nil {
@@ -1768,6 +1800,11 @@ func window(sel, n, rows int) (int, int) {
 	return start, start + rows
 }
 
+// truncate shortens s to at most w terminal cells, appending an ellipsis when it
+// cuts. It measures in cells throughout (the unit lipgloss.Width uses), never rune
+// counts, so a wide rune (CJK, emoji) is two cells and cannot overrun the budget.
+// With wide runes an exact fit is not always possible, so the result may be a cell
+// narrower than w; callers (cellL, cellR) pad the remainder.
 func truncate(s string, w int) string {
 	if w <= 0 {
 		return ""
@@ -1775,11 +1812,26 @@ func truncate(s string, w int) string {
 	if lipgloss.Width(s) <= w {
 		return s
 	}
-	r := []rune(s)
-	if w <= 1 || len(r) <= 1 {
-		return string(r[:max(0, min(len(r), w))])
+	// One cell is reserved for the ellipsis. Take runes until the next one would
+	// push the accumulated width past that budget. Advance by the rune's real byte
+	// size from the source, not len(string(r)): an invalid byte decodes to U+FFFD
+	// (three bytes re-encoded) after consuming one, so computing the offset from the
+	// re-encoded form would overshoot and misalign the cell.
+	budget := w - 1
+	width, end := 0, 0
+	for end < len(s) {
+		r, size := utf8.DecodeRuneInString(s[end:])
+		rw := lipgloss.Width(string(r))
+		if width+rw > budget {
+			break
+		}
+		width += rw
+		end += size
 	}
-	return string(r[:w-1]) + "…"
+	if end == 0 {
+		return "" // the budget cannot fit even one rune, so no bare ellipsis
+	}
+	return s[:end] + "…"
 }
 
 // softWrap hard-wraps any line wider than width so long values (e.g. a big JSON

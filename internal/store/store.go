@@ -104,6 +104,7 @@ type event struct {
 	mcpProtocolVersion string // MCP-Protocol-Version request header
 	batch              bool   // one element of a JSON-RPC batch (routing headers cannot address it)
 	mismatch           bool   // a routing header disagrees with the body (structured flag for warning)
+	truncated          bool   // the observed copy was capped at the frame-size limit
 	call               *call  // set for request/response events
 }
 
@@ -142,6 +143,9 @@ type session struct {
 	events  []*event
 
 	requests, responses, notifications, errors, pending int
+
+	lastSeq uint64 // highest per-session Seq seen, for gap detection
+	missing uint64 // envelopes dropped upstream, inferred from Seq gaps
 }
 
 // Store is the concurrency-safe collector the hub feeds and the TUI reads.
@@ -183,6 +187,17 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 
 	sess := s.sessionFor(e)
 
+	// Track gaps in the monotonic per-session Seq. A jump larger than one means
+	// envelopes were dropped upstream (a full sink buffer) or lost from the log.
+	// Doing it here surfaces drops whether the frames arrive live or are read back
+	// from a gappy file through open or export.
+	if e.Seq > sess.lastSeq {
+		if expected := sess.lastSeq + 1; e.Seq > expected {
+			sess.missing += e.Seq - expected
+		}
+		sess.lastSeq = e.Seq
+	}
+
 	if e.Direction == proxy.DirectionMeta {
 		var meta proxy.SessionMeta
 		if json.Unmarshal(e.Raw, &meta) == nil {
@@ -196,6 +211,17 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 
 	if e.Direction == proxy.ServerStderr {
 		ev.kind = EventStderr
+		sess.events = append(sess.events, ev)
+		return ev.view(sess)
+	}
+
+	if e.Truncated {
+		// mcpsnoop capped its own observed copy of a large body, so the bytes are
+		// incomplete by design. Flag it structurally rather than through the warning
+		// field: it is not a protocol warning, and routing it there would fail a
+		// default `check --fail-on warn` over a perfectly valid oversized body.
+		ev.kind = EventOther
+		ev.truncated = true
 		sess.events = append(sess.events, ev)
 		return ev.view(sess)
 	}

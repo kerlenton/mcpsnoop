@@ -138,6 +138,46 @@ func TestRefreshClampsInspectWhenTimelineShrinks(t *testing.T) {
 	_ = m.pairWidget()
 }
 
+func TestFrameMsgDefersRefreshToThrottledTick(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+	// Settle by running one refresh cycle so dirty clears and m.full is current.
+	for range refreshEvery {
+		m = drive(t, m, tickMsg(time.Now()))
+	}
+	before := len(m.full)
+	if m.dirty {
+		t.Fatal("dirty should be clear after a settling tick")
+	}
+
+	// Deliver a frameMsg per envelope, exactly as the hub callback does.
+	for i := range 20 {
+		st.Ingest(env(uint64(5+i), proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/progress"}`))
+		m = drive(t, m, frameMsg{})
+	}
+	// Not one of them triggered a refresh. The timeline is unchanged and the model
+	// is only marked dirty, so the cost of a burst is bounded rather than per frame.
+	if len(m.full) != before {
+		t.Fatalf("frameMsg refreshed per frame: full %d -> %d", before, len(m.full))
+	}
+	if !m.dirty {
+		t.Fatal("frameMsg should mark the model dirty")
+	}
+
+	// One throttled tick cycle performs a single refresh and clears the flag.
+	for range refreshEvery {
+		m = drive(t, m, tickMsg(time.Now()))
+	}
+	if len(m.full) <= before {
+		t.Fatalf("a throttled tick should refresh once, full still %d", len(m.full))
+	}
+	if m.dirty {
+		t.Fatal("refresh should clear the dirty flag")
+	}
+}
+
 func TestSessionsTableAndDrillIn(t *testing.T) {
 	st := store.New()
 	seed(st)
@@ -300,6 +340,45 @@ func TestStreamQueryFilter(t *testing.T) {
 	fw := apply("status:warn")
 	if len(fw.timeline) != 1 || fw.timeline[0].Warning == "" {
 		t.Fatalf("status:warn should match exactly the warning frame, got %+v", fw.timeline)
+	}
+}
+
+func TestStreamFilterFindsTruncatedUnderWarn(t *testing.T) {
+	st := store.New()
+	seed(st) // clean calls, no warnings
+	trunc := env(5, proxy.ServerToClient, `{"jsonrpc":"2.0","result":{}}`)
+	trunc.Truncated = true
+	st.Ingest(trunc)
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+	total := len(m.timeline)
+
+	mm := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	mm = drive(t, mm, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("status:warn")})
+	fw := drive(t, mm, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if len(fw.timeline) != 1 || total <= 1 {
+		t.Fatalf("status:warn should find exactly the truncated frame, got %d of %d", len(fw.timeline), total)
+	}
+	if !fw.timeline[0].Truncated {
+		t.Fatalf("status:warn matched a non-truncated frame: %+v", fw.timeline[0])
+	}
+}
+
+func TestCountStreamSignalsCountsTruncatedAsWarn(t *testing.T) {
+	events := []store.EventView{
+		{Kind: store.EventOther, Truncated: true},
+		{Kind: store.EventOther}, // neither a warning nor truncated
+	}
+	if c := countStreamSignals(events); c.warn != 1 {
+		t.Fatalf("a truncated frame should count as one warn, got %d", c.warn)
+	}
+}
+
+func TestStatusRankTruncatedRanksAsWarn(t *testing.T) {
+	if r := statusRank(store.EventView{Kind: store.EventOther, Truncated: true}); r != 3 {
+		t.Fatalf("a truncated frame should rank 3 like a warning, got %d", r)
 	}
 }
 
@@ -527,6 +606,8 @@ func TestCapsOverlayUpdatesLive(t *testing.T) {
 	if m.overlay != overlayCaps {
 		t.Fatal("a live frame must not close the overlay")
 	}
+	// The live overlay refreshes on the tick, not per frame, so advance one tick.
+	m = drive(t, m, tickMsg(time.Now()))
 	if !strings.Contains(m.overlayRaw, "srv-impl") || !strings.Contains(m.overlayRaw, "● tools") {
 		t.Fatalf("caps overlay did not pick up the server handshake live\n%s", m.overlayRaw)
 	}
@@ -1069,6 +1150,8 @@ func TestSummaryUpdatesLive(t *testing.T) {
 	if m.overlay != overlaySummary {
 		t.Fatal("a live frame must not close the summary")
 	}
+	// The live overlay refreshes on the tick, not per frame, so advance one tick.
+	m = drive(t, m, tickMsg(time.Now()))
 	if !strings.Contains(m.overlayRaw, "search") {
 		t.Fatalf("summary did not pick up the new call live\n%s", m.overlayRaw)
 	}

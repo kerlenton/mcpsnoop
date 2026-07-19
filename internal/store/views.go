@@ -63,7 +63,10 @@ type EventView struct {
 	// a batch. It is a structured handle for the same condition the warning
 	// describes, so filters and exporters need not match warning text.
 	RoutingMismatch bool
-	Call            *CallView // set for request/response events
+	// Truncated is true when mcpsnoop capped its own observed copy of a large body.
+	// It is a structured marker, not a protocol warning, so it never fails check.
+	Truncated bool
+	Call      *CallView // set for request/response events
 }
 
 // SessionHeader is a lightweight per-session summary for the left panel.
@@ -80,6 +83,7 @@ type SessionHeader struct {
 	HasCaps              bool
 	HasToolDrift         bool
 	HasToolBaselineError bool
+	MissingFrames        uint64 // envelopes dropped upstream, inferred from Seq gaps
 }
 
 // ToolDefinition is the contract a server advertised for one MCP tool.
@@ -158,6 +162,7 @@ func (e *event) view(_ *session) EventView {
 		MCPName:            e.mcpName,
 		MCPProtocolVersion: e.mcpProtocolVersion,
 		RoutingMismatch:    e.mismatch,
+		Truncated:          e.truncated,
 	}
 	if e.call != nil {
 		cv := e.call.view()
@@ -203,6 +208,7 @@ func (s *Store) Sessions() []SessionHeader {
 			HasCaps:              sess.caps.set,
 			HasToolDrift:         sess.toolDrift.Count() > 0,
 			HasToolBaselineError: sess.toolDrift.BaselineError != "",
+			MissingFrames:        sess.missing,
 		})
 	}
 	return out
@@ -356,15 +362,19 @@ func (s *Store) Activity(sessionID string, n int, span time.Duration) []int {
 	}
 	start := time.Now().Add(-span)
 	step := span / time.Duration(n)
-	for _, ev := range sess.events {
+	// Events are in arrival (ascending time) order, so walk back from the newest and
+	// stop at the first one older than the window, instead of scanning the whole
+	// session on every refresh.
+	for i := len(sess.events) - 1; i >= 0; i-- {
+		ev := sess.events[i]
 		if ev.ts.Before(start) {
-			continue
+			break
 		}
-		i := int(ev.ts.Sub(start) / step)
-		if i >= n {
-			i = n - 1
+		b := int(ev.ts.Sub(start) / step)
+		if b >= n {
+			b = n - 1
 		}
-		buckets[i]++
+		buckets[b]++
 	}
 	return buckets
 }

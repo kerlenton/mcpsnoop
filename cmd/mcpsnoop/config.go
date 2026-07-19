@@ -16,7 +16,8 @@ type config struct {
 	TraceFile     string
 	NoTrace       bool
 	RedactSecrets bool
-	RedactKeys    []string
+	RedactKeys    redactKeysFlag
+	RedactValues  redactValuesFlag
 	RedactPaths   redactPathsFlag
 }
 
@@ -117,11 +118,17 @@ func parseConfig(r io.Reader) (config, error) {
 			cfg.RedactSecrets = b
 
 		case "redact-key":
-			var keys redactKeysFlag
-			if err := keys.Set(value); err != nil {
+			// Set appends, so repeated redact-key lines accumulate instead of the
+			// last one silently winning and dropping a redaction rule.
+			if err := cfg.RedactKeys.Set(value); err != nil {
 				return config{}, err
 			}
-			cfg.RedactKeys = []string(keys)
+
+		case "redact-value":
+			// Set validates the regex exactly as the command-line flag does.
+			if err := cfg.RedactValues.Set(value); err != nil {
+				return config{}, err
+			}
 
 		case "redact-path":
 			if err := cfg.RedactPaths.Set(value); err != nil {
@@ -147,6 +154,7 @@ func applyConfig(
 	label, traceFile *string,
 	noTrace, redactSecrets *bool,
 	redactKeys *redactKeysFlag,
+	redactValues *redactValuesFlag,
 	redactPaths *redactPathsFlag,
 ) {
 	if !ok {
@@ -170,7 +178,11 @@ func applyConfig(
 	}
 
 	if !fs.Changed("redact-key") {
-		*redactKeys = redactKeysFlag(cfg.RedactKeys)
+		*redactKeys = cfg.RedactKeys
+	}
+
+	if !fs.Changed("redact-value") {
+		*redactValues = cfg.RedactValues
 	}
 
 	if !fs.Changed("redact-path") {

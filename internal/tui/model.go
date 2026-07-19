@@ -154,7 +154,8 @@ type Model struct {
 
 	width, height int
 	ready         bool
-	spin          int // shared spinner frame, advanced by tickMsg
+	spin          int  // shared spinner frame, advanced by tickMsg
+	dirty         bool // a frame arrived since the last refresh, set by frameMsg
 }
 
 // setFlash shows a transient message in the status bar for ~2s.
@@ -226,10 +227,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		if !m.paused {
 			m.spin++
-			// The spinner advances every tick, the store refresh only every fifth,
-			// so animation stays smooth without re-reading the log 12 times a second.
-			if m.spin%refreshEvery == 0 {
+			// The spinner advances every tick, the store refresh only every fifth and
+			// only when a frame arrived since, so a burst of traffic cannot force a
+			// refresh per envelope (which is quadratic over a session).
+			if m.spin%refreshEvery == 0 && m.dirty {
 				m.refresh()
+				m.dirty = false
 			}
 			// An open live overlay rebuilds every tick so a pending spinner animates
 			// at the tick cadence. The content-diff guard makes this a no-op when
@@ -239,9 +242,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tick()
 
 	case frameMsg:
+		// Only mark the store dirty. The throttled tick above does the actual
+		// refresh, so cost stays bounded no matter how fast frames arrive.
 		if !m.paused {
-			m.refresh()
-			m.refreshLiveOverlay()
+			m.dirty = true
 		}
 		return m, nil
 
@@ -891,7 +895,7 @@ func countStreamSignals(events []store.EventView) streamSignalCounts {
 	var c streamSignalCounts
 	for _, e := range events {
 		switch {
-		case e.Kind != store.EventInvalid && e.Warning != "":
+		case e.Kind != store.EventInvalid && (e.Warning != "" || e.Truncated):
 			c.warn++
 		case e.Kind == store.EventInvalid:
 			c.bad++
@@ -973,7 +977,7 @@ func statusRank(e store.EventView) int {
 	if e.Call != nil && e.Call.Failed() {
 		return 4
 	}
-	if e.Warning != "" {
+	if e.Warning != "" || e.Truncated {
 		return 3
 	}
 	if e.Call == nil {
@@ -1097,7 +1101,9 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 		return e.Kind == store.EventInvalid
 	}
 	if v == "warn" || v == "warning" {
-		return e.Warning != ""
+		// A capped observation reads as a warning in the row, so status:warn finds it
+		// too, even though it rides a structured flag rather than the warning text.
+		return e.Warning != "" || e.Truncated
 	}
 	if v == "mismatch" {
 		// A routing header disagreeing with the body (Mcp-Method/Mcp-Name, SEP-2243).

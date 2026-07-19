@@ -15,6 +15,13 @@ type Sink interface {
 	Close() error
 }
 
+// DropCounter is an optional interface a Sink may implement to report how many
+// envelopes it dropped on a full buffer. Callers type-assert for it, so a sink
+// that never drops need not implement it. MultiSink totals it across children.
+type DropCounter interface {
+	Dropped() uint64
+}
+
 // nopSink discards everything. Used when tracing is disabled.
 type nopSink struct{}
 

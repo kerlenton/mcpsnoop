@@ -80,6 +80,77 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 	}
 }
 
+func TestCheckWritesJUnitGolden(t *testing.T) {
+	// checkSignalEnvelopes carries a tools/list, so the run observes a baseline.
+	// Isolate it the way the drift tests do, or it writes into the real state dir.
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t, checkSignalEnvelopes()...)
+
+	code, stdout, stderr := executeCheck(t, []string{"--format", "junit", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	const want = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="mcpsnoop check" tests="7" failures="3" errors="0" skipped="0" time="0">
+  <testsuite name="s1" tests="7" failures="3" errors="0" skipped="0" time="0">
+    <testcase classname="mcpsnoop.check" name="s1/error" time="0">
+      <failure message="session s1 has 2 errors" type="mcpsnoop.check.error">session s1 has 2 errors</failure>
+    </testcase>
+    <testcase classname="mcpsnoop.check" name="s1/invalid" time="0">
+      <failure message="session s1 has 1 invalid frame" type="mcpsnoop.check.invalid">session s1 has 1 invalid frame</failure>
+    </testcase>
+    <testcase classname="mcpsnoop.check" name="s1/warn" time="0">
+      <failure message="session s1 has 1 warning" type="mcpsnoop.check.warn">session s1 has 1 warning</failure>
+    </testcase>
+    <testcase classname="mcpsnoop.check" name="s1/mismatch" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/pending" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/drift" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/assertions" time="0"></testcase>
+  </testsuite>
+</testsuites>
+`
+	if stdout != want {
+		t.Fatalf("stdout mismatch\nwant:\n%s\ngot:\n%s", want, stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
+func TestCheckJUnitHonorsFailOn(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t, checkErrorEnvelopes()...)
+
+	code, stdout, stderr := executeCheck(t, []string{"--format", "junit", "--fail-on", "invalid,warn", "-"}, log)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 because errors are not selected", code)
+	}
+	for _, want := range []string{`tests="7"`, `failures="0"`, `name="s1/error"`} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "<failure") {
+		t.Fatalf("stdout should not contain failures:\n%s", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
+func TestCheckRejectsUnknownFormat(t *testing.T) {
+	code, stdout, stderr := executeCheck(t, []string{"--format", "json", "-"}, "{}\n")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "mcpsnoop check: --format must be text or junit") {
+		t.Fatalf("stderr = %q, want --format error", stderr)
+	}
+}
+
 func TestCheckRejectsUnknownOrEmptyFailOnValues(t *testing.T) {
 	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	for _, value := range []string{"error,bogus", ""} {
@@ -313,6 +384,88 @@ func TestCheckReportsMissingLabelBaselineWithoutFailingUnlessDriftSelected(t *te
 	code, stdout, _ = executeCheck(t, []string{"--fail-on", "drift", "-"}, log)
 	if code != 1 || !strings.Contains(stdout, "check failed: drift") {
 		t.Fatalf("drift should fail on a missing-label baseline, got code %d stdout %q", code, stdout)
+	}
+}
+
+func TestCheckMaxDurationAssertion(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// echo takes one second: request at t=1s, response at t=2s.
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	)
+
+	code, stdout, _ := executeCheck(t, []string{"--max-duration", "500ms", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 for a call over the budget", code)
+	}
+	if !strings.Contains(stdout, `assertion failed: tool "echo" took 1s, over the 500ms budget`) {
+		t.Fatalf("stdout = %q", stdout)
+	}
+
+	code, stdout, _ = executeCheck(t, []string{"--max-duration", "2s", "-"}, log)
+	if code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("a call within budget should pass, code %d stdout %q", code, stdout)
+	}
+}
+
+func TestCheckExpectAndForbidToolAssertions(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	)
+
+	// expect-tool: satisfied when the tool was called, fails when it was not.
+	if code, stdout, _ := executeCheck(t, []string{"--expect-tool", "echo", "-"}, log); code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("echo should satisfy --expect-tool echo, code %d stdout %q", code, stdout)
+	}
+	code, stdout, _ := executeCheck(t, []string{"--expect-tool", "search", "-"}, log)
+	if code != 1 || !strings.Contains(stdout, `assertion failed: expected tool "search" was never called`) {
+		t.Fatalf("--expect-tool search should fail, code %d stdout %q", code, stdout)
+	}
+
+	// forbid-tool: passes when the tool was not called, fails when it was.
+	if code, stdout, _ := executeCheck(t, []string{"--forbid-tool", "delete", "-"}, log); code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("--forbid-tool delete should pass when delete was not called, code %d stdout %q", code, stdout)
+	}
+	code, stdout, _ = executeCheck(t, []string{"--forbid-tool", "echo", "-"}, log)
+	if code != 1 || !strings.Contains(stdout, `assertion failed: forbidden tool "echo" was called`) {
+		t.Fatalf("--forbid-tool echo should fail, code %d stdout %q", code, stdout)
+	}
+}
+
+func TestCheckAssertionsCompose(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// echo takes a second, and search is never called, so both assertions fail.
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	)
+	code, stdout, _ := executeCheck(t, []string{"--max-duration", "500ms", "--expect-tool", "search", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 when either assertion fails", code)
+	}
+	for _, want := range []string{`tool "echo" took`, `expected tool "search" was never called`} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q\n%s", want, stdout)
+		}
+	}
+}
+
+func TestCheckPassesForTruncatedBody(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// A perfectly valid response whose observed copy was capped at maxFrameBytes. It
+	// must not turn the default check red over an observation limit.
+	trunc := checkEnvelope(1, proxy.ServerToClient, `{"jsonrpc":"2.0","result":{}}`)
+	trunc.Truncated = true
+
+	code, stdout, stderr := executeCheck(t, []string{"-"}, encodeCheckLog(t, trunc))
+	if code != 0 || stderr != "" {
+		t.Fatalf("a truncated body must not fail the default check, code %d stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "warnings=0") || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("stdout = %q", stdout)
 	}
 }
 

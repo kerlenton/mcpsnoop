@@ -269,7 +269,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 				fmt.Fprintln(os.Stderr, "mcpsnoop:", err)
 				return exitCode(1)
 			}
-			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys, &redactPaths)
+			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths)
 			trace, err := parseTraceOptions(otlpEndpoint, otlpHeaders)
 			if err != nil {
 				return err
@@ -435,7 +435,16 @@ func runShim(command []string, label, traceFile string, noTrace bool, redaction 
 	sessionID := fmt.Sprintf("%s-%d", label, os.Getpid())
 
 	sink := traceSink(sessionID, traceFile, noTrace, redaction, trace)
-	defer sink.Close()
+	defer func() {
+		_ = sink.Close()
+		// If any sink dropped envelopes under load, the trace is incomplete, so say
+		// so once on shutdown rather than let the user believe every call was saved.
+		if d, ok := sink.(proxy.DropCounter); ok {
+			if n := d.Dropped(); n > 0 {
+				fmt.Fprintf(os.Stderr, "mcpsnoop: dropped %d envelope(s) under load, the trace is incomplete\n", n)
+			}
+		}
+	}()
 	if !noTrace {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: tracing %q (session %s)\n", strings.Join(command, " "), sessionID)
 	}
@@ -473,7 +482,14 @@ func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.Redact
 	} else {
 		sinks = append(sinks, proxy.NewAsyncSink(f, 0))
 	}
-	sinks = append(sinks, proxy.NewSocketSink(paths.SocketPath(), 0))
+	// The live stream is best effort, so a too-long socket path degrades to a
+	// file-only trace with an explanation rather than aborting the whole proxy.
+	socketPath := paths.SocketPath()
+	if err := paths.CheckSocketPath(socketPath); err != nil {
+		fmt.Fprintf(os.Stderr, "mcpsnoop: live view disabled, %v\n", err)
+	} else {
+		sinks = append(sinks, proxy.NewSocketSink(socketPath, 0))
+	}
 	if trace.OTLPEndpoint != "" {
 		sinks = append(sinks, otlpsink.New(otlpsink.Config{
 			Endpoint: trace.OTLPEndpoint,
@@ -508,7 +524,7 @@ func newHTTPCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "mcpsnoop http:", err)
 				return exitCode(1)
 			}
-			applyConfig(cmd.Flags(), cfg, ok, &label, nil, &noTrace, &redactSecrets, &redactKeys, &redactPaths)
+			applyConfig(cmd.Flags(), cfg, ok, &label, nil, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths)
 			if target == "" {
 				fmt.Fprintln(os.Stderr, "mcpsnoop http: --target is required")
 				return exitCode(2)

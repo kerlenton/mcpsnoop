@@ -77,9 +77,13 @@ label = "filesystem"
 trace-file = "trace.jsonl"
 redact-secrets = true
 redact-key = "token,authorization"
+redact-value = "sk-[A-Za-z0-9]+"
 redact-path = "$.params.arguments.password"
 no-trace = false
 ```
+
+Repeat `redact-key`, `redact-value`, and `redact-path` on their own lines to add
+more than one of each.
 
 Those are all the keys it supports.
 
@@ -279,7 +283,7 @@ Gate a recorded agent run on errors, stream corruption, protocol warnings,
 routing-header mismatches, or calls that never got a response.
 
 ```bash
-mcpsnoop check [--fail-on error,invalid,warn,mismatch,pending] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
@@ -287,11 +291,40 @@ to gate on calls that never got a response, or `mismatch` to gate specifically o
 a routing header (Mcp-Method or Mcp-Name) disagreeing with the body. Pass a
 comma-separated subset to select only the conditions relevant to a job. Omit the
 session to check the newest capture, or use `-` to read JSONL from stdin.
+Use `--format junit` to write one JUnit `<testcase>` per signal and session;
+failures follow the same `--fail-on` selection as the text output.
 
 ```bash
 mcpsnoop check build-agent
 mcpsnoop check --fail-on error,invalid artifacts/session.jsonl
 mcpsnoop check --fail-on mismatch gateway-run.jsonl
+```
+
+Beyond the signal counts, assert the shape of the run. These compose with each
+other and with `--fail-on`, and any failure exits non-zero.
+
+| Flag | Fails when |
+|---|---|
+| `--max-duration <dur>` | a completed tool call took longer than the budget, e.g. `--max-duration 500ms` |
+| `--expect-tool <name>` | the named tool was never called (repeatable) |
+| `--forbid-tool <name>` | the named tool was called (repeatable) |
+
+```bash
+# a contract for the run: search must run, delete must not, nothing over 2s
+mcpsnoop check --expect-tool search --forbid-tool delete --max-duration 2s run.jsonl
+```
+
+```yaml
+- name: Check captured MCP session
+  run: |
+    mkdir -p test-results
+    mcpsnoop check --format junit artifacts/session.jsonl > test-results/mcpsnoop.xml
+- name: Upload mcpsnoop JUnit report
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: mcpsnoop-junit
+    path: test-results/mcpsnoop.xml
 ```
 
 ### Detect tool definition drift
@@ -395,7 +428,11 @@ your client config.
 Captured frames can include prompts, tool arguments, credentials, and tool
 results. If payloads can carry secrets, opt in to redaction to scrub the
 observed trace copies while the proxied bytes still pass through unchanged.
-Key-based redaction replaces whole values under matching JSON object keys.
+Key-based redaction replaces whole values under matching JSON object keys, and
+the same key set is applied best effort to the wrapped server's command-line
+arguments, so `--api-key=sk-x` and `--token sk-x` are scrubbed under
+`--redact-secrets`. An argument that carries a secret without a recognizable flag
+name cannot be detected.
 Path-based redaction replaces only values selected by a JSONPath expression,
 which is useful when a common key name is sensitive in one location but safe in
 another. Repeat `--redact-path` to scrub more than one location.

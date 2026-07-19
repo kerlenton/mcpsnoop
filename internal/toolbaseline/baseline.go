@@ -109,13 +109,18 @@ func ObserveSession(m *Manager, st *store.Store, sessionID string) (Report, bool
 // ObserveAll observes every session that has a complete tool list, recording a
 // per-session BaselineError rather than returning on the first failure, so one
 // bad baseline file never blocks the TUI from opening or hides other sessions.
-func ObserveAll(m *Manager, st *store.Store) {
+// onSession, when non-nil, fires after each session so a caller running this in
+// the background can render drift markers incrementally instead of in one batch.
+func ObserveAll(m *Manager, st *store.Store, onSession func()) {
 	for _, session := range st.Sessions() {
 		if _, ok := st.ToolDefinitions(session.ID); !ok {
 			continue
 		}
 		if _, _, err := ObserveSession(m, st, session.ID); err != nil {
 			st.SetToolDrift(session.ID, store.ToolDrift{BaselineError: err.Error()})
+		}
+		if onSession != nil {
+			onSession()
 		}
 	}
 }
