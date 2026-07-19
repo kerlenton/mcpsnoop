@@ -12,9 +12,26 @@
 package paths
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
+
+// maxSocketPathLen is a conservative unix-domain socket path limit. sun_path is
+// 104 bytes on darwin and 108 on Linux including the null terminator, so 103
+// usable bytes is safe on both. A longer path makes bind and dial fail with a
+// bare "invalid argument".
+const maxSocketPathLen = 103
+
+// CheckSocketPath returns an actionable error when path is too long to use as a
+// unix domain socket, instead of the opaque syscall error bind and dial produce.
+func CheckSocketPath(path string) error {
+	if len(path) > maxSocketPathLen {
+		return fmt.Errorf("socket path %q is %d bytes, over the %d-byte unix socket limit; set a shorter MCPSNOOP_HOME",
+			path, len(path), maxSocketPathLen)
+	}
+	return nil
+}
 
 // Base returns the mcpsnoop state directory, creating it if needed.
 func Base() string {
@@ -50,6 +67,13 @@ func SessionsDir() string {
 // ExportsDir holds files written from the TUI export action.
 func ExportsDir() string {
 	d := filepath.Join(Base(), "exports")
+	_ = os.MkdirAll(d, 0o700)
+	return d
+}
+
+// ToolBaselinesDir holds trust-on-first-use tool definitions per server label.
+func ToolBaselinesDir() string {
+	d := filepath.Join(Base(), "tool-baselines")
 	_ = os.MkdirAll(d, 0o700)
 	return d
 }

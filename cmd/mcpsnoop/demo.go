@@ -19,7 +19,7 @@ import (
 // see the live view in seconds without wiring up a client or a server. It runs
 // on a throwaway home, so it never touches or shows the user's real sessions.
 func runDemo() int {
-	dir, err := os.MkdirTemp("", "mcpsnoop-demo-")
+	dir, err := demoIsolatedHome()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)
 		return 1
@@ -43,6 +43,24 @@ func runDemo() int {
 		return 1
 	}
 	return 0
+}
+
+// demoIsolatedHome creates a throwaway state directory and points MCPSNOOP_HOME at
+// it, so every location derived through paths (tool baselines, exports, the socket,
+// the session logs) lands inside it instead of the user's real
+// ~/.local/state/mcpsnoop. Without this the demo's scripted tools/list writes a
+// trust-on-first-use baseline for the "demo" label into the real directory, and a
+// later real server labelled demo then reports drift against invented tools. paths
+// reads the environment on each call, so setting it here is enough.
+func demoIsolatedHome() (string, error) {
+	dir, err := os.MkdirTemp("", "mcpsnoop-demo-")
+	if err != nil {
+		return "", err
+	}
+	if err := os.Setenv("MCPSNOOP_HOME", dir); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // demoFrame is one scripted observed frame plus the pause to wait after it, so

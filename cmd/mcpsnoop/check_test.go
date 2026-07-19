@@ -11,6 +11,7 @@ import (
 
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/toolbaseline"
 )
 
 func TestCheckFailsOnSelectedSessionSignals(t *testing.T) {
@@ -30,6 +31,7 @@ func TestCheckFailsOnSelectedSessionSignals(t *testing.T) {
 }
 
 func TestCheckFailsOnlyOnSelectedSignals(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	log := encodeCheckLog(t, checkSignalEnvelopes()...)
 
 	code, stdout, stderr := executeCheck(t, []string{"--fail-on", "invalid", "-"}, log)
@@ -45,6 +47,7 @@ func TestCheckFailsOnlyOnSelectedSignals(t *testing.T) {
 }
 
 func TestCheckIgnoresUnselectedSignals(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	errorOnly := encodeCheckLog(t, checkErrorEnvelopes()...)
 	code, stdout, stderr := executeCheck(t, []string{"--fail-on", "invalid,warn", "-"}, errorOnly)
 	if code != 0 {
@@ -59,6 +62,7 @@ func TestCheckIgnoresUnselectedSignals(t *testing.T) {
 }
 
 func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	log := encodeCheckLog(t,
 		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
 		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`),
@@ -68,7 +72,7 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0\ncheck passed\n" {
+	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0\nrecorded first-seen tool baseline (trusted, not verified)\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -142,6 +146,7 @@ func TestCheckRejectsUnknownFormat(t *testing.T) {
 }
 
 func TestCheckRejectsUnknownOrEmptyFailOnValues(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	for _, value := range []string{"error,bogus", ""} {
 		t.Run(value, func(t *testing.T) {
 			code, stdout, stderr := executeCheck(t, []string{"--fail-on", value, "-"}, "{}\n")
@@ -159,6 +164,7 @@ func TestCheckRejectsUnknownOrEmptyFailOnValues(t *testing.T) {
 }
 
 func TestCheckReportsMalformedInput(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	code, stdout, stderr := executeCheck(t, []string{"-"}, "not-json\n")
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
@@ -172,6 +178,7 @@ func TestCheckReportsMalformedInput(t *testing.T) {
 }
 
 func TestCheckGatesEverySessionNotJustTheFirst(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	env := func(session string, seq uint64, dir proxy.Direction, raw string) proxy.Envelope {
 		return proxy.Envelope{SessionID: session, ServerLabel: "srv", Seq: seq, TS: time.Unix(int64(seq), 0), Direction: dir, Raw: json.RawMessage(raw)}
 	}
@@ -195,6 +202,7 @@ func TestCheckGatesEverySessionNotJustTheFirst(t *testing.T) {
 }
 
 func TestCheckFailsOnHungCall(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	// A request with no response is a hung call that only the pending signal sees.
 	log := encodeCheckLog(t,
 		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hang"}}`),
@@ -219,6 +227,7 @@ func TestCheckFailsOnHungCall(t *testing.T) {
 }
 
 func TestCheckFailsOnRoutingMismatch(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	// The Mcp-Name header claims a safe tool while the body calls another one: a
 	// routing mismatch (tool shadowing) that a compliant gateway would reject.
 	shadow := checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dangerous"}}`)
@@ -246,6 +255,210 @@ func TestCheckFailsOnRoutingMismatch(t *testing.T) {
 		t.Fatalf("exit = %d, want 0 for a clean session", code)
 	}
 	if !strings.Contains(stdout, "mismatches=0") || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
+func TestCheckFailsOnToolDefinitionDriftWhenSelected(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	baseline := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search docs","inputSchema":{"type":"object"}}]}}`),
+	)
+	code, _, stderr := executeCheck(t, []string{"--fail-on", "drift", "-"}, baseline)
+	if code != 0 || stderr != "" {
+		t.Fatalf("baseline check = code %d, stderr %q", code, stderr)
+	}
+
+	changed := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search private docs","inputSchema":{"type":"object"}}]}}`),
+	)
+	code, stdout, stderr := executeCheck(t, []string{"--fail-on", "drift", "-"}, changed)
+	if code != 1 || stderr != "" {
+		t.Fatalf("drift check = code %d, stderr %q", code, stderr)
+	}
+	for _, want := range []string{"definition drift:", "description changed: search", "check failed: drift"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q\n%s", want, stdout)
+		}
+	}
+
+	code, stdout, stderr = executeCheck(t, []string{"-"}, changed)
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "description changed: search") {
+		t.Fatalf("default check = code %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
+func TestCheckBaselineFlagRecordsThenDetectsDrift(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir()) // exercise --baseline, not the state dir
+	dir := t.TempDir()
+	baseline := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search docs","inputSchema":{"type":"object"}}]}}`),
+	)
+
+	// First run against an empty baseline dir records; it does not verify.
+	code, stdout, stderr := executeCheck(t, []string{"--fail-on", "drift", "--baseline", dir, "-"}, baseline)
+	if code != 0 || stderr != "" {
+		t.Fatalf("first run = code %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "recorded first-seen tool baseline") {
+		t.Fatalf("first run should announce it only recorded a baseline, got %q", stdout)
+	}
+
+	// The persisted directory lets the second run actually verify, and catch drift.
+	changed := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search private docs","inputSchema":{"type":"object"}}]}}`),
+	)
+	code, stdout, stderr = executeCheck(t, []string{"--fail-on", "drift", "--baseline", dir, "-"}, changed)
+	if code != 1 || stderr != "" {
+		t.Fatalf("second run = code %d, stderr %q", code, stderr)
+	}
+	for _, want := range []string{"description changed: search", "check failed: drift"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("second run missing %q\n%s", want, stdout)
+		}
+	}
+}
+
+func TestCheckReportsCorruptBaselineWithoutFailingUnlessDriftSelected(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	dir := t.TempDir()
+	// A corrupt baseline for the session's server label, as a crash once left behind.
+	if err := os.WriteFile(toolbaseline.New(dir).Path("srv"), []byte("{bad json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","inputSchema":{"type":"object"}}]}}`),
+	)
+
+	// The default gate does not select drift, so the baseline problem is reported
+	// but does not fail the run.
+	code, stdout, stderr := executeCheck(t, []string{"--baseline", dir, "-"}, log)
+	if code != 0 || stderr != "" {
+		t.Fatalf("default gate = code %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "tool baseline error:") || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("expected a reported baseline error and a pass, got %q", stdout)
+	}
+
+	// Selecting drift makes the same unverifiable baseline fail.
+	code, stdout, stderr = executeCheck(t, []string{"--fail-on", "drift", "--baseline", dir, "-"}, log)
+	if code != 1 || stderr != "" {
+		t.Fatalf("drift gate = code %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "tool baseline error:") || !strings.Contains(stdout, "check failed: drift") {
+		t.Fatalf("drift should fail on a baseline error, got %q", stdout)
+	}
+}
+
+func TestCheckReportsMissingLabelBaselineWithoutFailingUnlessDriftSelected(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// A session with no server label cannot key a baseline, but that must not fail
+	// a run that did not ask for drift.
+	noLabel := func(seq uint64, dir proxy.Direction, raw string) proxy.Envelope {
+		return proxy.Envelope{SessionID: "s1", ServerLabel: "", Seq: seq, TS: time.Unix(int64(seq), 0), Direction: dir, Raw: json.RawMessage(raw)}
+	}
+	log := encodeCheckLog(t,
+		noLabel(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		noLabel(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","inputSchema":{"type":"object"}}]}}`),
+	)
+
+	code, stdout, _ := executeCheck(t, []string{"-"}, log)
+	if code != 0 {
+		t.Fatalf("a missing label should not fail the default gate, code %d", code)
+	}
+	if !strings.Contains(stdout, "tool baseline error:") || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("expected a reported baseline error and a pass, got %q", stdout)
+	}
+
+	code, stdout, _ = executeCheck(t, []string{"--fail-on", "drift", "-"}, log)
+	if code != 1 || !strings.Contains(stdout, "check failed: drift") {
+		t.Fatalf("drift should fail on a missing-label baseline, got code %d stdout %q", code, stdout)
+	}
+}
+
+func TestCheckMaxDurationAssertion(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// echo takes one second: request at t=1s, response at t=2s.
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	)
+
+	code, stdout, _ := executeCheck(t, []string{"--max-duration", "500ms", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 for a call over the budget", code)
+	}
+	if !strings.Contains(stdout, `assertion failed: tool "echo" took 1s, over the 500ms budget`) {
+		t.Fatalf("stdout = %q", stdout)
+	}
+
+	code, stdout, _ = executeCheck(t, []string{"--max-duration", "2s", "-"}, log)
+	if code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("a call within budget should pass, code %d stdout %q", code, stdout)
+	}
+}
+
+func TestCheckExpectAndForbidToolAssertions(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	)
+
+	// expect-tool: satisfied when the tool was called, fails when it was not.
+	if code, stdout, _ := executeCheck(t, []string{"--expect-tool", "echo", "-"}, log); code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("echo should satisfy --expect-tool echo, code %d stdout %q", code, stdout)
+	}
+	code, stdout, _ := executeCheck(t, []string{"--expect-tool", "search", "-"}, log)
+	if code != 1 || !strings.Contains(stdout, `assertion failed: expected tool "search" was never called`) {
+		t.Fatalf("--expect-tool search should fail, code %d stdout %q", code, stdout)
+	}
+
+	// forbid-tool: passes when the tool was not called, fails when it was.
+	if code, stdout, _ := executeCheck(t, []string{"--forbid-tool", "delete", "-"}, log); code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("--forbid-tool delete should pass when delete was not called, code %d stdout %q", code, stdout)
+	}
+	code, stdout, _ = executeCheck(t, []string{"--forbid-tool", "echo", "-"}, log)
+	if code != 1 || !strings.Contains(stdout, `assertion failed: forbidden tool "echo" was called`) {
+		t.Fatalf("--forbid-tool echo should fail, code %d stdout %q", code, stdout)
+	}
+}
+
+func TestCheckAssertionsCompose(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// echo takes a second, and search is never called, so both assertions fail.
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	)
+	code, stdout, _ := executeCheck(t, []string{"--max-duration", "500ms", "--expect-tool", "search", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 when either assertion fails", code)
+	}
+	for _, want := range []string{`tool "echo" took`, `expected tool "search" was never called`} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q\n%s", want, stdout)
+		}
+	}
+}
+
+func TestCheckPassesForTruncatedBody(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// A perfectly valid response whose observed copy was capped at maxFrameBytes. It
+	// must not turn the default check red over an observation limit.
+	trunc := checkEnvelope(1, proxy.ServerToClient, `{"jsonrpc":"2.0","result":{}}`)
+	trunc.Truncated = true
+
+	code, stdout, stderr := executeCheck(t, []string{"-"}, encodeCheckLog(t, trunc))
+	if code != 0 || stderr != "" {
+		t.Fatalf("a truncated body must not fail the default check, code %d stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "warnings=0") || !strings.Contains(stdout, "check passed") {
 		t.Fatalf("stdout = %q", stdout)
 	}
 }

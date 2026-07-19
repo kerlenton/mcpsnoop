@@ -77,9 +77,13 @@ label = "filesystem"
 trace-file = "trace.jsonl"
 redact-secrets = true
 redact-key = "token,authorization"
+redact-value = "sk-[A-Za-z0-9]+"
 redact-path = "$.params.arguments.password"
 no-trace = false
 ```
+
+Repeat `redact-key`, `redact-value`, and `redact-path` on their own lines to add
+more than one of each.
 
 Those are all the keys it supports.
 
@@ -97,6 +101,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, or otlp |
 | `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, or hung calls |
+| `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
 | `mcpsnoop remote <user@host>` | print the SSH tunnel command |
@@ -112,6 +117,7 @@ Run `mcpsnoop help` for the full list, or `mcpsnoop help <command>` for the flag
 | Flags hung calls and stream errors | no | yes |
 | Flags stray output that corrupts the stream | no | yes |
 | Flags malformed JSON-RPC frames | no | yes |
+| Detects tool definition drift after approval | no | yes |
 | Interactive terminal UI | no | yes |
 | Zero-config, no flags or ordering | no | yes |
 | Capability inspector | partial | yes |
@@ -254,15 +260,16 @@ mcpsnoop diff before-session after-session
 mcpsnoop diff old.jsonl new.jsonl
 ```
 
-The report shows tools that were added or removed, `inputSchema` changes,
-matching tool calls whose status changed, and notable duration shifts. Calls are
-matched by tool name and arguments, so reordered calls still compare correctly.
+The report shows tools that were added or removed, description and `inputSchema`
+changes, matching tool calls whose status changed, and notable duration shifts. Calls
+are matched by tool name and arguments, so reordered calls still compare correctly.
 By default, duration changes must differ by at least 100 ms and 2x; use
 `--duration-threshold` and `--duration-ratio` to adjust those cutoffs.
 
 Pass `--exit-code` to gate CI on regressions: it exits non-zero when the after
-session drops a tool, changes an input schema, has a call whose status got worse,
-or slows down. Improvements (added tools, fixed calls, speedups) still exit zero.
+session drops a tool, changes a tool description or input schema, has a call whose
+status got worse, or slows down. A description-only change now counts as a
+regression too. Improvements (added tools, fixed calls, speedups) still exit zero.
 
 ## Checking sessions in CI
 
@@ -287,6 +294,20 @@ mcpsnoop check --fail-on error,invalid artifacts/session.jsonl
 mcpsnoop check --fail-on mismatch gateway-run.jsonl
 ```
 
+Beyond the signal counts, assert the shape of the run. These compose with each
+other and with `--fail-on`, and any failure exits non-zero.
+
+| Flag | Fails when |
+|---|---|
+| `--max-duration <dur>` | a completed tool call took longer than the budget, e.g. `--max-duration 500ms` |
+| `--expect-tool <name>` | the named tool was never called (repeatable) |
+| `--forbid-tool <name>` | the named tool was called (repeatable) |
+
+```bash
+# a contract for the run: search must run, delete must not, nothing over 2s
+mcpsnoop check --expect-tool search --forbid-tool delete --max-duration 2s run.jsonl
+```
+
 ```yaml
 - name: Check captured MCP session
   run: |
@@ -299,6 +320,35 @@ mcpsnoop check --fail-on mismatch gateway-run.jsonl
     name: mcpsnoop-junit
     path: test-results/mcpsnoop.xml
 ```
+
+### Detect tool definition drift
+
+The first complete `tools/list` observed for a server label becomes its trusted
+baseline. Later sessions compare tool descriptions and input schemas with that
+baseline, including tools that were added or removed. The sessions table and
+tool summary flag drift without blocking or changing MCP traffic.
+
+Use a stable, unique `--label` for each server whose command name or target host
+would otherwise collide. Baselines are stored under the normal mcpsnoop state
+directory, so `MCPSNOOP_HOME` and `XDG_STATE_HOME` apply.
+
+```bash
+mcpsnoop check --fail-on drift session.jsonl
+mcpsnoop baseline session.jsonl
+mcpsnoop baseline --accept session.jsonl  # trust a legitimate definition change
+mcpsnoop baseline --reset session.jsonl   # trust the next complete tools/list
+```
+
+In ephemeral CI the state directory starts empty, so the first run only records
+the baseline and reports no drift. The baseline has to persist across runs for
+later runs to verify against it. Point `--baseline` at a checked-in or cached
+directory, or set `MCPSNOOP_HOME` to a persisted path.
+
+```bash
+mcpsnoop check --fail-on drift --baseline .mcpsnoop/baselines session.jsonl
+```
+
+`drift` is opt-in for `check`; the default `error,invalid,warn` gate is unchanged.
 
 ## Watching from another machine
 
@@ -372,7 +422,11 @@ your client config.
 Captured frames can include prompts, tool arguments, credentials, and tool
 results. If payloads can carry secrets, opt in to redaction to scrub the
 observed trace copies while the proxied bytes still pass through unchanged.
-Key-based redaction replaces whole values under matching JSON object keys.
+Key-based redaction replaces whole values under matching JSON object keys, and
+the same key set is applied best effort to the wrapped server's command-line
+arguments, so `--api-key=sk-x` and `--token sk-x` are scrubbed under
+`--redact-secrets`. An argument that carries a secret without a recognizable flag
+name cannot be detected.
 Path-based redaction replaces only values selected by a JSONPath expression,
 which is useful when a common key name is sensitive in one location but safe in
 another. Repeat `--redact-path` to scrub more than one location.

@@ -27,6 +27,9 @@ const (
 	Completed
 	// Failed means an error response arrived.
 	Failed
+	// Superseded means the request's id was reused by a later in-flight request, so
+	// this one can never be matched to a response. It is no longer pending.
+	Superseded
 )
 
 func (s CallState) String() string {
@@ -35,6 +38,8 @@ func (s CallState) String() string {
 		return "completed"
 	case Failed:
 		return "failed"
+	case Superseded:
+		return "superseded"
 	default:
 		return "pending"
 	}
@@ -99,6 +104,7 @@ type event struct {
 	mcpProtocolVersion string // MCP-Protocol-Version request header
 	batch              bool   // one element of a JSON-RPC batch (routing headers cannot address it)
 	mismatch           bool   // a routing header disagrees with the body (structured flag for warning)
+	truncated          bool   // the observed copy was capped at the frame-size limit
 	call               *call  // set for request/response events
 }
 
@@ -124,8 +130,12 @@ type session struct {
 	last  time.Time
 	caps  capabilities
 
-	advertisedTools []string
-	advertisedSet   map[string]struct{}
+	advertisedTools  []string
+	advertisedSet    map[string]struct{}
+	toolDefinitions  map[string]ToolDefinition
+	toolListComplete bool
+	toolDrift        ToolDrift
+	toolDriftSet     bool
 
 	command []string
 	cwd     string
@@ -133,6 +143,9 @@ type session struct {
 	events  []*event
 
 	requests, responses, notifications, errors, pending int
+
+	lastSeq uint64 // highest per-session Seq seen, for gap detection
+	missing uint64 // envelopes dropped upstream, inferred from Seq gaps
 }
 
 // Store is the concurrency-safe collector the hub feeds and the TUI reads.
@@ -174,6 +187,17 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 
 	sess := s.sessionFor(e)
 
+	// Track gaps in the monotonic per-session Seq. A jump larger than one means
+	// envelopes were dropped upstream (a full sink buffer) or lost from the log.
+	// Doing it here surfaces drops whether the frames arrive live or are read back
+	// from a gappy file through open or export.
+	if e.Seq > sess.lastSeq {
+		if expected := sess.lastSeq + 1; e.Seq > expected {
+			sess.missing += e.Seq - expected
+		}
+		sess.lastSeq = e.Seq
+	}
+
 	if e.Direction == proxy.DirectionMeta {
 		var meta proxy.SessionMeta
 		if json.Unmarshal(e.Raw, &meta) == nil {
@@ -187,6 +211,17 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 
 	if e.Direction == proxy.ServerStderr {
 		ev.kind = EventStderr
+		sess.events = append(sess.events, ev)
+		return ev.view(sess)
+	}
+
+	if e.Truncated {
+		// mcpsnoop capped its own observed copy of a large body, so the bytes are
+		// incomplete by design. Flag it structurally rather than through the warning
+		// field: it is not a protocol warning, and routing it there would fail a
+		// default `check --fail-on warn` over a perfectly valid oversized body.
+		ev.kind = EventOther
+		ev.truncated = true
 		sess.events = append(sess.events, ev)
 		return ev.view(sess)
 	}
@@ -300,11 +335,12 @@ func (s *Store) sessionFor(e proxy.Envelope) *session {
 	sess, ok := s.sessions[e.SessionID]
 	if !ok {
 		sess = &session{
-			id:            e.SessionID,
-			label:         e.ServerLabel,
-			first:         e.TS,
-			advertisedSet: make(map[string]struct{}),
-			calls:         make(map[callKey]*call),
+			id:              e.SessionID,
+			label:           e.ServerLabel,
+			first:           e.TS,
+			advertisedSet:   make(map[string]struct{}),
+			toolDefinitions: make(map[string]ToolDefinition),
+			calls:           make(map[callKey]*call),
 		}
 		s.sessions[e.SessionID] = sess
 		s.order = append(s.order, e.SessionID)
@@ -323,6 +359,15 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 	key := callKey{dir: e.Direction, id: id}
 	prev, ok := sess.calls[key]
 	reused := ok && prev.state == Pending
+	if reused {
+		// The earlier in-flight call keeps this id, so it will never be matched now.
+		// Mark it superseded (not pending) so the timeline stops rendering it as a
+		// hanging request and agrees with the pending counter, which Ingest leaves
+		// unchanged on a reuse. The "reuses an id already in flight" warning on the
+		// new request is the explanation.
+		prev.state = Superseded
+		prev.end = e.TS
+	}
 	c := &call{
 		id:     id,
 		method: msg.Method,
@@ -516,8 +561,11 @@ func (c *capabilities) applyResponseMeta(result json.RawMessage) {
 func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 	var r struct {
 		Tools []struct {
-			Name string `json:"name"`
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"inputSchema"`
 		} `json:"tools"`
+		NextCursor string `json:"nextCursor"`
 	}
 
 	if json.Unmarshal(result, &r) != nil {
@@ -526,6 +574,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 
 	if !hasListCursor(reqParams) {
 		clear(sess.advertisedSet)
+		clear(sess.toolDefinitions)
 		sess.advertisedTools = nil
 	}
 
@@ -539,7 +588,13 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 
 		sess.advertisedSet[tool.Name] = struct{}{}
 		sess.advertisedTools = append(sess.advertisedTools, tool.Name)
+		sess.toolDefinitions[tool.Name] = ToolDefinition{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: append(json.RawMessage(nil), tool.InputSchema...),
+		}
 	}
+	sess.toolListComplete = r.NextCursor == ""
 }
 
 // hasListCursor reports whether a tools/list request carries a pagination cursor,

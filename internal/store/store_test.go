@@ -161,15 +161,90 @@ func resp(seq uint64, ts time.Time, dir proxy.Direction, id, body string) proxy.
 	return proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: ts, Direction: dir, Raw: json.RawMessage(raw)}
 }
 
+func TestReusedRequestIdKeepsPendingCounterAndTimelineInSync(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	// Two requests reuse id 1 while the first is still in flight (no response).
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"a"}`))
+	s.Ingest(req(2, t0.Add(time.Millisecond), proxy.ClientToServer, "1", "tools/call", `{"name":"b"}`))
+
+	header := s.Sessions()[0]
+	events := s.Timeline("s1")
+	timelinePending := 0
+	for _, ev := range events {
+		if ev.Kind == EventRequest && ev.Call != nil && ev.Call.State == Pending {
+			timelinePending++
+		}
+	}
+	// The counter and the timeline must tell the same story.
+	if header.Pending != timelinePending {
+		t.Fatalf("pending disagree: header %d, timeline %d", header.Pending, timelinePending)
+	}
+	if header.Pending != 1 {
+		t.Fatalf("header pending = %d, want 1", header.Pending)
+	}
+	// The superseded first request is no longer pending, and the reuse is explained
+	// on the second request.
+	if events[0].Call == nil || events[0].Call.State != Superseded {
+		t.Fatalf("first call should be superseded, got %+v", events[0].Call)
+	}
+	if !strings.Contains(events[1].Warning, "reuses an id already in flight") {
+		t.Fatalf("second request should warn about id reuse, got %q", events[1].Warning)
+	}
+}
+
+func TestSessionReportsSeqGapAsMissingFrames(t *testing.T) {
+	now := time.Now()
+
+	gap := New()
+	gap.Ingest(req(1, now, proxy.ClientToServer, "1", "tools/list", ""))
+	gap.Ingest(req(2, now, proxy.ClientToServer, "2", "tools/list", ""))
+	// A jump from 2 to 5 means seq 3 and 4 were dropped upstream.
+	gap.Ingest(req(5, now, proxy.ClientToServer, "3", "tools/list", ""))
+	if h := gap.Sessions()[0]; h.MissingFrames != 2 {
+		t.Fatalf("missing frames = %d, want 2 for a seq gap of two", h.MissingFrames)
+	}
+
+	contiguous := New()
+	for seq := uint64(1); seq <= 4; seq++ {
+		contiguous.Ingest(req(seq, now, proxy.ClientToServer, fmt.Sprintf("%d", seq), "tools/list", ""))
+	}
+	if h := contiguous.Sessions()[0]; h.MissingFrames != 0 {
+		t.Fatalf("a contiguous session should report zero missing, got %d", h.MissingFrames)
+	}
+}
+
+func TestIngestTruncatedFrameIsMarkedNotInvalid(t *testing.T) {
+	s := New()
+	// A body whose observed copy was cut at the cap: the partial bytes do not parse,
+	// but it must be marked as truncated, not flagged as an invalid (corrupt) frame.
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(), Direction: proxy.ClientToServer,
+		Transport: "http", Truncated: true,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"blob":"AAAA`),
+	})
+	if ev.Kind == EventInvalid {
+		t.Fatal("a truncated observation must not be flagged as an invalid frame")
+	}
+	if !ev.Truncated {
+		t.Fatal("a truncated frame should carry the structured truncated flag")
+	}
+	if ev.Warning != "" {
+		// Routing it through Warning would fail a default `check --fail-on warn`.
+		t.Fatalf("truncation must not go through the warning field, got %q", ev.Warning)
+	}
+}
+
 func TestActivityBuckets(t *testing.T) {
 	st := New()
 	now := time.Now()
-	// Two frames in the most recent bucket, one about a minute old, and one well
-	// outside the two minute window that must be ignored.
-	st.Ingest(req(1, now, proxy.ClientToServer, "1", "tools/list", ""))
-	st.Ingest(req(2, now, proxy.ClientToServer, "2", "tools/list", ""))
-	st.Ingest(req(3, now.Add(-60*time.Second), proxy.ClientToServer, "3", "tools/list", ""))
-	st.Ingest(req(4, now.Add(-10*time.Minute), proxy.ClientToServer, "4", "tools/list", ""))
+	// Frames arrive oldest first, as a real session does. One is well outside the
+	// two minute window and must be ignored, one is about a minute old, then two
+	// land in the most recent bucket.
+	st.Ingest(req(1, now.Add(-10*time.Minute), proxy.ClientToServer, "1", "tools/list", ""))
+	st.Ingest(req(2, now.Add(-60*time.Second), proxy.ClientToServer, "2", "tools/list", ""))
+	st.Ingest(req(3, now, proxy.ClientToServer, "3", "tools/list", ""))
+	st.Ingest(req(4, now, proxy.ClientToServer, "4", "tools/list", ""))
 
 	buckets := st.Activity("s1", 8, 2*time.Minute)
 	if len(buckets) != 8 {
@@ -303,6 +378,46 @@ func TestToolLevelError(t *testing.T) {
 	}
 	if h := s.Sessions()[0]; h.Errors != 1 {
 		t.Fatalf("session errors = %d, want 1", h.Errors)
+	}
+}
+
+func TestToolSummarySkipsSupersededCallLatency(t *testing.T) {
+	t0 := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+
+	withSuperseded := New()
+	// One completed echo call at 25ms.
+	withSuperseded.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"echo"}`))
+	withSuperseded.Ingest(resp(2, t0.Add(25*time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[]}`))
+	// id 2 is reused a full second later, so the first of the pair is superseded.
+	withSuperseded.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/call", `{"name":"echo"}`))
+	withSuperseded.Ingest(req(4, t0.Add(time.Second), proxy.ClientToServer, "2", "tools/call", `{"name":"echo"}`))
+
+	sum, ok := withSuperseded.ToolSummary("s1")
+	if !ok || len(sum.Tools) != 1 {
+		t.Fatalf("ToolSummary = %+v ok %v", sum, ok)
+	}
+	echo := sum.Tools[0]
+	// The superseded call still counts as a call (like a pending one) but feeds no
+	// duration and no error, so the percentiles come only from the completed call.
+	if echo.Calls != 3 || echo.Pending != 1 || echo.Errors != 0 {
+		t.Fatalf("echo calls/pending/errors = %d/%d/%d, want 3/1/0", echo.Calls, echo.Pending, echo.Errors)
+	}
+	if echo.P50 != 25*time.Millisecond || echo.P95 != 25*time.Millisecond {
+		t.Fatalf("echo percentiles = %s/%s, want 25ms from the completed call only", echo.P50, echo.P95)
+	}
+	for _, sc := range sum.Slowest {
+		if sc.Duration >= time.Second {
+			t.Fatalf("a fabricated superseded duration leaked into slowest: %+v", sc)
+		}
+	}
+
+	// The percentiles match a run without the superseded call at all.
+	control := New()
+	control.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"echo"}`))
+	control.Ingest(resp(2, t0.Add(25*time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[]}`))
+	cs, _ := control.ToolSummary("s1")
+	if cs.Tools[0].P50 != echo.P50 || cs.Tools[0].P95 != echo.P95 || cs.Tools[0].P99 != echo.P99 {
+		t.Fatalf("percentiles differ from a run without the superseded call: %+v vs %+v", echo, cs.Tools[0])
 	}
 }
 
@@ -744,5 +859,48 @@ func TestToolUsageReportsCalledButNotAdvertised(t *testing.T) {
 		unadvertised[0] != "search" ||
 		unadvertised[1] != "weather" {
 		t.Fatalf("unadvertised = %v, want [search weather]", unadvertised)
+	}
+}
+
+func TestToolDefinitionsCaptureDescriptionsSchemasAndCompletePagination(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", ""))
+	s.Ingest(resp(2, t0, proxy.ServerToClient, "1", `"result":{"tools":[{"name":"search","description":"Search docs","inputSchema":{"type":"object","properties":{"query":{"type":"string"}}}}],"nextCursor":"p2"}`))
+	if _, ok := s.ToolDefinitions("s1"); ok {
+		t.Fatal("partial tools/list pagination must not be treated as a complete definition set")
+	}
+
+	s.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/list", `{"cursor":"p2"}`))
+	s.Ingest(resp(4, t0, proxy.ServerToClient, "2", `"result":{"tools":[{"name":"fetch","description":"Fetch a page","inputSchema":{"type":"object"}}]}`))
+
+	definitions, ok := s.ToolDefinitions("s1")
+	if !ok {
+		t.Fatal("complete paginated tools/list was not exposed")
+	}
+	if len(definitions) != 2 {
+		t.Fatalf("definitions = %+v, want two tools", definitions)
+	}
+	if definitions[0].Name != "search" || definitions[0].Description != "Search docs" || string(definitions[0].InputSchema) == "" {
+		t.Fatalf("search definition = %+v", definitions[0])
+	}
+	if definitions[1].Name != "fetch" || definitions[1].Description != "Fetch a page" {
+		t.Fatalf("fetch definition = %+v", definitions[1])
+	}
+}
+
+func TestToolDriftIsExposedOnSessionHeader(t *testing.T) {
+	s := New()
+	s.Ingest(req(1, time.Now(), proxy.ClientToServer, "1", "tools/list", ""))
+	s.SetToolDrift("s1", ToolDrift{ChangedDescriptions: []string{"search"}})
+
+	headers := s.Sessions()
+	if len(headers) != 1 || !headers[0].HasToolDrift {
+		t.Fatalf("session header drift = %+v", headers)
+	}
+	report, ok := s.ToolDrift("s1")
+	if !ok || len(report.ChangedDescriptions) != 1 || report.ChangedDescriptions[0] != "search" {
+		t.Fatalf("tool drift = %+v, ok=%v", report, ok)
 	}
 }

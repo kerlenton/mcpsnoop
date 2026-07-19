@@ -144,8 +144,10 @@ func TestApplyConfigUsesConfigWhenFlagNotSet(t *testing.T) {
 	noTrace := fs.Bool("no-trace", false, "")
 	redactSecrets := fs.Bool("redact-secrets", false, "")
 	var redactKeys redactKeysFlag
+	var redactValues redactValuesFlag
 	var redactPaths redactPathsFlag
 	fs.Var(&redactKeys, "redact-key", "")
+	fs.Var(&redactValues, "redact-value", "")
 	fs.Var(&redactPaths, "redact-path", "")
 
 	cfg := config{
@@ -158,8 +160,11 @@ func TestApplyConfigUsesConfigWhenFlagNotSet(t *testing.T) {
 	if err := cfg.RedactPaths.Set("$.params.arguments.password"); err != nil {
 		t.Fatal(err)
 	}
+	if err := cfg.RedactValues.Set("sk-[0-9]+"); err != nil {
+		t.Fatal(err)
+	}
 
-	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactPaths)
+	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
 
 	if *label != "filesystem" {
 		t.Fatalf("expected label %q, got %q", "filesystem", *label)
@@ -192,6 +197,31 @@ func TestApplyConfigUsesConfigWhenFlagNotSet(t *testing.T) {
 	if got, want := redactPaths.String(), "$.params.arguments.password"; got != want {
 		t.Fatalf("redact paths = %q, want %q", got, want)
 	}
+
+	if got, want := redactValues.String(), "sk-[0-9]+"; got != want {
+		t.Fatalf("redact values = %q, want %q", got, want)
+	}
+}
+
+func TestParseConfigAccumulatesRedactKeysAndValues(t *testing.T) {
+	cfg, err := parseConfig(strings.NewReader(
+		"redact-key = \"token\"\nredact-key = \"api_key\"\nredact-value = \"sk-[0-9]+\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both redact-key lines take effect rather than the last silently winning.
+	if len(cfg.RedactKeys) != 2 || cfg.RedactKeys[0] != "token" || cfg.RedactKeys[1] != "api_key" {
+		t.Fatalf("redact-key lines did not accumulate: %v", cfg.RedactKeys)
+	}
+	if len(cfg.RedactValues) != 1 || cfg.RedactValues[0] != "sk-[0-9]+" {
+		t.Fatalf("redact-value not parsed: %v", cfg.RedactValues)
+	}
+}
+
+func TestParseConfigRejectsInvalidRedactValue(t *testing.T) {
+	if _, err := parseConfig(strings.NewReader("redact-value = \"([\"\n")); err == nil {
+		t.Fatal("an invalid redact-value regex should be rejected, the same as the flag")
+	}
 }
 
 func TestApplyConfigExplicitFlagOverridesConfig(t *testing.T) {
@@ -202,8 +232,10 @@ func TestApplyConfigExplicitFlagOverridesConfig(t *testing.T) {
 	noTrace := fs.Bool("no-trace", false, "")
 	redactSecrets := fs.Bool("redact-secrets", false, "")
 	var redactKeys redactKeysFlag
+	var redactValues redactValuesFlag
 	var redactPaths redactPathsFlag
 	fs.Var(&redactKeys, "redact-key", "")
+	fs.Var(&redactValues, "redact-value", "")
 	fs.Var(&redactPaths, "redact-path", "")
 
 	if err := fs.Parse([]string{"--label=cli"}); err != nil {
@@ -214,7 +246,7 @@ func TestApplyConfigExplicitFlagOverridesConfig(t *testing.T) {
 		Label: "from-config",
 	}
 
-	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactPaths)
+	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
 
 	if *label != "cli" {
 		t.Fatalf("expected CLI value %q, got %q", "cli", *label)
@@ -229,8 +261,10 @@ func TestApplyConfigNoConfigFile(t *testing.T) {
 	noTrace := fs.Bool("no-trace", false, "")
 	redactSecrets := fs.Bool("redact-secrets", false, "")
 	var redactKeys redactKeysFlag
+	var redactValues redactValuesFlag
 	var redactPaths redactPathsFlag
 	fs.Var(&redactKeys, "redact-key", "")
+	fs.Var(&redactValues, "redact-value", "")
 	fs.Var(&redactPaths, "redact-path", "")
 
 	cfg := config{
@@ -241,7 +275,7 @@ func TestApplyConfigNoConfigFile(t *testing.T) {
 		RedactKeys:    []string{"token"},
 	}
 
-	applyConfig(fs, cfg, false, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactPaths)
+	applyConfig(fs, cfg, false, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
 
 	if *label != "" {
 		t.Fatal("expected label to remain unchanged")
@@ -272,8 +306,10 @@ func TestApplyConfigExplicitFalseBoolOverridesConfig(t *testing.T) {
 	noTrace := fs.Bool("no-trace", false, "")
 	redactSecrets := fs.Bool("redact-secrets", false, "")
 	var redactKeys redactKeysFlag
+	var redactValues redactValuesFlag
 	var redactPaths redactPathsFlag
 	fs.Var(&redactKeys, "redact-key", "")
+	fs.Var(&redactValues, "redact-value", "")
 	fs.Var(&redactPaths, "redact-path", "")
 
 	if err := fs.Parse([]string{"--no-trace=false"}); err != nil {
@@ -284,7 +320,7 @@ func TestApplyConfigExplicitFalseBoolOverridesConfig(t *testing.T) {
 		NoTrace: true,
 	}
 
-	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactPaths)
+	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
 
 	if *noTrace {
 		t.Fatal("expected explicit --no-trace=false to override config")
@@ -298,8 +334,10 @@ func TestApplyConfigExplicitRedactKeyOverridesConfig(t *testing.T) {
 	noTrace := fs.Bool("no-trace", false, "")
 	redactSecrets := fs.Bool("redact-secrets", false, "")
 	var redactKeys redactKeysFlag
+	var redactValues redactValuesFlag
 	var redactPaths redactPathsFlag
 	fs.Var(&redactKeys, "redact-key", "")
+	fs.Var(&redactValues, "redact-value", "")
 	fs.Var(&redactPaths, "redact-path", "")
 
 	if err := fs.Parse([]string{"--redact-key=cli-key"}); err != nil {
@@ -307,7 +345,7 @@ func TestApplyConfigExplicitRedactKeyOverridesConfig(t *testing.T) {
 	}
 	cfg := config{RedactKeys: []string{"config-key"}}
 
-	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactPaths)
+	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
 
 	if len(redactKeys) != 1 || redactKeys[0] != "cli-key" {
 		t.Fatalf("expected explicit redact-key to win, got %v", redactKeys)
@@ -321,8 +359,10 @@ func TestApplyConfigExplicitRedactPathOverridesConfig(t *testing.T) {
 	noTrace := fs.Bool("no-trace", false, "")
 	redactSecrets := fs.Bool("redact-secrets", false, "")
 	var redactKeys redactKeysFlag
+	var redactValues redactValuesFlag
 	var redactPaths redactPathsFlag
 	fs.Var(&redactKeys, "redact-key", "")
+	fs.Var(&redactValues, "redact-value", "")
 	fs.Var(&redactPaths, "redact-path", "")
 
 	if err := fs.Parse([]string{"--redact-path=$.cli.password"}); err != nil {
@@ -334,7 +374,7 @@ func TestApplyConfigExplicitRedactPathOverridesConfig(t *testing.T) {
 	}
 	cfg := config{RedactPaths: configPaths}
 
-	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactPaths)
+	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
 
 	if got, want := redactPaths.String(), "$.cli.password"; got != want {
 		t.Fatalf("redact paths = %q, want %q", got, want)

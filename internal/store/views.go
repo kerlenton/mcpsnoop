@@ -63,21 +63,50 @@ type EventView struct {
 	// a batch. It is a structured handle for the same condition the warning
 	// describes, so filters and exporters need not match warning text.
 	RoutingMismatch bool
-	Call            *CallView // set for request/response events
+	// Truncated is true when mcpsnoop capped its own observed copy of a large body.
+	// It is a structured marker, not a protocol warning, so it never fails check.
+	Truncated bool
+	Call      *CallView // set for request/response events
 }
 
 // SessionHeader is a lightweight per-session summary for the left panel.
 type SessionHeader struct {
-	ID            string
-	Label         string
-	First         time.Time
-	Last          time.Time
-	Requests      int
-	Responses     int
-	Notifications int
-	Errors        int
-	Pending       int
-	HasCaps       bool
+	ID                   string
+	Label                string
+	First                time.Time
+	Last                 time.Time
+	Requests             int
+	Responses            int
+	Notifications        int
+	Errors               int
+	Pending              int
+	HasCaps              bool
+	HasToolDrift         bool
+	HasToolBaselineError bool
+	MissingFrames        uint64 // envelopes dropped upstream, inferred from Seq gaps
+}
+
+// ToolDefinition is the contract a server advertised for one MCP tool.
+type ToolDefinition struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
+}
+
+// ToolDrift is the difference between the current complete tool list and the
+// persisted trust-on-first-use baseline for the session's server label.
+type ToolDrift struct {
+	AddedTools          []string
+	RemovedTools        []string
+	ChangedDescriptions []string
+	ChangedSchemas      []string
+	BaselineError       string
+}
+
+func (d ToolDrift) Empty() bool { return d.Count() == 0 && d.BaselineError == "" }
+
+func (d ToolDrift) Count() int {
+	return len(d.AddedTools) + len(d.RemovedTools) + len(d.ChangedDescriptions) + len(d.ChangedSchemas)
 }
 
 // CapsView is an immutable snapshot of the negotiated capabilities.
@@ -133,6 +162,7 @@ func (e *event) view(_ *session) EventView {
 		MCPName:            e.mcpName,
 		MCPProtocolVersion: e.mcpProtocolVersion,
 		RoutingMismatch:    e.mismatch,
+		Truncated:          e.truncated,
 	}
 	if e.call != nil {
 		cv := e.call.view()
@@ -166,19 +196,71 @@ func (s *Store) Sessions() []SessionHeader {
 	for _, id := range s.order {
 		sess := s.sessions[id]
 		out = append(out, SessionHeader{
-			ID:            sess.id,
-			Label:         sess.label,
-			First:         sess.first,
-			Last:          sess.last,
-			Requests:      sess.requests,
-			Responses:     sess.responses,
-			Notifications: sess.notifications,
-			Errors:        sess.errors,
-			Pending:       sess.pending,
-			HasCaps:       sess.caps.set,
+			ID:                   sess.id,
+			Label:                sess.label,
+			First:                sess.first,
+			Last:                 sess.last,
+			Requests:             sess.requests,
+			Responses:            sess.responses,
+			Notifications:        sess.notifications,
+			Errors:               sess.errors,
+			Pending:              sess.pending,
+			HasCaps:              sess.caps.set,
+			HasToolDrift:         sess.toolDrift.Count() > 0,
+			HasToolBaselineError: sess.toolDrift.BaselineError != "",
+			MissingFrames:        sess.missing,
 		})
 	}
 	return out
+}
+
+// ToolDefinitions returns the current complete tools/list definition set in
+// server order. ok is false until the final page of a listing has arrived.
+func (s *Store) ToolDefinitions(sessionID string) ([]ToolDefinition, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok || !sess.toolListComplete {
+		return nil, false
+	}
+	definitions := make([]ToolDefinition, 0, len(sess.advertisedTools))
+	for _, name := range sess.advertisedTools {
+		definition := sess.toolDefinitions[name]
+		definition.InputSchema = append(json.RawMessage(nil), definition.InputSchema...)
+		definitions = append(definitions, definition)
+	}
+	return definitions, true
+}
+
+// SetToolDrift attaches the current baseline comparison to a session.
+func (s *Store) SetToolDrift(sessionID string, drift ToolDrift) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[sessionID]; ok {
+		sess.toolDrift = drift
+		sess.toolDriftSet = true
+	}
+}
+
+// ToolDrift returns the current baseline comparison for a session.
+func (s *Store) ToolDrift(sessionID string) (ToolDrift, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok || !sess.toolDriftSet {
+		return ToolDrift{}, false
+	}
+	return cloneToolDrift(sess.toolDrift), true
+}
+
+func cloneToolDrift(drift ToolDrift) ToolDrift {
+	return ToolDrift{
+		AddedTools:          slices.Clone(drift.AddedTools),
+		RemovedTools:        slices.Clone(drift.RemovedTools),
+		ChangedDescriptions: slices.Clone(drift.ChangedDescriptions),
+		ChangedSchemas:      slices.Clone(drift.ChangedSchemas),
+		BaselineError:       drift.BaselineError,
+	}
 }
 
 // Timeline returns a snapshot of a session's events, oldest first. A nil slice
@@ -280,15 +362,19 @@ func (s *Store) Activity(sessionID string, n int, span time.Duration) []int {
 	}
 	start := time.Now().Add(-span)
 	step := span / time.Duration(n)
-	for _, ev := range sess.events {
+	// Events are in arrival (ascending time) order, so walk back from the newest and
+	// stop at the first one older than the window, instead of scanning the whole
+	// session on every refresh.
+	for i := len(sess.events) - 1; i >= 0; i-- {
+		ev := sess.events[i]
 		if ev.ts.Before(start) {
-			continue
+			break
 		}
-		i := int(ev.ts.Sub(start) / step)
-		if i >= n {
-			i = n - 1
+		b := int(ev.ts.Sub(start) / step)
+		if b >= n {
+			b = n - 1
 		}
-		buckets[i]++
+		buckets[b]++
 	}
 	return buckets
 }
@@ -345,6 +431,11 @@ func (s *Store) ToolSummary(sessionID string) (SessionToolSummary, bool) {
 		agg.stats.Calls++
 		if c.state == Pending {
 			agg.stats.Pending++
+			continue
+		}
+		if c.state == Superseded {
+			// Its id was reused, so it was never answered. It still counts as a call
+			// (like a pending one), but has no real latency to feed the percentiles.
 			continue
 		}
 		if c.err != nil || c.toolErr {

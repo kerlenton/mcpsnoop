@@ -15,6 +15,13 @@ type Sink interface {
 	Close() error
 }
 
+// DropCounter is an optional interface a Sink may implement to report how many
+// envelopes it dropped on a full buffer. Callers type-assert for it, so a sink
+// that never drops need not implement it. MultiSink totals it across children.
+type DropCounter interface {
+	Dropped() uint64
+}
+
 // nopSink discards everything. Used when tracing is disabled.
 type nopSink struct{}
 
@@ -30,6 +37,7 @@ type AsyncSink struct {
 	w       io.Writer
 	closer  io.Closer
 	ch      chan Envelope
+	quit    chan struct{}
 	done    chan struct{}
 	once    sync.Once
 	dropped atomic.Uint64
@@ -44,6 +52,7 @@ func NewAsyncSink(w io.Writer, buffer int) *AsyncSink {
 	s := &AsyncSink{
 		w:    w,
 		ch:   make(chan Envelope, buffer),
+		quit: make(chan struct{}),
 		done: make(chan struct{}),
 	}
 	if c, ok := w.(io.Closer); ok {
@@ -56,8 +65,24 @@ func NewAsyncSink(w io.Writer, buffer int) *AsyncSink {
 func (s *AsyncSink) loop() {
 	defer close(s.done)
 	enc := json.NewEncoder(s.w)
-	for env := range s.ch {
-		_ = enc.Encode(env) // best-effort, a write error must not crash the proxy
+	for {
+		select {
+		case env := <-s.ch:
+			_ = enc.Encode(env) // best-effort, a write error must not crash the proxy
+		case <-s.quit:
+			// Drain what is already queued, then stop. s.ch is deliberately never
+			// closed, so a proxy goroutine still emitting during shutdown (e.g. an SSE
+			// tap draining after the HTTP grace period) drops into Emit's default case
+			// instead of panicking on a send to a closed channel (mirrors SocketSink).
+			for {
+				select {
+				case env := <-s.ch:
+					_ = enc.Encode(env)
+				default:
+					return
+				}
+			}
+		}
 	}
 }
 
@@ -73,9 +98,11 @@ func (s *AsyncSink) Emit(env Envelope) {
 // Dropped reports how many envelopes were dropped due to a full buffer.
 func (s *AsyncSink) Dropped() uint64 { return s.dropped.Load() }
 
-// Close flushes the queue and releases the underlying writer.
+// Close flushes the queue and releases the underlying writer. It signals the
+// loop via quit rather than closing s.ch, so a late Emit after Close drops
+// instead of panicking.
 func (s *AsyncSink) Close() error {
-	s.once.Do(func() { close(s.ch) })
+	s.once.Do(func() { close(s.quit) })
 	<-s.done
 	if s.closer != nil {
 		return s.closer.Close()

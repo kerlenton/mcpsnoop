@@ -6,6 +6,34 @@ import (
 	"testing"
 )
 
+func TestRedactorScrubsSecretsInServerArgv(t *testing.T) {
+	r := NewRedactor(RedactConfig{CommonSecrets: true})
+	meta, err := json.Marshal(SessionMeta{
+		Command: []string{"npx", "some-server", "--api-key=sk-secret", "--token", "tok-secret", "--verbose"},
+		CWD:     "/home/user/project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(r.RedactEnvelope(Envelope{Direction: DirectionMeta, Raw: meta}).Raw)
+
+	if strings.Contains(got, "sk-secret") || strings.Contains(got, "tok-secret") {
+		t.Fatalf("a secret survived argv redaction: %s", got)
+	}
+	if !strings.Contains(got, "--api-key=[REDACTED]") {
+		t.Fatalf("--api-key=value was not redacted in place: %s", got)
+	}
+	if !strings.Contains(got, "--token") || !strings.Contains(got, redactedValue) {
+		t.Fatalf("--token followed by its value was not redacted: %s", got)
+	}
+	if !strings.Contains(got, "--verbose") {
+		t.Fatalf("an unrelated argument must be left intact: %s", got)
+	}
+	if !strings.Contains(got, "/home/user/project") {
+		t.Fatalf("cwd must be left intact: %s", got)
+	}
+}
+
 func TestRedactingSinkScrubsMatchingKeysRecursively(t *testing.T) {
 	sink := &captureSink{}
 	redacted := NewRedactingSink(sink, RedactConfig{

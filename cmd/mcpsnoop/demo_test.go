@@ -3,11 +3,37 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
 )
+
+// TestDemoIsolatesStateHome checks the demo never writes into the user's real
+// state directory: after it sets up its throwaway home, every paths-derived
+// location resolves inside it, so the scripted tools/list baseline lands there
+// and the real home is left untouched.
+func TestDemoIsolatesStateHome(t *testing.T) {
+	real := t.TempDir()
+	t.Setenv("MCPSNOOP_HOME", real) // stand in for the user's real home
+
+	dir, err := demoIsolatedHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	if got := paths.ToolBaselinesDir(); !strings.HasPrefix(got, dir) {
+		t.Fatalf("tool baselines resolve to %q, want inside the demo home %q", got, dir)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(real, "tool-baselines")); len(entries) != 0 {
+		t.Fatalf("the real home must stay untouched, found %d entries under it", len(entries))
+	}
+}
 
 // TestDemoScriptValidJSON guards against a typo in any scripted frame. Frames
 // marked invalid are the deliberate stdout-corruption case and must not parse as

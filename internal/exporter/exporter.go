@@ -112,6 +112,7 @@ type EventExport struct {
 	ID        string          `json:"id,omitempty"`
 	Warning   string          `json:"warning,omitempty"`
 	Mismatch  bool            `json:"mismatch,omitempty"`
+	Truncated bool            `json:"truncated,omitempty"`
 	CallIndex *int            `json:"call_index,omitempty"`
 	Raw       json.RawMessage `json:"raw,omitempty"`
 	Text      string          `json:"text,omitempty"`
@@ -395,8 +396,8 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 			attrs = append(attrs, otlpDouble("mcpsnoop.call.duration_ms", *call.DurationMS))
 		}
 		status := "STATUS_CODE_OK"
-		if call.State == "pending" {
-			status = "STATUS_CODE_UNSET"
+		if call.State == "pending" || call.State == "superseded" {
+			status = "STATUS_CODE_UNSET" // no definitive outcome, never answered
 		}
 		if call.IsError {
 			status = "STATUS_CODE_ERROR"
@@ -474,9 +475,12 @@ func Export(r io.Reader, source string, w io.Writer, opts Options) error {
 
 func exportCall(index int, c store.CallView) CallExport {
 	status := "ok"
-	if c.State == store.Pending {
+	switch {
+	case c.State == store.Pending:
 		status = "pending"
-	} else if c.Failed() {
+	case c.State == store.Superseded:
+		status = "superseded"
+	case c.Failed():
 		status = "error"
 	}
 	out := CallExport{
@@ -495,7 +499,9 @@ func exportCall(index int, c store.CallView) CallExport {
 		Result:    c.Result,
 		Error:     c.Err,
 	}
-	if c.Done() {
+	// A superseded call was never answered; its stored end is the moment the id was
+	// reused, not a latency, so omit the duration the way a pending call does.
+	if c.Done() && c.State != store.Superseded {
 		end := c.End
 		dur := float64(c.End.Sub(c.Start)) / float64(time.Millisecond)
 		out.EndedAt = &end
@@ -514,6 +520,7 @@ func exportEvent(ev store.EventView, callIndex map[string]int) EventExport {
 		ID:        ev.ID,
 		Warning:   ev.Warning,
 		Mismatch:  ev.RoutingMismatch,
+		Truncated: ev.Truncated,
 		Raw:       ev.Raw,
 		Text:      ev.Text,
 	}
@@ -545,6 +552,9 @@ func writeText(w io.Writer, data SessionExport) error {
 		}
 		if ev.Warning != "" {
 			title += " warning=" + ev.Warning
+		}
+		if ev.Truncated {
+			title += " truncated"
 		}
 		if ev.CallIndex != nil {
 			c := data.Calls[*ev.CallIndex]

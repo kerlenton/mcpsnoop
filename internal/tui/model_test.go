@@ -63,6 +63,121 @@ func ready(t *testing.T, st *store.Store) Model {
 	return drive(t, m, frameMsg{})
 }
 
+func TestSessionsTableDriftMarkerKeepsLabel(t *testing.T) {
+	st := store.New()
+	// A label long enough that the old wide "! drift " marker truncated its tail
+	// inside the fixed name column; the one-char marker must keep the whole label.
+	label := "filesystem-server1"
+	st.Ingest(proxy.Envelope{
+		SessionID: "sess", ServerLabel: label, Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer, Transport: "stdio",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+	})
+	st.SetToolDrift("sess", store.ToolDrift{ChangedDescriptions: []string{"search"}})
+
+	m := ready(t, st)
+	out := m.View()
+	if !strings.Contains(out, "! "+label) {
+		t.Fatalf("drift row should keep the full label with a one-char marker\n%s", out)
+	}
+	if strings.Contains(out, "! drift ") {
+		t.Fatalf("marker should no longer be the wide '! drift '\n%s", out)
+	}
+}
+
+func TestStreamRowShowsSupersededStatusInWarnStyle(t *testing.T) {
+	st := store.New()
+	// Two requests reuse id 1 while the first is still in flight, so the first is
+	// superseded.
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	st.Ingest(env(2, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+
+	if len(m.full) == 0 || m.full[0].Call == nil || m.full[0].Call.State != store.Superseded {
+		t.Fatalf("first frame should be a superseded call, got %+v", m.full[0].Call)
+	}
+	// The request row now carries an in-row superseded status rather than an empty
+	// cell (the STATUS column truncates it, so assert the cell before truncation).
+	if got := m.streamCells(m.full[0]).status; got != "superseded" {
+		t.Fatalf("superseded request status = %q, want superseded", got)
+	}
+	// And it is styled as a warning (yellow), not a success (green). Compare the
+	// style foreground, which survives the color-stripping the test env applies to
+	// rendered output.
+	fg := m.statusStyle(m.full[0]).GetForeground()
+	if fg != m.styles.warn.GetForeground() {
+		t.Fatal("superseded status should use the warn style")
+	}
+	if fg == m.styles.resp.GetForeground() {
+		t.Fatal("superseded status must not use the success style")
+	}
+}
+
+func TestRefreshClampsInspectWhenTimelineShrinks(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+	m.inspect = len(m.full) - 1
+	if m.inspect <= 0 {
+		t.Fatal("expected a multi-frame timeline to inspect")
+	}
+
+	// The inspected session's timeline vanishes out from under the inspector.
+	st.Delete(m.streamSessionID)
+	m.refresh()
+
+	if m.inspect < 0 || (len(m.full) > 0 && m.inspect >= len(m.full)) {
+		t.Fatalf("inspect %d not clamped into range for full len %d", m.inspect, len(m.full))
+	}
+	// The direct m.full[m.inspect] readers must not panic on the shrunk timeline.
+	_ = m.inspectorHeader(80)
+	_ = m.inspectorHeaderH()
+	_ = m.pairWidget()
+}
+
+func TestFrameMsgDefersRefreshToThrottledTick(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+	// Settle by running one refresh cycle so dirty clears and m.full is current.
+	for range refreshEvery {
+		m = drive(t, m, tickMsg(time.Now()))
+	}
+	before := len(m.full)
+	if m.dirty {
+		t.Fatal("dirty should be clear after a settling tick")
+	}
+
+	// Deliver a frameMsg per envelope, exactly as the hub callback does.
+	for i := range 20 {
+		st.Ingest(env(uint64(5+i), proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/progress"}`))
+		m = drive(t, m, frameMsg{})
+	}
+	// Not one of them triggered a refresh. The timeline is unchanged and the model
+	// is only marked dirty, so the cost of a burst is bounded rather than per frame.
+	if len(m.full) != before {
+		t.Fatalf("frameMsg refreshed per frame: full %d -> %d", before, len(m.full))
+	}
+	if !m.dirty {
+		t.Fatal("frameMsg should mark the model dirty")
+	}
+
+	// One throttled tick cycle performs a single refresh and clears the flag.
+	for range refreshEvery {
+		m = drive(t, m, tickMsg(time.Now()))
+	}
+	if len(m.full) <= before {
+		t.Fatalf("a throttled tick should refresh once, full still %d", len(m.full))
+	}
+	if m.dirty {
+		t.Fatal("refresh should clear the dirty flag")
+	}
+}
+
 func TestSessionsTableAndDrillIn(t *testing.T) {
 	st := store.New()
 	seed(st)
@@ -225,6 +340,45 @@ func TestStreamQueryFilter(t *testing.T) {
 	fw := apply("status:warn")
 	if len(fw.timeline) != 1 || fw.timeline[0].Warning == "" {
 		t.Fatalf("status:warn should match exactly the warning frame, got %+v", fw.timeline)
+	}
+}
+
+func TestStreamFilterFindsTruncatedUnderWarn(t *testing.T) {
+	st := store.New()
+	seed(st) // clean calls, no warnings
+	trunc := env(5, proxy.ServerToClient, `{"jsonrpc":"2.0","result":{}}`)
+	trunc.Truncated = true
+	st.Ingest(trunc)
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+	total := len(m.timeline)
+
+	mm := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	mm = drive(t, mm, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("status:warn")})
+	fw := drive(t, mm, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if len(fw.timeline) != 1 || total <= 1 {
+		t.Fatalf("status:warn should find exactly the truncated frame, got %d of %d", len(fw.timeline), total)
+	}
+	if !fw.timeline[0].Truncated {
+		t.Fatalf("status:warn matched a non-truncated frame: %+v", fw.timeline[0])
+	}
+}
+
+func TestCountStreamSignalsCountsTruncatedAsWarn(t *testing.T) {
+	events := []store.EventView{
+		{Kind: store.EventOther, Truncated: true},
+		{Kind: store.EventOther}, // neither a warning nor truncated
+	}
+	if c := countStreamSignals(events); c.warn != 1 {
+		t.Fatalf("a truncated frame should count as one warn, got %d", c.warn)
+	}
+}
+
+func TestStatusRankTruncatedRanksAsWarn(t *testing.T) {
+	if r := statusRank(store.EventView{Kind: store.EventOther, Truncated: true}); r != 3 {
+		t.Fatalf("a truncated frame should rank 3 like a warning, got %d", r)
 	}
 }
 
@@ -452,6 +606,8 @@ func TestCapsOverlayUpdatesLive(t *testing.T) {
 	if m.overlay != overlayCaps {
 		t.Fatal("a live frame must not close the overlay")
 	}
+	// The live overlay refreshes on the tick, not per frame, so advance one tick.
+	m = drive(t, m, tickMsg(time.Now()))
 	if !strings.Contains(m.overlayRaw, "srv-impl") || !strings.Contains(m.overlayRaw, "● tools") {
 		t.Fatalf("caps overlay did not pick up the server handshake live\n%s", m.overlayRaw)
 	}
@@ -885,6 +1041,51 @@ func TestToolSummaryListsEveryAdvertisedTool(t *testing.T) {
 	}
 }
 
+func TestDefinitionDriftIsVisibleInSessionsAndToolSummary(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search"}]}}`))
+	st.SetToolDrift("s1", store.ToolDrift{
+		ChangedDescriptions: []string{"search"},
+		AddedTools:          []string{"write"},
+	})
+
+	m := ready(t, st)
+	// The sessions row carries the compact "!" marker (drift is warn-colored); the
+	// full "tool definition drift" wording lives in the summary overlay below.
+	if out := ansi.Strip(m.View()); !strings.Contains(out, "! demo") {
+		t.Fatalf("sessions view did not surface drift\n%s", out)
+	}
+	m = typeRunes(t, m, "s")
+	out := ansi.Strip(m.overlayRaw)
+	for _, want := range []string{"tool definition drift", "description changed", "search", "added", "write"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestToolBaselineErrorsAreVisible(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+	st.SetToolDrift("s1", store.ToolDrift{BaselineError: "baseline file is invalid"})
+
+	m := ready(t, st)
+	// The compact "!" marker is respErr-colored for a baseline error; the full
+	// "tool baseline error" wording lives in the summary overlay below.
+	if out := ansi.Strip(m.View()); !strings.Contains(out, "! demo") {
+		t.Fatalf("sessions view did not surface the baseline error\n%s", out)
+	}
+	m = typeRunes(t, m, "s")
+	out := ansi.Strip(m.overlayRaw)
+	for _, want := range []string{"tool baseline error", "baseline file is invalid"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing %q\n%s", want, out)
+		}
+	}
+}
+
 // summaryHasRow reports whether a stripped summary line starts with name and
 // contains cell somewhere after it.
 func summaryHasRow(styled, name, cell string) bool {
@@ -949,6 +1150,8 @@ func TestSummaryUpdatesLive(t *testing.T) {
 	if m.overlay != overlaySummary {
 		t.Fatal("a live frame must not close the summary")
 	}
+	// The live overlay refreshes on the tick, not per frame, so advance one tick.
+	m = drive(t, m, tickMsg(time.Now()))
 	if !strings.Contains(m.overlayRaw, "search") {
 		t.Fatalf("summary did not pick up the new call live\n%s", m.overlayRaw)
 	}

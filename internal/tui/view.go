@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -203,6 +204,10 @@ func (m Model) footerCounters() string {
 		return strings.Join(parts, sep)
 	}
 	parts := []string{m.styles.faint.Render(countLabel(len(m.timeline), m.total, "frame"))}
+	// Dropped frames leave a Seq gap and mean the trace is incomplete, so flag them.
+	if missing := m.currentMissingFrames(); missing > 0 {
+		parts = append(parts, m.styles.respErr.Render(fmt.Sprintf("%d missing", missing)))
+	}
 	c := m.streamSignals
 	for _, sig := range []struct {
 		n     int
@@ -219,6 +224,17 @@ func (m Model) footerCounters() string {
 		}
 	}
 	return strings.Join(parts, sep)
+}
+
+// currentMissingFrames returns the dropped-frame count for the session being
+// streamed, inferred from Seq gaps by the store.
+func (m Model) currentMissingFrames() uint64 {
+	for _, s := range m.allSessions {
+		if s.ID == m.streamSessionID {
+			return s.MissingFrames
+		}
+	}
+	return 0
 }
 
 // countLabel renders a plain total, or shown/total when a filter is hiding some
@@ -391,7 +407,19 @@ func (m Model) renderSessionsTable(w, h int) string {
 				break
 			}
 		}
-		segs := []cell{seg(cellL(s.Label, nameW), m.styles.neutral)}
+		name := s.Label
+		nameStyle := m.styles.neutral
+		// A one-character "!" marker flags a baseline error (red) or drift (yellow)
+		// without stealing width from the label. The full wording lives in the tool
+		// summary overlay where there is room.
+		if s.HasToolBaselineError {
+			name = "! " + name
+			nameStyle = m.styles.respErr
+		} else if s.HasToolDrift {
+			name = "! " + name
+			nameStyle = m.styles.warn
+		}
+		segs := []cell{seg(cellL(name, nameW), nameStyle)}
 		if showClient {
 			client := valueOr(m.clients[s.ID], "-")
 			segs = append(segs, gap, seg(cellL(client, clientW), m.styles.dim))
@@ -616,6 +644,9 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			if e.Call.State == store.Pending {
 				c.status = "pending"
 				c.dur = m.spinnerFrame() + " " + e.Call.Duration().Round(100*time.Millisecond).String()
+			} else if e.Call.State == store.Superseded {
+				// Its id was reused while in flight, so it will never be answered.
+				c.status = "superseded"
 			}
 		}
 	case store.EventResponse:
@@ -660,6 +691,17 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = e.Warning
 		} else {
 			c.detail = e.Warning + " · " + c.detail
+		}
+	}
+	// A capped observed copy is a caution, not a protocol warning, so it carries a
+	// structured flag (never failing check) but reads the same in the row.
+	if e.Truncated {
+		c.status = "warn"
+		const msg = "observed copy truncated at the frame cap, forwarding unaffected"
+		if c.detail == "" {
+			c.detail = msg
+		} else {
+			c.detail = msg + " · " + c.detail
 		}
 	}
 	return c
@@ -715,10 +757,17 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 	if e.Warning != "" {
 		return m.styles.warn
 	}
+	// A truncated observation reads "warn" in the row, so its cell must be warn
+	// colored too. It no longer rides the Warning field, so check it explicitly.
+	if e.Truncated {
+		return m.styles.warn
+	}
 	if e.Call != nil {
 		switch {
 		case e.Call.State == store.Pending:
 			return m.styles.pending
+		case e.Call.State == store.Superseded:
+			return m.styles.warn // never answered, not a success
 		case e.Call.Failed():
 			return m.styles.respErr
 		default:
@@ -886,6 +935,9 @@ func (m Model) inspectorBody() string {
 // meta joined by faint dots on the left and the pair widget plus timestamp on the
 // right, sized to width w.
 func (m Model) inspectorHeader(w int) string {
+	if m.inspect < 0 || m.inspect >= len(m.full) {
+		return ""
+	}
 	e := m.full[m.inspect]
 	c := m.streamCells(e)
 	sep := m.styles.faint.Render(" · ")
@@ -939,6 +991,9 @@ func (m Model) inspectorHeaderH() int {
 // pending in cyan while a request awaits its response, or a plain seq N for a
 // frame with no pair.
 func (m Model) pairWidget() string {
+	if m.inspect < 0 || m.inspect >= len(m.full) {
+		return ""
+	}
 	e := m.full[m.inspect]
 	plain := m.styles.faint.Render(fmt.Sprintf("seq %d", e.Seq))
 	if e.Call == nil {
@@ -1165,11 +1220,12 @@ func (m Model) capsTitle(label, version string, w int) string {
 // summary table column widths, all padded with lipgloss.Width so styled cells
 // stay aligned.
 const (
-	sumToolW  = 18
-	sumCallsW = 7
-	sumErrW   = 6
-	sumLatW   = 10
-	covLabelW = 11
+	sumToolW    = 18
+	sumCallsW   = 7
+	sumErrW     = 6
+	sumLatW     = 10
+	covLabelW   = 11
+	driftLabelW = 20
 )
 
 func (m Model) summaryContent() string {
@@ -1177,6 +1233,7 @@ func (m Model) summaryContent() string {
 	label := m.currentLabel()
 	summary, _ := m.store.ToolSummary(sid)
 	_, unused, undeclared, hasTools := m.store.ToolUsage(sid)
+	drift, hasDrift := m.store.ToolDrift(sid)
 	w, _ := m.overlayDims()
 
 	calls := 0
@@ -1191,11 +1248,19 @@ func (m Model) summaryContent() string {
 	gap := max(w-lipgloss.Width(left)-lipgloss.Width(right), 1)
 	header := left + strings.Repeat(" ", gap) + right
 
-	if len(summary.Tools) == 0 && !hasTools {
+	if len(summary.Tools) == 0 && !hasTools && !hasDrift {
 		return header + "\n\n" + m.styles.dim.Render("no tool calls observed yet for this session")
 	}
 
 	var sections []string
+	if hasDrift && drift.BaselineError != "" {
+		sections = append(sections, m.styles.respErr.Render("tool baseline error")+"\n"+m.styles.warn.Render(drift.BaselineError))
+	}
+	if hasDrift && !drift.Empty() {
+		if drift.Count() > 0 {
+			sections = append(sections, m.definitionDriftSection(drift, w))
+		}
+	}
 
 	// TABLE: every advertised tool plus any called one, so the full tool set is
 	// visible from the start and its counts fill in as calls arrive. Uncalled
@@ -1257,6 +1322,26 @@ func (m Model) summaryContent() string {
 	}
 
 	return header + "\n\n" + strings.Join(sections, "\n\n")
+}
+
+func (m Model) definitionDriftSection(drift store.ToolDrift, width int) string {
+	var lines []string
+	for _, change := range []struct {
+		label string
+		names []string
+	}{
+		{"added", drift.AddedTools},
+		{"removed", drift.RemovedTools},
+		{"description changed", drift.ChangedDescriptions},
+		{"schema changed", drift.ChangedSchemas},
+	} {
+		if len(change.names) == 0 {
+			continue
+		}
+		indent := strings.Repeat(" ", driftLabelW)
+		lines = append(lines, m.styles.dim.Render(cellL(change.label, driftLabelW))+m.styles.warn.Render(wrapWords(change.names, indent, width)))
+	}
+	return m.styles.warn.Render("tool definition drift") + "\n" + strings.Join(lines, "\n")
 }
 
 // wrapWords lays space-separated words into lines no wider than width, each
@@ -1715,6 +1800,11 @@ func window(sel, n, rows int) (int, int) {
 	return start, start + rows
 }
 
+// truncate shortens s to at most w terminal cells, appending an ellipsis when it
+// cuts. It measures in cells throughout (the unit lipgloss.Width uses), never rune
+// counts, so a wide rune (CJK, emoji) is two cells and cannot overrun the budget.
+// With wide runes an exact fit is not always possible, so the result may be a cell
+// narrower than w; callers (cellL, cellR) pad the remainder.
 func truncate(s string, w int) string {
 	if w <= 0 {
 		return ""
@@ -1722,11 +1812,26 @@ func truncate(s string, w int) string {
 	if lipgloss.Width(s) <= w {
 		return s
 	}
-	r := []rune(s)
-	if w <= 1 || len(r) <= 1 {
-		return string(r[:max(0, min(len(r), w))])
+	// One cell is reserved for the ellipsis. Take runes until the next one would
+	// push the accumulated width past that budget. Advance by the rune's real byte
+	// size from the source, not len(string(r)): an invalid byte decodes to U+FFFD
+	// (three bytes re-encoded) after consuming one, so computing the offset from the
+	// re-encoded form would overshoot and misalign the cell.
+	budget := w - 1
+	width, end := 0, 0
+	for end < len(s) {
+		r, size := utf8.DecodeRuneInString(s[end:])
+		rw := lipgloss.Width(string(r))
+		if width+rw > budget {
+			break
+		}
+		width += rw
+		end += size
 	}
-	return string(r[:w-1]) + "…"
+	if end == 0 {
+		return "" // the budget cannot fit even one rune, so no bare ellipsis
+	}
+	return s[:end] + "…"
 }
 
 // softWrap hard-wraps any line wider than width so long values (e.g. a big JSON

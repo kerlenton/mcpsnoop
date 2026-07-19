@@ -36,6 +36,7 @@ main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
 .status.ok { color:var(--resp); }
 .status.error { color:var(--err); }
 .status.warn { color:var(--warn); }
+.status.superseded { color:var(--warn); }
 .status.pending { color:var(--pending); }
 .status.bad { color:var(--invalid); }
 /* Per-event tone by kind/status, matching the TUI stream colors. */
@@ -112,7 +113,7 @@ const matchKind = (kind, v) => {
 const matchStatus = (ev, call, v) => {
   v = v.toLowerCase();
   if (v === "bad" || v === "invalid") return ev.kind === "invalid";
-  if (v === "warn" || v === "warning") return !!ev.warning;
+  if (v === "warn" || v === "warning") return !!ev.warning || !!ev.truncated;
   if (v === "mismatch") return !!ev.mismatch;
   if (!call) return false;
   if (["err", "error", "fail", "failed"].includes(v)) return call.status === "error";
@@ -152,6 +153,7 @@ const toneOf = (ev, call) => {
   if (ev.kind === "notification") return "notif";
   if (ev.kind === "invalid") return "invalid";
   if (ev.warning) return "warn";
+  if (ev.truncated) return "warn";
   if (ev.kind === "request") return "req";
   if (ev.kind === "response") {
     if (call && call.status === "error") return "error";
@@ -162,12 +164,13 @@ const toneOf = (ev, call) => {
 const statusOf = (ev, call) => {
   if (ev.kind === "invalid") return "bad";
   if (ev.warning) return "warn";
+  if (ev.truncated) return "warn";
   if (!call) return "";
   if (ev.kind === "response") {
     if (call.status === "error") return "error";
     return call.status;
   }
-  return call.status === "pending" ? "pending" : "";
+  return call.status === "pending" || call.status === "superseded" ? call.status : "";
 };
 const renderEvent = (ev) => {
   const call = ev.call_index == null ? null : calls[ev.call_index];
