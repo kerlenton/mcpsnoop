@@ -25,6 +25,13 @@ const (
 
 var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift}
 
+type checkOutputFormat string
+
+const (
+	checkFormatText  checkOutputFormat = "text"
+	checkFormatJUnit checkOutputFormat = "junit"
+)
+
 type checkSummary struct {
 	sessionID       string
 	errors          int
@@ -37,7 +44,7 @@ type checkSummary struct {
 }
 
 func newCheckCmd() *cobra.Command {
-	var failOn string
+	var failOn, formatFlag string
 	var baselineDir string
 	var assertions checkAssertions
 	cmd := &cobra.Command{
@@ -47,6 +54,11 @@ func newCheckCmd() *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			signals, err := parseCheckSignals(failOn)
+			if err != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
+				return exitCode(2)
+			}
+			format, err := parseCheckOutputFormat(formatFlag)
 			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
 				return exitCode(2)
@@ -64,41 +76,65 @@ func newCheckCmd() *cobra.Command {
 
 			summaries := summarizeCheck(st, toolbaseline.New(resolveBaselineDir(baselineDir)))
 			anyFailed := false
-			for _, summary := range summaries {
-				fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d\n",
-					summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending)
-				if summary.baselineCreated {
-					// No baseline existed, so this run trusted the current definitions
-					// rather than verifying them. Say so, or an ephemeral CI reads green
-					// while having checked nothing.
-					fmt.Fprintln(cmd.OutOrStdout(), "recorded first-seen tool baseline (trusted, not verified)")
-				}
-				if summary.drift.BaselineError != "" {
-					// A baseline problem is not itself drift, so report it plainly and let
-					// it fail the run only when drift is the selected signal (see failed).
-					fmt.Fprintln(cmd.OutOrStdout(), "tool baseline error:", summary.drift.BaselineError)
-				} else if !summary.drift.Empty() {
-					writeToolDrift(cmd.OutOrStdout(), summary.drift)
-				}
-				if failed := summary.failed(signals); len(failed) > 0 {
-					fmt.Fprintf(cmd.OutOrStdout(), "check failed: %s\n", strings.Join(failed, ","))
+
+			// Assertions are format independent, so evaluate them once and let each format
+			// render them. Evaluating them inside the text branch only would leave the junit
+			// path neither reporting an assertion failure nor failing the run on one.
+			assertionFailures := make([][]string, len(summaries))
+			for i, summary := range summaries {
+				assertionFailures[i] = assertions.eval(st, summary.sessionID)
+				if len(assertionFailures[i]) > 0 {
 					anyFailed = true
 				}
-				// Assertions carry their own message, so report each one and fail the run.
-				for _, msg := range assertions.eval(st, summary.sessionID) {
-					fmt.Fprintln(cmd.OutOrStdout(), "assertion failed:", msg)
+			}
+
+			if format == checkFormatJUnit {
+				if err := writeCheckJUnit(cmd.OutOrStdout(), summaries, signals, assertionFailures); err != nil {
+					fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
+					return exitCode(1)
+				}
+				if checkFailed(summaries, signals) {
 					anyFailed = true
+				}
+			} else {
+				for i, summary := range summaries {
+					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d\n",
+						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending)
+					if summary.baselineCreated {
+						// No baseline existed, so this run trusted the current definitions
+						// rather than verifying them. Say so, or an ephemeral CI reads green
+						// while having checked nothing.
+						fmt.Fprintln(cmd.OutOrStdout(), "recorded first-seen tool baseline (trusted, not verified)")
+					}
+					if summary.drift.BaselineError != "" {
+						// A baseline problem is not itself drift, so report it plainly and let
+						// it fail the run only when drift is the selected signal (see count).
+						fmt.Fprintln(cmd.OutOrStdout(), "tool baseline error:", summary.drift.BaselineError)
+					} else if !summary.drift.Empty() {
+						writeToolDrift(cmd.OutOrStdout(), summary.drift)
+					}
+					if failed := summary.failed(signals); len(failed) > 0 {
+						fmt.Fprintf(cmd.OutOrStdout(), "check failed: %s\n", strings.Join(failed, ","))
+						anyFailed = true
+					}
+					// Assertions carry their own message, so report each one.
+					for _, msg := range assertionFailures[i] {
+						fmt.Fprintln(cmd.OutOrStdout(), "assertion failed:", msg)
+					}
 				}
 			}
 			if anyFailed {
 				return exitCode(1)
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "check passed")
+			if format == checkFormatText {
+				fmt.Fprintln(cmd.OutOrStdout(), "check passed")
+			}
 			return nil
 		},
 	}
 	cmd.Flags().SortFlags = false
 	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, drift")
+	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text or junit")
 	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
 	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this duration (e.g. 500ms), disabled when zero")
 	cmd.Flags().StringArrayVar(&assertions.expectTools, "expect-tool", nil, "fail if this tool was never called, repeatable")
@@ -168,6 +204,17 @@ func parseCheckSignals(value string) (map[checkSignal]bool, error) {
 	return signals, nil
 }
 
+func parseCheckOutputFormat(value string) (checkOutputFormat, error) {
+	switch checkOutputFormat(strings.ToLower(strings.TrimSpace(value))) {
+	case checkFormatText:
+		return checkFormatText, nil
+	case checkFormatJUnit:
+		return checkFormatJUnit, nil
+	default:
+		return "", fmt.Errorf("--format must be text or junit, got %q", value)
+	}
+}
+
 func loadCheckSession(cmd *cobra.Command, arg string) (*store.Store, string, error) {
 	if arg == "-" {
 		return exporter.Load(cmd.InOrStdin(), "stdin")
@@ -214,24 +261,44 @@ func summarizeCheck(st *store.Store, baselines *toolbaseline.Manager) []checkSum
 	return summaries
 }
 
+func checkFailed(summaries []checkSummary, selected map[checkSignal]bool) bool {
+	for _, summary := range summaries {
+		if len(summary.failed(selected)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (s checkSummary) count(signal checkSignal) int {
+	switch signal {
+	case checkError:
+		return s.errors
+	case checkInvalid:
+		return s.invalid
+	case checkWarn:
+		return s.warnings
+	case checkMismatch:
+		return s.mismatches
+	case checkPending:
+		return s.pending
+	case checkDrift:
+		// A baseline error is not drift, but it means drift could not be verified,
+		// so count it as a drift failure for a run that selected the drift signal.
+		n := s.drift.Count()
+		if s.drift.BaselineError != "" {
+			n++
+		}
+		return n
+	default:
+		return 0
+	}
+}
+
 func (s checkSummary) failed(selected map[checkSignal]bool) []string {
-	// A baseline error is not drift, but it means drift could not be verified, so
-	// count it as a drift failure for a run that selected the drift signal.
-	driftCount := s.drift.Count()
-	if s.drift.BaselineError != "" {
-		driftCount++
-	}
-	counts := map[checkSignal]int{
-		checkError:    s.errors,
-		checkInvalid:  s.invalid,
-		checkWarn:     s.warnings,
-		checkMismatch: s.mismatches,
-		checkPending:  s.pending,
-		checkDrift:    driftCount,
-	}
 	var failed []string
 	for _, signal := range checkSignalOrder {
-		if selected[signal] && counts[signal] > 0 {
+		if selected[signal] && s.count(signal) > 0 {
 			failed = append(failed, string(signal))
 		}
 	}
