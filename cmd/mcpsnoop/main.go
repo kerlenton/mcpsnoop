@@ -217,7 +217,8 @@ func codeOf(code int) error {
 }
 
 func execute(args []string) int {
-	tui.Version = appVersion() // surfaced in the help overlay
+	tui.Version = appVersion()      // surfaced in the help overlay
+	exporter.Version = appVersion() // recorded as the HAR creator
 	root := newRootCmd()
 	root.SetArgs(args)
 	root.SilenceErrors = true

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kerlenton/mcpsnoop/internal/exporter"
 	hubpkg "github.com/kerlenton/mcpsnoop/internal/hub"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
@@ -47,6 +48,22 @@ func stubShim(capture *[]string) func() {
 		return 0
 	}
 	return func() { runShimFn = orig }
+}
+
+func TestExecuteStampsHARCreatorVersion(t *testing.T) {
+	// har.go defaults exporter.Version to "dev" so `go install` builds still
+	// stamp something. execute() must overwrite it with the real binary version,
+	// the same source the help overlay uses, or every tagged HAR reads "dev".
+	var got []string
+	defer stubShim(&got)()
+
+	exporter.Version = "stale"
+	if code := execute([]string{"--", "server"}); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if exporter.Version != appVersion() {
+		t.Fatalf("HAR creator version = %q, want appVersion() %q", exporter.Version, appVersion())
+	}
 }
 
 func TestRootPassesWrappedCommandThroughUntouched(t *testing.T) {
