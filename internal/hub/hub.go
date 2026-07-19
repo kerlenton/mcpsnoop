@@ -38,11 +38,22 @@ type Hub struct {
 	onBackfill    func(BackfillReport)
 
 	mu   sync.Mutex
-	seen map[string]uint64 // session id -> highest seq forwarded
+	seen map[string]seenEntry // session id -> dedup high-water mark, with last touch
+}
+
+// seenEntry is one session's dedup high-water mark plus the last time it was
+// touched, so the map can evict the least-recently-active sessions when it grows.
+type seenEntry struct {
+	seq     uint64
+	touched time.Time
 }
 
 // DefaultBackfillLimit bounds startup work while keeping recent history useful.
 const DefaultBackfillLimit = 100
+
+// seenCap bounds the dedup map on a long-lived hub. It is far above the backfill
+// limit, so ordinary use (with far fewer concurrent sessions) never sweeps.
+const seenCap = 10 * DefaultBackfillLimit
 
 // Options controls hub startup behavior. BackfillLimit 0 replays all history.
 type Options struct {
@@ -71,7 +82,7 @@ func NewWithOptions(socketPath, sessionsDir string, handler Handler, opts Option
 		handler:       handler,
 		backfillLimit: opts.BackfillLimit,
 		onBackfill:    opts.OnBackfill,
-		seen:          make(map[string]uint64),
+		seen:          make(map[string]seenEntry),
 	}
 }
 
@@ -217,11 +228,37 @@ func (h *Hub) replayFile(path string) {
 // emit deduplicates by per-session high-water-mark on Seq, then forwards.
 func (h *Hub) emit(env proxy.Envelope) {
 	h.mu.Lock()
-	if env.Seq <= h.seen[env.SessionID] {
+	if env.Seq <= h.seen[env.SessionID].seq {
 		h.mu.Unlock()
 		return
 	}
-	h.seen[env.SessionID] = env.Seq
+	h.seen[env.SessionID] = seenEntry{seq: env.Seq, touched: time.Now()}
+	if len(h.seen) > seenCap {
+		h.sweepSeen()
+	}
 	h.mu.Unlock()
 	h.handler(env)
+}
+
+// sweepSeen drops the least-recently-touched quarter of the dedup map, keeping it
+// bounded on a long-lived hub without a list to maintain. Caller holds h.mu.
+//
+// Least-recently-touched is the one safe policy, because a live session is touched
+// on every frame, so it can never be among the oldest and is never evicted.
+// Evicting a live session would drop its high-water mark, and a later duplicate
+// frame would then pass the gate and reach the store as a new event. Dropping a
+// quarter at once amortises the cost so a sweep is rare rather than per frame.
+func (h *Hub) sweepSeen() {
+	type aged struct {
+		id      string
+		touched time.Time
+	}
+	all := make([]aged, 0, len(h.seen))
+	for id, e := range h.seen {
+		all = append(all, aged{id: id, touched: e.touched})
+	}
+	slices.SortFunc(all, func(a, b aged) int { return a.touched.Compare(b.touched) })
+	for _, a := range all[:len(all)/4] {
+		delete(h.seen, a.id)
+	}
 }

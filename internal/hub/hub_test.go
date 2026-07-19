@@ -185,3 +185,49 @@ func TestHubBackfillReportCountsOnlyReplayedLogs(t *testing.T) {
 		t.Fatalf("backfill report = %+v, want loaded=0 total=2", report)
 	}
 }
+
+func TestSweepSeenKeepsRecentDropsOldest(t *testing.T) {
+	h := &Hub{seen: make(map[string]seenEntry)}
+	base := time.Now()
+	// Fill just past the cap with strictly increasing touch times, so the ordering
+	// the sweep relies on is unambiguous.
+	n := seenCap + 1
+	for i := 0; i < n; i++ {
+		h.seen[fmt.Sprintf("s%05d", i)] = seenEntry{seq: 1, touched: base.Add(time.Duration(i) * time.Millisecond)}
+	}
+
+	before := len(h.seen)
+	h.sweepSeen()
+	if got, want := before-len(h.seen), before/4; got != want {
+		t.Fatalf("sweep dropped %d entries, want a quarter (%d)", got, want)
+	}
+	if _, ok := h.seen["s00000"]; ok {
+		t.Fatal("the oldest session should have been swept")
+	}
+	if _, ok := h.seen[fmt.Sprintf("s%05d", n-1)]; !ok {
+		t.Fatal("the most recently touched session should be kept")
+	}
+}
+
+func TestEmitBoundsSeenMapAndKeepsLiveSession(t *testing.T) {
+	h := &Hub{seen: make(map[string]seenEntry), handler: func(proxy.Envelope) {}}
+	const live = "live-session"
+
+	// Drive well past the cap, touching the live session throughout so it stays among
+	// the most recently touched and is never swept.
+	for i := 0; i < seenCap*2; i++ {
+		h.emit(proxy.Envelope{SessionID: fmt.Sprintf("s%07d", i), Seq: 1})
+		if i%16 == 0 {
+			h.emit(proxy.Envelope{SessionID: live, Seq: uint64(i/16 + 1)})
+		}
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.seen) > seenCap {
+		t.Fatalf("emit should bound the seen map at the cap, got %d", len(h.seen))
+	}
+	if _, ok := h.seen[live]; !ok {
+		t.Fatal("a session still receiving frames must survive sweeps")
+	}
+}
