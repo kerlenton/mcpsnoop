@@ -112,6 +112,7 @@ type EventExport struct {
 	ID        string          `json:"id,omitempty"`
 	Warning   string          `json:"warning,omitempty"`
 	Mismatch  bool            `json:"mismatch,omitempty"`
+	Truncated bool            `json:"truncated,omitempty"`
 	CallIndex *int            `json:"call_index,omitempty"`
 	Raw       json.RawMessage `json:"raw,omitempty"`
 	Text      string          `json:"text,omitempty"`
@@ -519,6 +520,7 @@ func exportEvent(ev store.EventView, callIndex map[string]int) EventExport {
 		ID:        ev.ID,
 		Warning:   ev.Warning,
 		Mismatch:  ev.RoutingMismatch,
+		Truncated: ev.Truncated,
 		Raw:       ev.Raw,
 		Text:      ev.Text,
 	}
@@ -550,6 +552,9 @@ func writeText(w io.Writer, data SessionExport) error {
 		}
 		if ev.Warning != "" {
 			title += " warning=" + ev.Warning
+		}
+		if ev.Truncated {
+			title += " truncated"
 		}
 		if ev.CallIndex != nil {
 			c := data.Calls[*ev.CallIndex]

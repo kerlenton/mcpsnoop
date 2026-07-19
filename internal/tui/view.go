@@ -757,6 +757,11 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 	if e.Warning != "" {
 		return m.styles.warn
 	}
+	// A truncated observation reads "warn" in the row, so its cell must be warn
+	// colored too. It no longer rides the Warning field, so check it explicitly.
+	if e.Truncated {
+		return m.styles.warn
+	}
 	if e.Call != nil {
 		switch {
 		case e.Call.State == store.Pending:

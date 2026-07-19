@@ -123,6 +123,41 @@ func TestBuildIncludesValidationWarning(t *testing.T) {
 	}
 }
 
+func TestBuildExportsTruncatedFlag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trunc.jsonl")
+	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	// A response whose observed copy was capped: it must export a truncated marker,
+	// not lose the reason its bytes are short now that truncation left the warning.
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: t0,
+		Direction: proxy.ServerToClient, Truncated: true,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","result":{}}`),
+	})
+
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Events) != 1 || !out.Events[0].Truncated {
+		t.Fatalf("expected one truncated event, got %+v", out.Events)
+	}
+	if out.Events[0].Warning != "" {
+		t.Fatalf("truncation must not ride the warning field, got %q", out.Events[0].Warning)
+	}
+
+	var buf bytes.Buffer
+	if err := Write(&buf, out, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "truncated") {
+		t.Fatalf("text export should surface the truncation marker\n%s", buf.String())
+	}
+}
+
 func TestWriteFormats(t *testing.T) {
 	st, id, err := LoadFile(sampleLog(t))
 	if err != nil {

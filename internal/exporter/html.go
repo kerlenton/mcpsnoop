@@ -153,6 +153,7 @@ const toneOf = (ev, call) => {
   if (ev.kind === "notification") return "notif";
   if (ev.kind === "invalid") return "invalid";
   if (ev.warning) return "warn";
+  if (ev.truncated) return "warn";
   if (ev.kind === "request") return "req";
   if (ev.kind === "response") {
     if (call && call.status === "error") return "error";
@@ -163,6 +164,7 @@ const toneOf = (ev, call) => {
 const statusOf = (ev, call) => {
   if (ev.kind === "invalid") return "bad";
   if (ev.warning) return "warn";
+  if (ev.truncated) return "warn";
   if (!call) return "";
   if (ev.kind === "response") {
     if (call.status === "error") return "error";
