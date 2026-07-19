@@ -292,6 +292,20 @@ mcpsnoop check --fail-on error,invalid artifacts/session.jsonl
 mcpsnoop check --fail-on mismatch gateway-run.jsonl
 ```
 
+Beyond the signal counts, assert the shape of the run. These compose with each
+other and with `--fail-on`, and any failure exits non-zero.
+
+| Flag | Fails when |
+|---|---|
+| `--max-duration <dur>` | a completed tool call took longer than the budget, e.g. `--max-duration 500ms` |
+| `--expect-tool <name>` | the named tool was never called (repeatable) |
+| `--forbid-tool <name>` | the named tool was called (repeatable) |
+
+```bash
+# a contract for the run: search must run, delete must not, nothing over 2s
+mcpsnoop check --expect-tool search --forbid-tool delete --max-duration 2s run.jsonl
+```
+
 ### Detect tool definition drift
 
 The first complete `tools/list` observed for a server label becomes its trusted

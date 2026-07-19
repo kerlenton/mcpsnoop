@@ -316,6 +316,72 @@ func TestCheckReportsMissingLabelBaselineWithoutFailingUnlessDriftSelected(t *te
 	}
 }
 
+func TestCheckMaxDurationAssertion(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// echo takes one second: request at t=1s, response at t=2s.
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	)
+
+	code, stdout, _ := executeCheck(t, []string{"--max-duration", "500ms", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 for a call over the budget", code)
+	}
+	if !strings.Contains(stdout, `assertion failed: tool "echo" took 1s, over the 500ms budget`) {
+		t.Fatalf("stdout = %q", stdout)
+	}
+
+	code, stdout, _ = executeCheck(t, []string{"--max-duration", "2s", "-"}, log)
+	if code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("a call within budget should pass, code %d stdout %q", code, stdout)
+	}
+}
+
+func TestCheckExpectAndForbidToolAssertions(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	)
+
+	// expect-tool: satisfied when the tool was called, fails when it was not.
+	if code, stdout, _ := executeCheck(t, []string{"--expect-tool", "echo", "-"}, log); code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("echo should satisfy --expect-tool echo, code %d stdout %q", code, stdout)
+	}
+	code, stdout, _ := executeCheck(t, []string{"--expect-tool", "search", "-"}, log)
+	if code != 1 || !strings.Contains(stdout, `assertion failed: expected tool "search" was never called`) {
+		t.Fatalf("--expect-tool search should fail, code %d stdout %q", code, stdout)
+	}
+
+	// forbid-tool: passes when the tool was not called, fails when it was.
+	if code, stdout, _ := executeCheck(t, []string{"--forbid-tool", "delete", "-"}, log); code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("--forbid-tool delete should pass when delete was not called, code %d stdout %q", code, stdout)
+	}
+	code, stdout, _ = executeCheck(t, []string{"--forbid-tool", "echo", "-"}, log)
+	if code != 1 || !strings.Contains(stdout, `assertion failed: forbidden tool "echo" was called`) {
+		t.Fatalf("--forbid-tool echo should fail, code %d stdout %q", code, stdout)
+	}
+}
+
+func TestCheckAssertionsCompose(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// echo takes a second, and search is never called, so both assertions fail.
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+	)
+	code, stdout, _ := executeCheck(t, []string{"--max-duration", "500ms", "--expect-tool", "search", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 when either assertion fails", code)
+	}
+	for _, want := range []string{`tool "echo" took`, `expected tool "search" was never called`} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q\n%s", want, stdout)
+		}
+	}
+}
+
 func executeCheck(t *testing.T, args []string, stdin string) (int, string, string) {
 	t.Helper()
 	cmd := newCheckCmd()
