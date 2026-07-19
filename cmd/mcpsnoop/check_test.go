@@ -81,6 +81,9 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 }
 
 func TestCheckWritesJUnitGolden(t *testing.T) {
+	// checkSignalEnvelopes carries a tools/list, so the run observes a baseline.
+	// Isolate it the way the drift tests do, or it writes into the real state dir.
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	log := encodeCheckLog(t, checkSignalEnvelopes()...)
 
 	code, stdout, stderr := executeCheck(t, []string{"--format", "junit", "-"}, log)
@@ -88,8 +91,8 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
 		t.Fatalf("exit = %d, want 1", code)
 	}
 	const want = `<?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="mcpsnoop check" tests="5" failures="3" errors="0" skipped="0" time="0">
-  <testsuite name="s1" tests="5" failures="3" errors="0" skipped="0" time="0">
+<testsuites name="mcpsnoop check" tests="7" failures="3" errors="0" skipped="0" time="0">
+  <testsuite name="s1" tests="7" failures="3" errors="0" skipped="0" time="0">
     <testcase classname="mcpsnoop.check" name="s1/error" time="0">
       <failure message="session s1 has 2 errors" type="mcpsnoop.check.error">session s1 has 2 errors</failure>
     </testcase>
@@ -101,6 +104,8 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
     </testcase>
     <testcase classname="mcpsnoop.check" name="s1/mismatch" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/pending" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/drift" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/assertions" time="0"></testcase>
   </testsuite>
 </testsuites>
 `
@@ -113,13 +118,14 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
 }
 
 func TestCheckJUnitHonorsFailOn(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	log := encodeCheckLog(t, checkErrorEnvelopes()...)
 
 	code, stdout, stderr := executeCheck(t, []string{"--format", "junit", "--fail-on", "invalid,warn", "-"}, log)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 because errors are not selected", code)
 	}
-	for _, want := range []string{`tests="5"`, `failures="0"`, `name="s1/error"`} {
+	for _, want := range []string{`tests="7"`, `failures="0"`, `name="s1/error"`} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q\n%s", want, stdout)
 		}
