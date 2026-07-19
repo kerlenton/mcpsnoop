@@ -104,6 +104,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
+| `mcpsnoop prune` | delete saved session logs older than a cutoff |
 | `mcpsnoop remote <user@host>` | print the SSH tunnel command |
 | `mcpsnoop demo` | play a scripted session |
 
@@ -166,6 +167,19 @@ bounded without deleting older traces. Use `mcpsnoop --history-limit N` to pick
 another limit, or `mcpsnoop --history-limit 0` to load the full history. Older
 sessions remain available through `mcpsnoop open <session-id>` and
 `mcpsnoop export <session-id>`.
+
+The history limit bounds what is loaded; `mcpsnoop prune` bounds what is kept.
+It deletes saved session logs older than a cutoff, and never runs on its own.
+
+```bash
+mcpsnoop prune --older-than 30d --dry-run   # list what would go, remove nothing
+mcpsnoop prune --older-than 30d             # delete after confirming
+mcpsnoop prune --older-than 72h --yes       # skip the prompt in a script
+```
+
+`--older-than` is required (there is no default that would delete anything) and
+accepts a day count like `30d` or a Go duration like `72h`. Tool baselines are
+left alone, since a baseline is keyed by server label rather than by session.
 
 Because it sits in the actual pipe, not off to the side like the Inspector, it
 sees exactly what your real client and server say to each other, whatever the
