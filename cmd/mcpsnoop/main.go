@@ -217,7 +217,8 @@ func codeOf(code int) error {
 }
 
 func execute(args []string) int {
-	tui.Version = appVersion() // surfaced in the help overlay
+	tui.Version = appVersion()      // surfaced in the help overlay
+	exporter.Version = appVersion() // recorded as the HAR creator
 	root := newRootCmd()
 	root.SetArgs(args)
 	root.SilenceErrors = true
@@ -368,7 +369,7 @@ func newExportCmd() *cobra.Command {
 	var formatFlag, outFlag string
 	cmd := &cobra.Command{
 		Use:   "export [session-id|log.jsonl|-]",
-		Short: "Render a captured session to json, html, text, or otlp",
+		Short: "Render a captured session to json, html, text, har, or otlp",
 		Long:  "Render a captured session to a portable file. With no session, the newest session log is exported. Use - to read JSONL from stdin.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -421,7 +422,7 @@ func newExportCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().SortFlags = false
-	cmd.Flags().StringVarP(&formatFlag, "format", "T", "json", "output format, one of json, html, text, otlp")
+	cmd.Flags().StringVarP(&formatFlag, "format", "T", "json", "output format, one of json, html, text, har, otlp")
 	cmd.Flags().StringVarP(&outFlag, "output", "o", "-", "output path, or - for stdout")
 	return cmd
 }

@@ -99,7 +99,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop -- <server>` | wrap a stdio server as a transparent shim |
 | `mcpsnoop` | open the live TUI |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
-| `mcpsnoop export` | render a session to json, html, text, or otlp |
+| `mcpsnoop export` | render a session to json, html, text, har, or otlp |
 | `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, or hung calls |
 | `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
@@ -228,7 +228,7 @@ dir:s2c kind:req                  # server-initiated requests (sampling, roots)
 Turn any captured session into a portable file.
 
 ```bash
-mcpsnoop export -T json|html|text|otlp [-o file|-] [session-id|log.jsonl|-]
+mcpsnoop export -T json|html|text|har|otlp [-o file|-] [session-id|log.jsonl|-]
 ```
 
 | Format | What you get |
@@ -236,18 +236,23 @@ mcpsnoop export -T json|html|text|otlp [-o file|-] [session-id|log.jsonl|-]
 | `json` | correlated calls, per-tool counts and p50/p95/p99 latency, slowest calls, capabilities, and raw frames |
 | `html` | a self-contained browser file with search and collapsible JSON |
 | `text` | a pretty plain-text dump |
+| `har` | one entry per correlated call, openable in browser devtools and anything else that reads HAR |
 | `otlp` | OTLP JSON with a trace per session and a span per correlated call |
+
+MCP is not HTTP, so a HAR entry's URL, status code, and timings are a deliberate
+mapping of each call rather than a wire transcript.
 
 ```bash
 mcpsnoop export -T html -o out.html       # an HTML file to open in a browser
 mcpsnoop export -T text server.py-48213   # a specific session, as text
 mcpsnoop export -T json | jq              # the newest session, piped to jq
+mcpsnoop export -T har -o session.har     # a HAR file to open in browser devtools
 mcpsnoop export -T otlp -o trace.json     # import into an OTLP-compatible tracing backend
 ```
 
 Omit `-o` to write to stdout, and omit the session to take the newest, or pass
 `-` to read JSONL from stdin. In the TUI, press `e` to export the selected
-session as HTML, or run `:export json|html|text|otlp [path]` from command mode.
+session as HTML, or run `:export json|html|text|har|otlp [path]` from command mode.
 
 ### Stream completed calls to an OTLP collector
 
