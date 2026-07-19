@@ -672,6 +672,53 @@ func TestValidationWarnings(t *testing.T) {
 	}
 }
 
+func TestIngestDeprecatedMethods(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+
+	cases := []struct {
+		method string
+		want   string
+		kind   EventKind
+	}{
+		{"roots/list", "roots is deprecated", EventRequest},
+		{"sampling/createMessage", "sampling is deprecated", EventRequest},
+		{"logging/setLevel", "logging is deprecated", EventRequest},
+		{"notifications/roots/list_changed", "roots is deprecated", EventNotification},
+		{"notifications/message", "logging notifications/message is deprecated", EventNotification},
+	}
+	for i, tc := range cases {
+		raw := fmt.Sprintf(`{"jsonrpc":"2.0","method":%q`, tc.method)
+		if tc.kind == EventRequest {
+			raw += fmt.Sprintf(`,"id":%d`, i+1)
+		}
+		raw += `}`
+		ev := s.Ingest(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "srv", Seq: uint64(i + 1), TS: t0,
+			Direction: proxy.ClientToServer, Raw: json.RawMessage(raw),
+		})
+		if ev.Kind != tc.kind {
+			t.Fatalf("%s: kind = %d, want %d", tc.method, ev.Kind, tc.kind)
+		}
+		if !strings.Contains(ev.Deprecated, tc.want) {
+			t.Fatalf("%s: deprecated = %q, want substring %q", tc.method, ev.Deprecated, tc.want)
+		}
+		if ev.Warning != "" {
+			t.Fatalf("%s: must not ride the warning field, got %q", tc.method, ev.Warning)
+		}
+	}
+}
+
+func TestIngestDeprecatedMethodNegative(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+
+	ev := s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", `{}`))
+	if ev.Deprecated != "" {
+		t.Fatalf("tools/list should not be deprecated, got %q", ev.Deprecated)
+	}
+}
+
 // TestConcurrentIngest exercises the lock under -race, many goroutines ingest
 // while another reads snapshots.
 func TestConcurrentIngest(t *testing.T) {

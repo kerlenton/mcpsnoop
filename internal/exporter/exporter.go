@@ -105,18 +105,19 @@ type CallExport struct {
 }
 
 type EventExport struct {
-	Seq       uint64          `json:"seq"`
-	Timestamp time.Time       `json:"timestamp"`
-	Direction proxy.Direction `json:"direction"`
-	Kind      string          `json:"kind"`
-	Method    string          `json:"method,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Warning   string          `json:"warning,omitempty"`
-	Mismatch  bool            `json:"mismatch,omitempty"`
-	Truncated bool            `json:"truncated,omitempty"`
-	CallIndex *int            `json:"call_index,omitempty"`
-	Raw       json.RawMessage `json:"raw,omitempty"`
-	Text      string          `json:"text,omitempty"`
+	Seq        uint64          `json:"seq"`
+	Timestamp  time.Time       `json:"timestamp"`
+	Direction  proxy.Direction `json:"direction"`
+	Kind       string          `json:"kind"`
+	Method     string          `json:"method,omitempty"`
+	ID         string          `json:"id,omitempty"`
+	Warning    string          `json:"warning,omitempty"`
+	Mismatch   bool            `json:"mismatch,omitempty"`
+	Truncated  bool            `json:"truncated,omitempty"`
+	Deprecated string          `json:"deprecated,omitempty"`
+	CallIndex  *int            `json:"call_index,omitempty"`
+	Raw        json.RawMessage `json:"raw,omitempty"`
+	Text       string          `json:"text,omitempty"`
 }
 
 func ParseFormat(s string) (Format, error) {
@@ -517,17 +518,18 @@ func exportCall(index int, c store.CallView) CallExport {
 
 func exportEvent(ev store.EventView, callIndex map[string]int) EventExport {
 	out := EventExport{
-		Seq:       ev.Seq,
-		Timestamp: ev.TS,
-		Direction: ev.Dir,
-		Kind:      eventKind(ev.Kind),
-		Method:    ev.Method,
-		ID:        ev.ID,
-		Warning:   ev.Warning,
-		Mismatch:  ev.RoutingMismatch,
-		Truncated: ev.Truncated,
-		Raw:       ev.Raw,
-		Text:      ev.Text,
+		Seq:        ev.Seq,
+		Timestamp:  ev.TS,
+		Direction:  ev.Dir,
+		Kind:       eventKind(ev.Kind),
+		Method:     ev.Method,
+		ID:         ev.ID,
+		Warning:    ev.Warning,
+		Mismatch:   ev.RoutingMismatch,
+		Truncated:  ev.Truncated,
+		Deprecated: ev.Deprecated,
+		Raw:        ev.Raw,
+		Text:       ev.Text,
 	}
 	if ev.Call != nil {
 		if idx, ok := callIndex[callKey(*ev.Call)]; ok {
@@ -560,6 +562,9 @@ func writeText(w io.Writer, data SessionExport) error {
 		}
 		if ev.Truncated {
 			title += " truncated"
+		}
+		if ev.Deprecated != "" {
+			title += " deprecated"
 		}
 		if ev.CallIndex != nil {
 			c := data.Calls[*ev.CallIndex]

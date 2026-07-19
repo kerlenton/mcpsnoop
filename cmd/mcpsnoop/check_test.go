@@ -469,6 +469,19 @@ func TestCheckPassesForTruncatedBody(t *testing.T) {
 	}
 }
 
+func TestCheckPassesForDeprecatedFeature(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	deprecated := checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"roots/list"}`)
+
+	code, stdout, stderr := executeCheck(t, []string{"-"}, encodeCheckLog(t, deprecated))
+	if code != 0 || stderr != "" {
+		t.Fatalf("a deprecated feature must not fail the default check, code %d stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "warnings=0") || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
 func executeCheck(t *testing.T, args []string, stdin string) (int, string, string) {
 	t.Helper()
 	cmd := newCheckCmd()

@@ -66,7 +66,10 @@ type EventView struct {
 	// Truncated is true when mcpsnoop capped its own observed copy of a large body.
 	// It is a structured marker, not a protocol warning, so it never fails check.
 	Truncated bool
-	Call      *CallView // set for request/response events
+	// Deprecated carries a heads-up when a frame uses a feature deprecated in the
+	// 2026-07-28 MCP release. It is structured like Truncated and never fails check.
+	Deprecated string
+	Call       *CallView // set for request/response events
 }
 
 // SessionHeader is a lightweight per-session summary for the left panel.
@@ -163,6 +166,7 @@ func (e *event) view(_ *session) EventView {
 		MCPProtocolVersion: e.mcpProtocolVersion,
 		RoutingMismatch:    e.mismatch,
 		Truncated:          e.truncated,
+		Deprecated:         e.deprecated,
 	}
 	if e.call != nil {
 		cv := e.call.view()

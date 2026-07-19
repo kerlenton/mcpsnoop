@@ -113,7 +113,7 @@ const matchKind = (kind, v) => {
 const matchStatus = (ev, call, v) => {
   v = v.toLowerCase();
   if (v === "bad" || v === "invalid") return ev.kind === "invalid";
-  if (v === "warn" || v === "warning") return !!ev.warning || !!ev.truncated;
+  if (v === "warn" || v === "warning") return !!ev.warning || !!ev.truncated || !!ev.deprecated;
   if (v === "mismatch") return !!ev.mismatch;
   if (!call) return false;
   if (["err", "error", "fail", "failed"].includes(v)) return call.status === "error";
@@ -154,6 +154,7 @@ const toneOf = (ev, call) => {
   if (ev.kind === "invalid") return "invalid";
   if (ev.warning) return "warn";
   if (ev.truncated) return "warn";
+  if (ev.deprecated) return "warn";
   if (ev.kind === "request") return "req";
   if (ev.kind === "response") {
     if (call && call.status === "error") return "error";
@@ -165,6 +166,7 @@ const statusOf = (ev, call) => {
   if (ev.kind === "invalid") return "bad";
   if (ev.warning) return "warn";
   if (ev.truncated) return "warn";
+  if (ev.deprecated) return "warn";
   if (!call) return "";
   if (ev.kind === "response") {
     if (call.status === "error") return "error";
@@ -178,6 +180,7 @@ const renderEvent = (ev) => {
   const st = statusOf(ev, call);
   const raw = ev.text || textOf(ev.raw);
   const warning = ev.warning ? "<details open><summary>Warning</summary><pre>" + esc(ev.warning) + "</pre></details>" : "";
+  const deprecated = ev.deprecated ? "<details open><summary>Deprecated</summary><pre>" + esc(ev.deprecated) + "</pre></details>" : "";
   const callBlock = call ? "<details><summary>Correlated call</summary><pre>" + esc(JSON.stringify(call, null, 2)) + "</pre></details>" : "";
   return "<article class=\"event tone-" + tone + "\">" +
     "<div class=\"head\">" +
@@ -188,6 +191,7 @@ const renderEvent = (ev) => {
       "<div class=\"time\">" + esc(fmtTime(ev.timestamp)) + "</div>" +
     "</div>" +
     warning +
+    deprecated +
     "<details open><summary>Frame</summary><pre>" + esc(raw) + "</pre></details>" +
     callBlock +
   "</article>";

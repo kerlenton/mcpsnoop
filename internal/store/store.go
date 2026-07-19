@@ -105,6 +105,7 @@ type event struct {
 	batch              bool   // one element of a JSON-RPC batch (routing headers cannot address it)
 	mismatch           bool   // a routing header disagrees with the body (structured flag for warning)
 	truncated          bool   // the observed copy was capped at the frame-size limit
+	deprecated         string // a deprecated MCP feature was used (structured, not a protocol warning)
 	call               *call  // set for request/response events
 }
 
@@ -323,6 +324,10 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 					" disagrees with _meta protocolVersion "+mv)
 			ev.mismatch = true
 		}
+	}
+
+	if note := deprecatedMethodNote(msg.Method); note != "" {
+		ev.deprecated = note
 	}
 
 	sess.events = append(sess.events, ev)

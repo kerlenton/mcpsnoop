@@ -704,6 +704,14 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = msg + " · " + c.detail
 		}
 	}
+	if e.Deprecated != "" {
+		c.status = "warn"
+		if c.detail == "" {
+			c.detail = e.Deprecated
+		} else {
+			c.detail = e.Deprecated + " · " + c.detail
+		}
+	}
 	return c
 }
 
@@ -760,6 +768,9 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 	// A truncated observation reads "warn" in the row, so its cell must be warn
 	// colored too. It no longer rides the Warning field, so check it explicitly.
 	if e.Truncated {
+		return m.styles.warn
+	}
+	if e.Deprecated != "" {
 		return m.styles.warn
 	}
 	if e.Call != nil {
@@ -1480,13 +1491,19 @@ func (m Model) capSection(label string, info json.RawMessage, order []string, ra
 
 // capRow is one capability line: a two-space indent, a one-cell marker, then the
 // name. Declared is a green ● with the name in text, absent a faint ○ with the
-// name faint. ● and ○ share one cell width so the names align, and the
-// filled/hollow glyph carries the state on its own so NO_COLOR stays legible.
+// name faint. Deprecated capabilities append a dim migration hint. ● and ○ share
+// one cell width so the names align, and the filled/hollow glyph carries the
+// state on its own so NO_COLOR stays legible.
 func (m Model) capRow(present bool, name string) string {
+	label := name
 	if present {
-		return "  " + m.styles.resp.Render("●") + " " + m.styles.neutral.Render(name)
+		if note := store.DeprecatedCapabilityNote(name); note != "" {
+			label = name + " (deprecated: " + note + ")"
+			return "  " + m.styles.resp.Render("●") + " " + m.styles.warn.Render(label)
+		}
+		return "  " + m.styles.resp.Render("●") + " " + m.styles.neutral.Render(label)
 	}
-	return "  " + m.styles.faint.Render("○") + " " + m.styles.faint.Render(name)
+	return "  " + m.styles.faint.Render("○") + " " + m.styles.faint.Render(label)
 }
 
 // capNames returns the set of capability names a side declared. Values are
