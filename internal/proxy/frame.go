@@ -55,6 +55,9 @@ type Envelope struct {
 	// Batch marks a frame that was one element of a JSON-RPC batch array. Routing
 	// headers address a single operation, so they cannot describe a batch.
 	Batch bool `json:"batch,omitempty"`
+	// Truncated marks a frame whose observed copy was cut at the frame-size cap.
+	// The bytes still forwarded to the other side in full; only this copy is short.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // RPCError is the JSON-RPC error object.

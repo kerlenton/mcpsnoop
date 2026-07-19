@@ -214,6 +214,23 @@ func TestSessionReportsSeqGapAsMissingFrames(t *testing.T) {
 	}
 }
 
+func TestIngestTruncatedFrameIsMarkedNotInvalid(t *testing.T) {
+	s := New()
+	// A body whose observed copy was cut at the cap: the partial bytes do not parse,
+	// but it must be marked as truncated, not flagged as an invalid (corrupt) frame.
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(), Direction: proxy.ClientToServer,
+		Transport: "http", Truncated: true,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"blob":"AAAA`),
+	})
+	if ev.Kind == EventInvalid {
+		t.Fatal("a truncated observation must not be flagged as an invalid frame")
+	}
+	if !strings.Contains(ev.Warning, "truncated") {
+		t.Fatalf("a truncated frame should carry a truncation warning, got %q", ev.Warning)
+	}
+}
+
 func TestActivityBuckets(t *testing.T) {
 	st := New()
 	now := time.Now()

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -9,13 +10,59 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 // emitterTo adapts a captureSink into the emit func httpProxyHandler expects.
 func emitterTo(sink *captureSink) func(Direction, []byte, route) {
 	return func(d Direction, raw []byte, rt route) {
-		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, MCPProtocolVersion: rt.protocolVersion, Batch: rt.batch})
+		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, MCPProtocolVersion: rt.protocolVersion, Batch: rt.batch, Truncated: rt.truncated})
 	}
+}
+
+// TestBodyTapForwardsFullyAndBoundsObservation covers the memory bound: the tap
+// yields every byte to the forwarder while copying at most cap bytes for
+// observation, flagging the copy truncated once the body runs past cap. Bytes are
+// checked against the original, never against the (bounded) observed copy.
+func TestBodyTapForwardsFullyAndBoundsObservation(t *testing.T) {
+	run := func(t *testing.T, rc io.ReadCloser, input []byte, cap int, wantTrunc bool) {
+		var observed []byte
+		var truncated bool
+		tap := newBodyTap(rc, cap, func(o []byte, tr bool) {
+			observed = append([]byte(nil), o...)
+			truncated = tr
+		})
+		got, err := io.ReadAll(tap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = tap.Close()
+		// Byte-for-byte forwarding is unchanged, whether or not the copy was cut.
+		if !bytes.Equal(got, input) {
+			t.Fatalf("forwarded %q, want the full %q", got, input)
+		}
+		if truncated != wantTrunc {
+			t.Fatalf("truncated = %v, want %v", truncated, wantTrunc)
+		}
+		want := input
+		if wantTrunc {
+			want = input[:cap]
+		}
+		if !bytes.Equal(observed, want) {
+			t.Fatalf("observed %q, want %q", observed, want)
+		}
+	}
+
+	input := []byte("0123456789abcdef") // 16 bytes
+	t.Run("under cap", func(t *testing.T) {
+		run(t, io.NopCloser(bytes.NewReader(input)), input, 100, false)
+	})
+	t.Run("over cap", func(t *testing.T) {
+		run(t, io.NopCloser(bytes.NewReader(input)), input, 10, true)
+	})
+	t.Run("over cap across single-byte reads", func(t *testing.T) {
+		run(t, io.NopCloser(iotest.OneByteReader(bytes.NewReader(input))), input, 10, true)
+	})
 }
 
 func TestHTTPProxyJSON(t *testing.T) {

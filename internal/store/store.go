@@ -214,6 +214,16 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		return ev.view(sess)
 	}
 
+	if e.Truncated {
+		// mcpsnoop capped its own observed copy of a large body, so the bytes are
+		// incomplete by design. Mark it plainly rather than let the partial JSON look
+		// like an invalid frame (stdout corruption), which it is not.
+		ev.kind = EventOther
+		ev.warning = appendWarning(ev.warning, "observed copy truncated at the frame-size cap, forwarding unaffected")
+		sess.events = append(sess.events, ev)
+		return ev.view(sess)
+	}
+
 	msg, ok := proxy.ParseRPC(e.Raw)
 	switch {
 	case !ok:
