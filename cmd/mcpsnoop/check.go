@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -38,10 +39,11 @@ type checkSummary struct {
 func newCheckCmd() *cobra.Command {
 	var failOn string
 	var baselineDir string
+	var assertions checkAssertions
 	cmd := &cobra.Command{
 		Use:   "check [session-id|log.jsonl|-]",
-		Short: "Fail when a captured session contains selected signals",
-		Long:  "Check a captured session for errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, or tool definitions that drifted from their trust-on-first-use baseline. With no session, the newest session log is checked. Use - to read from stdin.",
+		Short: "Fail when a captured session violates a signal or an assertion",
+		Long:  "Check a captured session against signals (errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, tool-definition drift) and assertions (a tool-call latency budget, and tools that must or must not have been called). With no session, the newest session log is checked. Use - to read from stdin.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			signals, err := parseCheckSignals(failOn)
@@ -82,6 +84,11 @@ func newCheckCmd() *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(), "check failed: %s\n", strings.Join(failed, ","))
 					anyFailed = true
 				}
+				// Assertions carry their own message, so report each one and fail the run.
+				for _, msg := range assertions.eval(st, summary.sessionID) {
+					fmt.Fprintln(cmd.OutOrStdout(), "assertion failed:", msg)
+					anyFailed = true
+				}
 			}
 			if anyFailed {
 				return exitCode(1)
@@ -93,7 +100,58 @@ func newCheckCmd() *cobra.Command {
 	cmd.Flags().SortFlags = false
 	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, drift")
 	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
+	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this duration (e.g. 500ms), disabled when zero")
+	cmd.Flags().StringArrayVar(&assertions.expectTools, "expect-tool", nil, "fail if this tool was never called, repeatable")
+	cmd.Flags().StringArrayVar(&assertions.forbidTools, "forbid-tool", nil, "fail if this tool was called, repeatable")
 	return cmd
+}
+
+// checkAssertions holds the first-class check assertions, evaluated per session
+// on top of the signal counts.
+type checkAssertions struct {
+	maxDuration time.Duration
+	expectTools []string
+	forbidTools []string
+}
+
+// eval returns one message per assertion the session violates, empty when all
+// pass. A tool counts as called on any tools/call for it, whatever the outcome.
+// The latency budget only judges calls that got a response, since a call that
+// never did has no real latency and is the pending signal's job.
+func (a checkAssertions) eval(st *store.Store, sessionID string) []string {
+	if a.maxDuration <= 0 && len(a.expectTools) == 0 && len(a.forbidTools) == 0 {
+		return nil
+	}
+	calls := st.Calls(sessionID)
+	called := make(map[string]bool)
+	for _, c := range calls {
+		if c.IsTool && c.ToolName != "" {
+			called[c.ToolName] = true
+		}
+	}
+
+	var failures []string
+	if a.maxDuration > 0 {
+		for _, c := range calls {
+			// Only a call that actually got a response has a real latency. Pending and
+			// superseded calls never did, so they are not judged here.
+			if c.IsTool && c.Done() && c.State != store.Superseded && c.Duration() > a.maxDuration {
+				failures = append(failures, fmt.Sprintf("tool %q took %s, over the %s budget",
+					c.ToolName, c.Duration().Round(time.Millisecond), a.maxDuration))
+			}
+		}
+	}
+	for _, name := range a.expectTools {
+		if !called[name] {
+			failures = append(failures, fmt.Sprintf("expected tool %q was never called", name))
+		}
+	}
+	for _, name := range a.forbidTools {
+		if called[name] {
+			failures = append(failures, fmt.Sprintf("forbidden tool %q was called", name))
+		}
+	}
+	return failures
 }
 
 func parseCheckSignals(value string) (map[checkSignal]bool, error) {
