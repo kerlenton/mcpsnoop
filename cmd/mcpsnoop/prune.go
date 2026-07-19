@@ -47,7 +47,7 @@ func newPruneCmd() *cobra.Command {
 			if dryRun {
 				fmt.Fprintf(out, "would remove %d session log(s), %s:\n", len(victims), humanSize(total))
 				for _, v := range victims {
-					fmt.Fprintln(out, "  "+v)
+					fmt.Fprintln(out, "  "+v.path)
 				}
 				return nil
 			}
@@ -64,15 +64,14 @@ func newPruneCmd() *cobra.Command {
 				}
 			}
 
-			removed := 0
-			for _, v := range victims {
-				if err := os.Remove(v); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "mcpsnoop prune: %v\n", err)
-					continue
-				}
-				removed++
+			removed, freed, anyFailed := removeLogs(cmd.ErrOrStderr(), victims)
+			// Report the size actually reclaimed, not the candidate total, so a partial
+			// run does not overstate what went. Fail after the summary so the user still
+			// sees what did go.
+			fmt.Fprintf(out, "removed %d session log(s), %s\n", removed, humanSize(freed))
+			if anyFailed {
+				return exitCode(1)
 			}
-			fmt.Fprintf(out, "removed %d session log(s), %s\n", removed, humanSize(total))
 			return nil
 		},
 	}
@@ -91,26 +90,43 @@ func pruneCutoff(olderThan string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, errors.New("--older-than is required, e.g. 30d or 72h")
 	}
+	// A zero age would make the cutoff the current moment and match every log,
+	// including the one a running shim is still appending to, so both forms require
+	// a strictly positive value. That is the easiest way to express "delete
+	// everything", which issue #107 asked to keep out of reach.
 	var age time.Duration
 	if days, ok := strings.CutSuffix(s, "d"); ok {
 		n, err := strconv.Atoi(days)
-		if err != nil || n < 0 {
+		if err != nil {
 			return time.Time{}, fmt.Errorf("invalid --older-than %q, want a whole number of days like 30d, or a Go duration like 72h", s)
+		}
+		if n <= 0 {
+			return time.Time{}, errors.New("--older-than must be greater than zero")
 		}
 		age = time.Duration(n) * 24 * time.Hour
 	} else {
 		d, err := time.ParseDuration(s)
-		if err != nil || d < 0 {
+		if err != nil {
 			return time.Time{}, fmt.Errorf("invalid --older-than %q, want a day count like 30d, or a Go duration like 72h", s)
+		}
+		if d <= 0 {
+			return time.Time{}, errors.New("--older-than must be greater than zero")
 		}
 		age = d
 	}
 	return time.Now().Add(-age), nil
 }
 
+// prunableLog is one candidate for removal, carrying its size so the caller can
+// report the bytes actually reclaimed rather than the size of every candidate.
+type prunableLog struct {
+	path string
+	size int64
+}
+
 // prunableLogs returns the .jsonl session logs in dir older than cutoff and their
 // combined size. Tool baselines live in a sibling directory, so they are untouched.
-func prunableLogs(dir string, cutoff time.Time) (paths []string, total int64, err error) {
+func prunableLogs(dir string, cutoff time.Time) (logs []prunableLog, total int64, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, 0, err
@@ -124,11 +140,28 @@ func prunableLogs(dir string, cutoff time.Time) (paths []string, total int64, er
 			continue // the file went away between the listing and the stat
 		}
 		if info.ModTime().Before(cutoff) {
-			paths = append(paths, filepath.Join(dir, e.Name()))
+			logs = append(logs, prunableLog{path: filepath.Join(dir, e.Name()), size: info.Size()})
 			total += info.Size()
 		}
 	}
-	return paths, total, nil
+	return logs, total, nil
+}
+
+// removeLogs deletes each candidate, reporting the count and bytes actually
+// reclaimed rather than the candidate total. A removal that fails is printed to
+// errOut and skipped so the rest still go, but anyFailed is set so the caller can
+// exit non-zero instead of claiming success.
+func removeLogs(errOut io.Writer, victims []prunableLog) (removed int, freed int64, anyFailed bool) {
+	for _, v := range victims {
+		if err := os.Remove(v.path); err != nil {
+			fmt.Fprintf(errOut, "mcpsnoop prune: %v\n", err)
+			anyFailed = true
+			continue
+		}
+		removed++
+		freed += v.size
+	}
+	return removed, freed, anyFailed
 }
 
 func confirmed(r io.Reader) bool {

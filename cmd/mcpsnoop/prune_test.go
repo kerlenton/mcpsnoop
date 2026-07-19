@@ -128,3 +128,85 @@ func TestPruneNothingMatchedExitsZero(t *testing.T) {
 		t.Fatalf("a run that matched nothing should say so, got %q", stdout)
 	}
 }
+
+func TestPruneRemovesOthersAndReportsReclaimedBytes(t *testing.T) {
+	okDir := t.TempDir()
+	okPath := filepath.Join(okDir, "ok.jsonl")
+	if err := os.WriteFile(okPath, []byte("12345"), 0o600); err != nil { // 5 bytes
+		t.Fatal(err)
+	}
+
+	// A file in a read-only directory cannot be removed, the least platform-specific
+	// way to force one failure while the other still goes.
+	roDir := t.TempDir()
+	badPath := filepath.Join(roDir, "bad.jsonl")
+	if err := os.WriteFile(badPath, []byte("999"), 0o600); err != nil { // 3 bytes
+		t.Fatal(err)
+	}
+	if err := os.Chmod(roDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(roDir, 0o700) })
+	if os.Remove(badPath) == nil {
+		t.Skip("directory permissions do not prevent removal here (root?)")
+	}
+
+	var errBuf bytes.Buffer
+	removed, freed, anyFailed := removeLogs(&errBuf, []prunableLog{
+		{path: okPath, size: 5},
+		{path: badPath, size: 3},
+	})
+	if !anyFailed {
+		t.Fatal("a failed removal must be flagged so the command can exit non-zero")
+	}
+	if removed != 1 || freed != 5 {
+		t.Fatalf("removed=%d freed=%d, want 1 file and only its 5 bytes, not the candidate total", removed, freed)
+	}
+	if _, err := os.Stat(okPath); err == nil {
+		t.Fatal("the removable log should be gone")
+	}
+	if _, err := os.Stat(badPath); err != nil {
+		t.Fatal("the unremovable log should remain")
+	}
+	if errBuf.Len() == 0 {
+		t.Fatal("the removal error should be printed to stderr")
+	}
+}
+
+func TestPruneExitsNonZeroOnRemovalFailure(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	writePruneLog(t, "old.jsonl", 40*24*time.Hour)
+
+	sessDir := paths.SessionsDir()
+	if err := os.Chmod(sessDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sessDir, 0o700) })
+	if os.Remove(filepath.Join(sessDir, "old.jsonl")) == nil {
+		t.Skip("directory permissions do not prevent removal here (root?)")
+	}
+
+	code, stdout, stderr := executePrune(t, []string{"--older-than", "30d", "--yes"}, "")
+	if code != 1 {
+		t.Fatalf("a removal failure should exit 1, got %d", code)
+	}
+	if !strings.Contains(stdout, "removed 0 session log(s)") {
+		t.Fatalf("the summary should report what actually went, got %q", stdout)
+	}
+	if stderr == "" {
+		t.Fatal("the removal error should be printed to stderr")
+	}
+}
+
+func TestPruneRejectsZeroOlderThan(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	for _, v := range []string{"0d", "0s"} {
+		code, _, stderr := executePrune(t, []string{"--older-than", v}, "")
+		if code != 2 {
+			t.Fatalf("--older-than %s should exit 2, got %d", v, code)
+		}
+		if !strings.Contains(stderr, "greater than zero") {
+			t.Fatalf("--older-than %s error should name the constraint, got %q", v, stderr)
+		}
+	}
+}
