@@ -883,7 +883,7 @@ func countStreamSignals(events []store.EventView) streamSignalCounts {
 	var c streamSignalCounts
 	for _, e := range events {
 		switch {
-		case e.Kind != store.EventInvalid && e.Warning != "":
+		case e.Kind != store.EventInvalid && (e.Warning != "" || e.Truncated):
 			c.warn++
 		case e.Kind == store.EventInvalid:
 			c.bad++
@@ -965,7 +965,7 @@ func statusRank(e store.EventView) int {
 	if e.Call != nil && e.Call.Failed() {
 		return 4
 	}
-	if e.Warning != "" {
+	if e.Warning != "" || e.Truncated {
 		return 3
 	}
 	if e.Call == nil {
@@ -1089,7 +1089,9 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 		return e.Kind == store.EventInvalid
 	}
 	if v == "warn" || v == "warning" {
-		return e.Warning != ""
+		// A capped observation reads as a warning in the row, so status:warn finds it
+		// too, even though it rides a structured flag rather than the warning text.
+		return e.Warning != "" || e.Truncated
 	}
 	if v == "mismatch" {
 		// A routing header disagreeing with the body (Mcp-Method/Mcp-Name, SEP-2243).

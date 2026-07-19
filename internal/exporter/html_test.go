@@ -14,6 +14,38 @@ import (
 // TestHTMLSurfacesSupersededStatus checks that a request whose id was reused
 // carries the superseded status in the exported HTML (data, renderer, and CSS),
 // while a normal answered request keeps an empty status cell.
+// TestHTMLFilterFindsTruncatedUnderWarn checks the HTML status filter agrees with
+// the TUI: a truncated frame matches status:warn there too. The filter runs in the
+// browser, so assert the data carries the flag and matchStatus keys on it.
+func TestHTMLFilterFindsTruncatedUnderWarn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trunc.jsonl")
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: time.Now(),
+		Direction: proxy.ServerToClient, Truncated: true,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","result":{}}`),
+	})
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Write(&buf, out, Options{Format: FormatHTML}); err != nil {
+		t.Fatal(err)
+	}
+	html := buf.String()
+
+	if !strings.Contains(html, `"truncated":true`) {
+		t.Fatal("embedded data is missing the truncated flag")
+	}
+	if !strings.Contains(html, `return !!ev.warning || !!ev.truncated`) {
+		t.Fatal("the HTML status:warn filter does not match truncated frames like the TUI")
+	}
+}
+
 // TestHTMLMarksTruncatedEvent checks the export marks a capped observation rather
 // than rendering it as an ordinary event, the same way the TUI now does.
 func TestHTMLMarksTruncatedEvent(t *testing.T) {

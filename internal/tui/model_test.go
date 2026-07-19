@@ -343,6 +343,45 @@ func TestStreamQueryFilter(t *testing.T) {
 	}
 }
 
+func TestStreamFilterFindsTruncatedUnderWarn(t *testing.T) {
+	st := store.New()
+	seed(st) // clean calls, no warnings
+	trunc := env(5, proxy.ServerToClient, `{"jsonrpc":"2.0","result":{}}`)
+	trunc.Truncated = true
+	st.Ingest(trunc)
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+	total := len(m.timeline)
+
+	mm := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	mm = drive(t, mm, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("status:warn")})
+	fw := drive(t, mm, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if len(fw.timeline) != 1 || total <= 1 {
+		t.Fatalf("status:warn should find exactly the truncated frame, got %d of %d", len(fw.timeline), total)
+	}
+	if !fw.timeline[0].Truncated {
+		t.Fatalf("status:warn matched a non-truncated frame: %+v", fw.timeline[0])
+	}
+}
+
+func TestCountStreamSignalsCountsTruncatedAsWarn(t *testing.T) {
+	events := []store.EventView{
+		{Kind: store.EventOther, Truncated: true},
+		{Kind: store.EventOther}, // neither a warning nor truncated
+	}
+	if c := countStreamSignals(events); c.warn != 1 {
+		t.Fatalf("a truncated frame should count as one warn, got %d", c.warn)
+	}
+}
+
+func TestStatusRankTruncatedRanksAsWarn(t *testing.T) {
+	if r := statusRank(store.EventView{Kind: store.EventOther, Truncated: true}); r != 3 {
+		t.Fatalf("a truncated frame should rank 3 like a warning, got %d", r)
+	}
+}
+
 func TestStreamFilterMismatch(t *testing.T) {
 	st := store.New()
 	seed(st) // two clean calls
