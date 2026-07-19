@@ -18,7 +18,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
@@ -29,21 +31,47 @@ type Handler func(proxy.Envelope)
 
 // Hub collects envelopes from shims (socket) and past sessions (files).
 type Hub struct {
-	socketPath  string
-	sessionsDir string
-	handler     Handler
+	socketPath    string
+	sessionsDir   string
+	handler       Handler
+	backfillLimit int
+	onBackfill    func(BackfillReport)
 
 	mu   sync.Mutex
 	seen map[string]uint64 // session id -> highest seq forwarded
 }
 
+// DefaultBackfillLimit bounds startup work while keeping recent history useful.
+const DefaultBackfillLimit = 100
+
+// Options controls hub startup behavior. BackfillLimit 0 replays all history.
+type Options struct {
+	BackfillLimit int
+	OnBackfill    func(BackfillReport)
+}
+
+// BackfillReport describes how much saved history was replayed at startup.
+type BackfillReport struct {
+	Loaded int
+	Total  int
+}
+
 // New creates a hub. handler is invoked for every deduplicated envelope.
 func New(socketPath, sessionsDir string, handler Handler) *Hub {
+	return NewWithOptions(socketPath, sessionsDir, handler, Options{
+		BackfillLimit: DefaultBackfillLimit,
+	})
+}
+
+// NewWithOptions creates a hub with explicit startup behavior.
+func NewWithOptions(socketPath, sessionsDir string, handler Handler, opts Options) *Hub {
 	return &Hub{
-		socketPath:  socketPath,
-		sessionsDir: sessionsDir,
-		handler:     handler,
-		seen:        make(map[string]uint64),
+		socketPath:    socketPath,
+		sessionsDir:   sessionsDir,
+		handler:       handler,
+		backfillLimit: opts.BackfillLimit,
+		onBackfill:    opts.OnBackfill,
+		seen:          make(map[string]uint64),
 	}
 }
 
@@ -63,7 +91,10 @@ func (h *Hub) Run(ctx context.Context) error {
 	// from disk so a live shim that reconnects (e.g. after a hub restart) can't
 	// race its high-Seq frames ahead of the file's history and cause the gate to
 	// drop it. Shims keep retrying their connection until we accept.
-	h.backfill(ctx)
+	report := h.backfill(ctx)
+	if h.onBackfill != nil {
+		h.onBackfill(report)
+	}
 
 	// Stop accepting when the context is done.
 	go func() {
@@ -123,26 +154,55 @@ func (h *Hub) handleConn(conn net.Conn) {
 	}
 }
 
-// backfill replays envelopes from every session log on disk.
-func (h *Hub) backfill(ctx context.Context) {
+// backfill replays the most recently modified session logs on disk, oldest
+// first so historical order roughly matches real time.
+func (h *Hub) backfill(ctx context.Context) BackfillReport {
 	entries, err := os.ReadDir(h.sessionsDir)
 	if err != nil {
-		return
+		return BackfillReport{}
 	}
-	// Oldest first, so historical order roughly matches real time.
-	files := make([]string, 0, len(entries))
+
+	// Order by modification time, not by name. A log is named <label>-<pid>.jsonl,
+	// so sorting by name orders by server label first and would keep whichever
+	// labels sort last rather than whichever sessions ran last. exporter's
+	// newest-session lookup already resolves recency the same way.
+	type sessionLog struct {
+		path    string
+		modTime time.Time
+	}
+	logs := make([]sessionLog, 0, len(entries))
 	for _, e := range entries {
-		if !e.IsDir() && filepath.Ext(e.Name()) == ".jsonl" {
-			files = append(files, filepath.Join(h.sessionsDir, e.Name()))
+		if e.IsDir() || filepath.Ext(e.Name()) != ".jsonl" {
+			continue
 		}
+		info, err := e.Info()
+		if err != nil {
+			continue // the file went away between the listing and the stat
+		}
+		logs = append(logs, sessionLog{
+			path:    filepath.Join(h.sessionsDir, e.Name()),
+			modTime: info.ModTime(),
+		})
 	}
-	slices.Sort(files)
-	for _, f := range files {
+	slices.SortFunc(logs, func(a, b sessionLog) int {
+		if c := a.modTime.Compare(b.modTime); c != 0 {
+			return c
+		}
+		return strings.Compare(a.path, b.path) // deterministic for equal timestamps
+	})
+
+	report := BackfillReport{Total: len(logs)}
+	if h.backfillLimit > 0 && len(logs) > h.backfillLimit {
+		logs = logs[len(logs)-h.backfillLimit:]
+	}
+	for _, l := range logs {
 		if ctx.Err() != nil {
-			return
+			return report // count only what was actually replayed
 		}
-		h.replayFile(f)
+		h.replayFile(l.path)
+		report.Loaded++
 	}
+	return report
 }
 
 func (h *Hub) replayFile(path string) {

@@ -28,6 +28,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
+	"github.com/kerlenton/mcpsnoop/internal/hub"
 	"github.com/kerlenton/mcpsnoop/internal/otlpsink"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
@@ -241,6 +242,7 @@ func newRootCmd() *cobra.Command {
 		redactValues           redactValuesFlag
 		redactPaths            redactPathsFlag
 		otlpHeaders            otlpHeadersFlag
+		historyLimit           int
 	)
 	cmd := &cobra.Command{
 		Use:   "mcpsnoop [flags] -- <server command> [args...]",
@@ -257,7 +259,10 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				return codeOf(runHubFn())
+				if historyLimit < 0 {
+					return errors.New("--history-limit must be non-negative")
+				}
+				return codeOf(runHubFn(historyLimit))
 			}
 			cfg, ok, err := loadConfig()
 			if err != nil {
@@ -283,6 +288,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 	flags.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")
 	flags.Var(&redactValues, "redact-value", "regular expression to scrub inside observed string values, stderr, and non-JSON text, repeatable")
 	flags.Var(&redactPaths, "redact-path", "JSONPath selecting values to scrub in saved trace payloads, repeatable")
+	flags.IntVar(&historyLimit, "history-limit", hub.DefaultBackfillLimit, "maximum session logs to load in the TUI, 0 loads all")
 	// Stop parsing at the first positional so the wrapped command keeps its flags.
 	flags.SetInterspersed(false)
 
@@ -573,11 +579,11 @@ func newHTTPCmd() *cobra.Command {
 }
 
 // runHub runs the live TUI, collecting traffic from all shims and past sessions.
-func runHub() int {
+func runHub(historyLimit int) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := tui.Run(ctx, paths.SocketPath(), paths.SessionsDir()); err != nil {
+	if err := tui.RunWithHistoryLimit(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit); err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)
 		return 1
 	}

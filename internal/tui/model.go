@@ -2,6 +2,7 @@ package tui
 
 import (
 	"cmp"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -73,6 +74,13 @@ const (
 
 // frameMsg signals that the store ingested a new envelope.
 type frameMsg struct{}
+
+// historyTruncatedMsg tells the TUI that startup intentionally loaded only the
+// newest saved sessions.
+type historyTruncatedMsg struct {
+	loaded int
+	total  int
+}
 
 // tickMsg drives the shared animation and refresh clock.
 type tickMsg time.Time
@@ -239,6 +247,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.paused {
 			m.dirty = true
 		}
+		return m, nil
+
+	case historyTruncatedMsg:
+		m.setFlash(fmt.Sprintf("loaded newest %d of %d sessions; older traces stay on disk", msg.loaded, msg.total))
 		return m, nil
 
 	case replayDoneMsg:

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	hubpkg "github.com/kerlenton/mcpsnoop/internal/hub"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
@@ -90,8 +91,13 @@ func TestRootWithoutDashDashStopsAtFirstPositional(t *testing.T) {
 
 func TestRootNoArgsRunsHubNotShim(t *testing.T) {
 	hub := false
+	gotLimit := -1
 	origHub := runHubFn
-	runHubFn = func() int { hub = true; return 0 }
+	runHubFn = func(limit int) int {
+		hub = true
+		gotLimit = limit
+		return 0
+	}
 	defer func() { runHubFn = origHub }()
 
 	origShim := runShimFn
@@ -106,6 +112,26 @@ func TestRootNoArgsRunsHubNotShim(t *testing.T) {
 	}
 	if !hub {
 		t.Fatal("bare mcpsnoop did not launch the hub")
+	}
+	if gotLimit != hubpkg.DefaultBackfillLimit {
+		t.Fatalf("history limit = %d, want default %d", gotLimit, hubpkg.DefaultBackfillLimit)
+	}
+}
+
+func TestRootHistoryLimitConfiguresHub(t *testing.T) {
+	gotLimit := -1
+	origHub := runHubFn
+	runHubFn = func(limit int) int {
+		gotLimit = limit
+		return 0
+	}
+	defer func() { runHubFn = origHub }()
+
+	if code := execute([]string{"--history-limit", "7"}); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if gotLimit != 7 {
+		t.Fatalf("history limit = %d, want 7", gotLimit)
 	}
 }
 
