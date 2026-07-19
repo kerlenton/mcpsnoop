@@ -100,11 +100,27 @@ func TestHubBackfillLiveDedup(t *testing.T) {
 	}
 }
 
+// touchLog writes a session log and stamps it, so recency is set by the
+// modification time rather than by the file name.
+func touchLog(t *testing.T, dir, session string, modTime time.Time, envs ...proxy.Envelope) {
+	t.Helper()
+	writeLog(t, dir, session, envs...)
+	path := filepath.Join(dir, session+".jsonl")
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHubBackfillLimitReplaysNewestSessions(t *testing.T) {
 	sessionsDir := t.TempDir()
-	writeLog(t, sessionsDir, "001-oldest", env("001-oldest", 1, "initialize"))
-	writeLog(t, sessionsDir, "002-middle", env("002-middle", 1, "initialize"))
-	writeLog(t, sessionsDir, "003-newest", env("003-newest", 1, "initialize"))
+	now := time.Now()
+	// The names deliberately sort against the timestamps. A real log is named
+	// <label>-<pid>.jsonl, so a name sort orders by server label, and the newest
+	// session of an early-sorting label would otherwise be dropped in favour of a
+	// stale one whose label sorts later.
+	touchLog(t, sessionsDir, "zulu-oldest", now.Add(-3*time.Hour), env("zulu-oldest", 1, "initialize"))
+	touchLog(t, sessionsDir, "mike-middle", now.Add(-2*time.Hour), env("mike-middle", 1, "initialize"))
+	touchLog(t, sessionsDir, "alpha-newest", now.Add(-1*time.Hour), env("alpha-newest", 1, "initialize"))
 
 	var got []string
 	h := NewWithOptions("", sessionsDir, func(e proxy.Envelope) {
@@ -113,17 +129,59 @@ func TestHubBackfillLimitReplaysNewestSessions(t *testing.T) {
 
 	report := h.backfill(context.Background())
 
-	want := []string{"002-middle", "003-newest"}
+	// Oldest of the kept pair first, so replay order still tracks real time.
+	want := []string{"mike-middle", "alpha-newest"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("backfilled sessions = %v, want %v", got, want)
 	}
 	if report.Loaded != 2 || report.Total != 3 {
 		t.Fatalf("backfill report = %+v, want loaded=2 total=3", report)
 	}
-	if _, ok := h.seen["001-oldest"]; ok {
+	if _, ok := h.seen["zulu-oldest"]; ok {
 		t.Fatal("out-of-bound session should not consume a seen entry")
 	}
-	if _, err := os.Stat(filepath.Join(sessionsDir, "001-oldest.jsonl")); err != nil {
+	if _, err := os.Stat(filepath.Join(sessionsDir, "zulu-oldest.jsonl")); err != nil {
 		t.Fatalf("out-of-bound session should remain openable on disk: %v", err)
+	}
+}
+
+func TestHubBackfillLimitZeroReplaysEverything(t *testing.T) {
+	sessionsDir := t.TempDir()
+	now := time.Now()
+	touchLog(t, sessionsDir, "zulu-oldest", now.Add(-2*time.Hour), env("zulu-oldest", 1, "initialize"))
+	touchLog(t, sessionsDir, "alpha-newest", now.Add(-1*time.Hour), env("alpha-newest", 1, "initialize"))
+
+	var got []string
+	h := NewWithOptions("", sessionsDir, func(e proxy.Envelope) {
+		got = append(got, e.SessionID)
+	}, Options{BackfillLimit: 0})
+
+	report := h.backfill(context.Background())
+
+	want := []string{"zulu-oldest", "alpha-newest"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("backfilled sessions = %v, want %v", got, want)
+	}
+	if report.Loaded != 2 || report.Total != 2 {
+		t.Fatalf("backfill report = %+v, want loaded=2 total=2", report)
+	}
+}
+
+// A cancelled backfill must report what it actually replayed, not what it
+// intended to.
+func TestHubBackfillReportCountsOnlyReplayedLogs(t *testing.T) {
+	sessionsDir := t.TempDir()
+	now := time.Now()
+	touchLog(t, sessionsDir, "one", now.Add(-2*time.Hour), env("one", 1, "initialize"))
+	touchLog(t, sessionsDir, "two", now.Add(-1*time.Hour), env("two", 1, "initialize"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	h := NewWithOptions("", sessionsDir, func(proxy.Envelope) {}, Options{})
+	report := h.backfill(ctx)
+
+	if report.Loaded != 0 || report.Total != 2 {
+		t.Fatalf("backfill report = %+v, want loaded=0 total=2", report)
 	}
 }
