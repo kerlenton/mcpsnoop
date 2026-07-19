@@ -99,7 +99,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop -- <server>` | wrap a stdio server as a transparent shim |
 | `mcpsnoop` | open the live TUI |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
-| `mcpsnoop export` | render a session to json, html, text, or otlp |
+| `mcpsnoop export` | render a session to json, html, text, har, or otlp |
 | `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, or hung calls |
 | `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
