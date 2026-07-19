@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"strings"
 )
 
 type checkJUnitSuites struct {
@@ -40,8 +41,8 @@ type checkJUnitFailure struct {
 	Body    string `xml:",chardata"`
 }
 
-func writeCheckJUnit(w io.Writer, summaries []checkSummary, selected map[checkSignal]bool) error {
-	payload := buildCheckJUnit(summaries, selected)
+func writeCheckJUnit(w io.Writer, summaries []checkSummary, selected map[checkSignal]bool, assertionFailures [][]string) error {
+	payload := buildCheckJUnit(summaries, selected, assertionFailures)
 	if _, err := io.WriteString(w, xml.Header); err != nil {
 		return err
 	}
@@ -57,9 +58,9 @@ func writeCheckJUnit(w io.Writer, summaries []checkSummary, selected map[checkSi
 	return err
 }
 
-func buildCheckJUnit(summaries []checkSummary, selected map[checkSignal]bool) checkJUnitSuites {
+func buildCheckJUnit(summaries []checkSummary, selected map[checkSignal]bool, assertionFailures [][]string) checkJUnitSuites {
 	out := checkJUnitSuites{Name: "mcpsnoop check", Time: "0"}
-	for _, summary := range summaries {
+	for i, summary := range summaries {
 		suite := checkJUnitSuite{
 			Name:  summary.sessionID,
 			Tests: len(checkSignalOrder),
@@ -84,6 +85,23 @@ func buildCheckJUnit(summaries []checkSummary, selected map[checkSignal]bool) ch
 			}
 			suite.Cases = append(suite.Cases, testcase)
 		}
+		assertions := checkJUnitCase{
+			Classname: "mcpsnoop.check",
+			Name:      summary.sessionID + "/assertions",
+			Time:      "0",
+		}
+		if i < len(assertionFailures) && len(assertionFailures[i]) > 0 {
+			reason := strings.Join(assertionFailures[i], "; ")
+			assertions.Failure = &checkJUnitFailure{
+				Message: reason,
+				Type:    "mcpsnoop.check.assertion",
+				Body:    strings.Join(assertionFailures[i], "\n"),
+			}
+			suite.Failures++
+		}
+		suite.Cases = append(suite.Cases, assertions)
+		suite.Tests++
+
 		out.Tests += suite.Tests
 		out.Failures += suite.Failures
 		out.Suites = append(out.Suites, suite)
@@ -104,6 +122,8 @@ func checkSignalFailureReason(sessionID string, signal checkSignal, count int) s
 		singular, plural = "routing mismatch", "routing mismatches"
 	case checkPending:
 		singular, plural = "pending call", "pending calls"
+	case checkDrift:
+		singular, plural = "tool definition change", "tool definition changes"
 	default:
 		singular, plural = "signal", "signals"
 	}
