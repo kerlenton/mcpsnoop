@@ -281,7 +281,7 @@ func TestObserveAllContinuesPastACorruptBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ObserveAll(m, st)
+	ObserveAll(m, st, nil)
 
 	bad, ok := st.ToolDrift("s1")
 	if !ok || bad.BaselineError == "" {
