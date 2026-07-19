@@ -18,7 +18,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
@@ -152,30 +154,53 @@ func (h *Hub) handleConn(conn net.Conn) {
 	}
 }
 
-// backfill replays envelopes from the newest configured session logs on disk.
+// backfill replays the most recently modified session logs on disk, oldest
+// first so historical order roughly matches real time.
 func (h *Hub) backfill(ctx context.Context) BackfillReport {
 	entries, err := os.ReadDir(h.sessionsDir)
 	if err != nil {
 		return BackfillReport{}
 	}
-	// Oldest first, so historical order roughly matches real time.
-	files := make([]string, 0, len(entries))
+
+	// Order by modification time, not by name. A log is named <label>-<pid>.jsonl,
+	// so sorting by name orders by server label first and would keep whichever
+	// labels sort last rather than whichever sessions ran last. exporter's
+	// newest-session lookup already resolves recency the same way.
+	type sessionLog struct {
+		path    string
+		modTime time.Time
+	}
+	logs := make([]sessionLog, 0, len(entries))
 	for _, e := range entries {
-		if !e.IsDir() && filepath.Ext(e.Name()) == ".jsonl" {
-			files = append(files, filepath.Join(h.sessionsDir, e.Name()))
+		if e.IsDir() || filepath.Ext(e.Name()) != ".jsonl" {
+			continue
 		}
+		info, err := e.Info()
+		if err != nil {
+			continue // the file went away between the listing and the stat
+		}
+		logs = append(logs, sessionLog{
+			path:    filepath.Join(h.sessionsDir, e.Name()),
+			modTime: info.ModTime(),
+		})
 	}
-	slices.Sort(files)
-	report := BackfillReport{Total: len(files)}
-	if h.backfillLimit > 0 && len(files) > h.backfillLimit {
-		files = files[len(files)-h.backfillLimit:]
+	slices.SortFunc(logs, func(a, b sessionLog) int {
+		if c := a.modTime.Compare(b.modTime); c != 0 {
+			return c
+		}
+		return strings.Compare(a.path, b.path) // deterministic for equal timestamps
+	})
+
+	report := BackfillReport{Total: len(logs)}
+	if h.backfillLimit > 0 && len(logs) > h.backfillLimit {
+		logs = logs[len(logs)-h.backfillLimit:]
 	}
-	report.Loaded = len(files)
-	for _, f := range files {
+	for _, l := range logs {
 		if ctx.Err() != nil {
-			return report
+			return report // count only what was actually replayed
 		}
-		h.replayFile(f)
+		h.replayFile(l.path)
+		report.Loaded++
 	}
 	return report
 }
