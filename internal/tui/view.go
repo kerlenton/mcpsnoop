@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -690,6 +691,17 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = e.Warning
 		} else {
 			c.detail = e.Warning + " · " + c.detail
+		}
+	}
+	// A capped observed copy is a caution, not a protocol warning, so it carries a
+	// structured flag (never failing check) but reads the same in the row.
+	if e.Truncated {
+		c.status = "warn"
+		const msg = "observed copy truncated at the frame cap, forwarding unaffected"
+		if c.detail == "" {
+			c.detail = msg
+		} else {
+			c.detail = msg + " · " + c.detail
 		}
 	}
 	return c
@@ -1796,16 +1808,20 @@ func truncate(s string, w int) string {
 		return s
 	}
 	// One cell is reserved for the ellipsis. Take runes until the next one would
-	// push the accumulated width past that budget.
+	// push the accumulated width past that budget. Advance by the rune's real byte
+	// size from the source, not len(string(r)): an invalid byte decodes to U+FFFD
+	// (three bytes re-encoded) after consuming one, so computing the offset from the
+	// re-encoded form would overshoot and misalign the cell.
 	budget := w - 1
 	width, end := 0, 0
-	for i, r := range s {
+	for end < len(s) {
+		r, size := utf8.DecodeRuneInString(s[end:])
 		rw := lipgloss.Width(string(r))
 		if width+rw > budget {
 			break
 		}
 		width += rw
-		end = i + len(string(r))
+		end += size
 	}
 	if end == 0 {
 		return "" // the budget cannot fit even one rune, so no bare ellipsis

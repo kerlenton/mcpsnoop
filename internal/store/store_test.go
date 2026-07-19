@@ -226,8 +226,12 @@ func TestIngestTruncatedFrameIsMarkedNotInvalid(t *testing.T) {
 	if ev.Kind == EventInvalid {
 		t.Fatal("a truncated observation must not be flagged as an invalid frame")
 	}
-	if !strings.Contains(ev.Warning, "truncated") {
-		t.Fatalf("a truncated frame should carry a truncation warning, got %q", ev.Warning)
+	if !ev.Truncated {
+		t.Fatal("a truncated frame should carry the structured truncated flag")
+	}
+	if ev.Warning != "" {
+		// Routing it through Warning would fail a default `check --fail-on warn`.
+		t.Fatalf("truncation must not go through the warning field, got %q", ev.Warning)
 	}
 }
 

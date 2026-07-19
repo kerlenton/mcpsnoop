@@ -63,7 +63,10 @@ type EventView struct {
 	// a batch. It is a structured handle for the same condition the warning
 	// describes, so filters and exporters need not match warning text.
 	RoutingMismatch bool
-	Call            *CallView // set for request/response events
+	// Truncated is true when mcpsnoop capped its own observed copy of a large body.
+	// It is a structured marker, not a protocol warning, so it never fails check.
+	Truncated bool
+	Call      *CallView // set for request/response events
 }
 
 // SessionHeader is a lightweight per-session summary for the left panel.
@@ -159,6 +162,7 @@ func (e *event) view(_ *session) EventView {
 		MCPName:            e.mcpName,
 		MCPProtocolVersion: e.mcpProtocolVersion,
 		RoutingMismatch:    e.mismatch,
+		Truncated:          e.truncated,
 	}
 	if e.call != nil {
 		cv := e.call.view()

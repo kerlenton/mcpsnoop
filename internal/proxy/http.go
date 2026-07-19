@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -112,10 +113,14 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 type bodyTap struct {
 	rc     io.ReadCloser
 	cap    int
-	buf    bytes.Buffer
-	cut    bool
 	onDone func(observed []byte, truncated bool)
-	done   bool
+
+	// net/http may Close a request body from a goroutine other than the one
+	// reading it (e.g. on cancellation), so the buffer and done flag are guarded.
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	cut  bool
+	done bool
 }
 
 func newBodyTap(rc io.ReadCloser, cap int, onDone func([]byte, bool)) *bodyTap {
@@ -125,6 +130,7 @@ func newBodyTap(rc io.ReadCloser, cap int, onDone func([]byte, bool)) *bodyTap {
 func (t *bodyTap) Read(p []byte) (int, error) {
 	n, err := t.rc.Read(p)
 	if n > 0 {
+		t.mu.Lock()
 		if room := t.cap - t.buf.Len(); room <= 0 {
 			t.cut = true
 		} else if n > room {
@@ -133,6 +139,7 @@ func (t *bodyTap) Read(p []byte) (int, error) {
 		} else {
 			t.buf.Write(p[:n])
 		}
+		t.mu.Unlock()
 	}
 	if err != nil { // EOF or a read error both end the body
 		t.finish()
@@ -145,12 +152,21 @@ func (t *bodyTap) Close() error {
 	return t.rc.Close()
 }
 
+// finish delivers the observed copy exactly once, on EOF, a read error, or Close,
+// whichever comes first. The snapshot is taken under the lock so it is never read
+// while Read is writing, but onDone runs outside the lock since it emits into the
+// sink and must not hold the tap.
 func (t *bodyTap) finish() {
+	t.mu.Lock()
 	if t.done {
+		t.mu.Unlock()
 		return
 	}
 	t.done = true
-	t.onDone(t.buf.Bytes(), t.cut)
+	observed := append([]byte(nil), t.buf.Bytes()...)
+	truncated := t.cut
+	t.mu.Unlock()
+	t.onDone(observed, truncated)
 }
 
 // observeBody emits the observed copy of a body. A truncated copy is incomplete,

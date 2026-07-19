@@ -29,6 +29,9 @@ func TestTruncateMeasuresInCells(t *testing.T) {
 		{"wide runes w=1", cjk, 1, ""},
 		{"wide runes w=2", cjk, 2, ""},
 		{"mixed ascii and cjk", mixed, 9, ""},
+		// An invalid byte (stderr is raw server bytes) decodes to U+FFFD; the offset
+		// must advance by one byte, not the three of the re-encoded form.
+		{"invalid utf-8 byte", "ab\xffcd", 3, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

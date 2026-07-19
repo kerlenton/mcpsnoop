@@ -382,6 +382,22 @@ func TestCheckAssertionsCompose(t *testing.T) {
 	}
 }
 
+func TestCheckPassesForTruncatedBody(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// A perfectly valid response whose observed copy was capped at maxFrameBytes. It
+	// must not turn the default check red over an observation limit.
+	trunc := checkEnvelope(1, proxy.ServerToClient, `{"jsonrpc":"2.0","result":{}}`)
+	trunc.Truncated = true
+
+	code, stdout, stderr := executeCheck(t, []string{"-"}, encodeCheckLog(t, trunc))
+	if code != 0 || stderr != "" {
+		t.Fatalf("a truncated body must not fail the default check, code %d stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "warnings=0") || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
 func executeCheck(t *testing.T, args []string, stdin string) (int, string, string) {
 	t.Helper()
 	cmd := newCheckCmd()

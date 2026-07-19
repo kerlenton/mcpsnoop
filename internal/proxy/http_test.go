@@ -9,9 +9,59 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
+	"time"
 )
+
+// slowByteReader yields one byte per Read with a small delay, so a Read and a
+// concurrent Close overlap long enough for the race detector to see the tap's
+// shared state if it is unguarded.
+type slowByteReader struct {
+	data  []byte
+	pos   int
+	delay time.Duration
+}
+
+func (r *slowByteReader) Read(p []byte) (int, error) {
+	time.Sleep(r.delay)
+	if r.pos >= len(r.data) || len(p) == 0 {
+		if r.pos >= len(r.data) {
+			return 0, io.EOF
+		}
+		return 0, nil
+	}
+	p[0] = r.data[r.pos]
+	r.pos++
+	return 1, nil
+}
+
+func (r *slowByteReader) Close() error { return nil }
+
+// TestBodyTapConcurrentReadAndClose drives Read and Close from two goroutines,
+// which net/http can do on a request body. onDone must fire exactly once, and the
+// shared buffer and done flag must not race (fails under -race before the fix).
+func TestBodyTapConcurrentReadAndClose(t *testing.T) {
+	var count atomic.Int32
+	tap := newBodyTap(&slowByteReader{data: bytes.Repeat([]byte("x"), 400), delay: 20 * time.Microsecond}, 10,
+		func([]byte, bool) { count.Add(1) })
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = io.Copy(io.Discard, tap) }()
+	go func() {
+		defer wg.Done()
+		time.Sleep(time.Millisecond) // let some reads run first, then close mid-stream
+		_ = tap.Close()
+	}()
+	wg.Wait()
+
+	if got := count.Load(); got != 1 {
+		t.Fatalf("onDone fired %d times, want exactly 1", got)
+	}
+}
 
 // emitterTo adapts a captureSink into the emit func httpProxyHandler expects.
 func emitterTo(sink *captureSink) func(Direction, []byte, route) {

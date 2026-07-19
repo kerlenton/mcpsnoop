@@ -104,6 +104,7 @@ type event struct {
 	mcpProtocolVersion string // MCP-Protocol-Version request header
 	batch              bool   // one element of a JSON-RPC batch (routing headers cannot address it)
 	mismatch           bool   // a routing header disagrees with the body (structured flag for warning)
+	truncated          bool   // the observed copy was capped at the frame-size limit
 	call               *call  // set for request/response events
 }
 
@@ -216,10 +217,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 
 	if e.Truncated {
 		// mcpsnoop capped its own observed copy of a large body, so the bytes are
-		// incomplete by design. Mark it plainly rather than let the partial JSON look
-		// like an invalid frame (stdout corruption), which it is not.
+		// incomplete by design. Flag it structurally rather than through the warning
+		// field: it is not a protocol warning, and routing it there would fail a
+		// default `check --fail-on warn` over a perfectly valid oversized body.
 		ev.kind = EventOther
-		ev.warning = appendWarning(ev.warning, "observed copy truncated at the frame-size cap, forwarding unaffected")
+		ev.truncated = true
 		sess.events = append(sess.events, ev)
 		return ev.view(sess)
 	}
