@@ -655,6 +655,9 @@ func (m Model) streamCells(e store.EventView) streamCell {
 		if e.Call != nil {
 			c.dur = e.Call.Duration().Round(time.Millisecond).String()
 			switch {
+			case e.Call.TaskID != "" && e.Call.State == store.Pending:
+				c.status = e.Call.TaskStatus
+				c.detail = compactJSON(e.Call.Result)
 			case e.Call.Err != nil:
 				c.status = "err"
 				c.detail = e.Call.Err.Message
@@ -710,6 +713,26 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = e.Deprecated
 		} else {
 			c.detail = e.Deprecated + " · " + c.detail
+		}
+	}
+	if e.TaskID != "" {
+		link := "task " + e.TaskID
+		if e.TaskCall != nil {
+			link += " → tools/call id " + e.TaskCall.ID
+			switch e.TaskCall.TaskStatus {
+			case "input_required":
+				c.status = "input_required"
+			case "failed", "cancelled":
+				c.status = "err"
+				if e.TaskCall.Err != nil {
+					link += " · " + e.TaskCall.Err.Message
+				}
+			}
+		}
+		if c.detail == "" {
+			c.detail = link
+		} else {
+			c.detail = link + " · " + c.detail
 		}
 	}
 	return c

@@ -74,18 +74,20 @@ type callKey struct {
 
 // call is the mutable internal record for one request/response pair.
 type call struct {
-	id       string
-	method   string
-	reqDir   proxy.Direction
-	params   json.RawMessage
-	result   json.RawMessage
-	err      *proxy.RPCError
-	start    time.Time
-	end      time.Time
-	state    CallState
-	isTool   bool
-	toolName string
-	toolErr  bool // result.isError == true (MCP tool-level failure)
+	id         string
+	method     string
+	reqDir     proxy.Direction
+	params     json.RawMessage
+	result     json.RawMessage
+	err        *proxy.RPCError
+	start      time.Time
+	end        time.Time
+	state      CallState
+	isTool     bool
+	toolName   string
+	toolErr    bool // result.isError == true (MCP tool-level failure)
+	taskID     string
+	taskStatus string
 }
 
 // event is the mutable internal timeline entry.
@@ -107,6 +109,8 @@ type event struct {
 	truncated          bool   // the observed copy was capped at the frame-size limit
 	deprecated         string // a deprecated MCP feature was used (structured, not a protocol warning)
 	call               *call  // set for request/response events
+	taskCall           *call  // originating call for a task lifecycle frame
+	taskID             string
 }
 
 // capabilities holds what each side declared, whether through the legacy
@@ -141,6 +145,7 @@ type session struct {
 	command []string
 	cwd     string
 	calls   map[callKey]*call
+	tasks   map[string]*call
 	events  []*event
 
 	requests, responses, notifications, errors, pending int
@@ -238,6 +243,20 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.TS, msg)
 		ev.call = c
+		if c != nil && c.taskID != "" {
+			ev.taskID = c.taskID
+			if c.method != "tools/call" {
+				ev.taskCall = sess.tasks[c.taskID]
+				if matched {
+					if parent, failed := sess.applyTaskState(c.taskID, msg.Result, e.TS); parent != nil {
+						ev.taskCall = parent
+						if failed {
+							sess.errors++
+						}
+					}
+				}
+			}
+		}
 		sess.responses++
 		switch {
 		case c == nil:
@@ -259,6 +278,10 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.warning = validationWarning(msg)
 		var reused bool
 		ev.call, reused = sess.openCall(ev.id, msg, e)
+		if ev.call.taskID != "" {
+			ev.taskID = ev.call.taskID
+			ev.taskCall = sess.tasks[ev.taskID]
+		}
 		sess.requests++
 		if reused {
 			ev.warning = appendWarning(ev.warning, "request reuses an id already in flight")
@@ -273,6 +296,17 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.method = msg.Method
 		ev.warning = validationWarning(msg)
 		sess.notifications++
+		if msg.Method == "notifications/tasks" {
+			if state, ok := parseTaskState(msg.Params); ok {
+				ev.taskID = state.TaskID
+				if parent, failed := sess.applyParsedTaskState(state, e.TS); parent != nil {
+					ev.taskCall = parent
+					if failed {
+						sess.errors++
+					}
+				}
+			}
+		}
 	default:
 		ev.kind = EventOther
 		ev.warning = validationWarning(msg)
@@ -346,6 +380,7 @@ func (s *Store) sessionFor(e proxy.Envelope) *session {
 			advertisedSet:   make(map[string]struct{}),
 			toolDefinitions: make(map[string]ToolDefinition),
 			calls:           make(map[callKey]*call),
+			tasks:           make(map[string]*call),
 		}
 		s.sessions[e.SessionID] = sess
 		s.order = append(s.order, e.SessionID)
@@ -385,6 +420,9 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 		c.isTool = true
 		c.toolName = toolName(msg.Params)
 	}
+	if isTaskMethod(msg.Method) {
+		c.taskID = taskID(msg.Params)
+	}
 	sess.calls[key] = c
 	return c, reused
 }
@@ -399,6 +437,18 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	}
 	if c.state != Pending {
 		return c, false // already answered, a duplicate or late response must not recount
+	}
+	if c.method == "tools/call" && c.taskID != "" {
+		return c, false // the task handle already continued this call
+	}
+	if c.method == "tools/call" {
+		if state, ok := parseTaskState(msg.Result); ok && state.ResultType == "task" {
+			c.result = msg.Result
+			c.taskID = state.TaskID
+			c.taskStatus = state.Status
+			sess.tasks[state.TaskID] = c
+			return c, true
+		}
 	}
 	c.end = ts
 	c.result = msg.Result
@@ -422,6 +472,69 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 		sess.applyToolsList(c.params, msg.Result)
 	}
 	return c, true
+}
+
+type taskState struct {
+	ResultType string          `json:"resultType"`
+	TaskID     string          `json:"taskId"`
+	Status     string          `json:"status"`
+	Result     json.RawMessage `json:"result"`
+	Error      *proxy.RPCError `json:"error"`
+}
+
+func parseTaskState(raw json.RawMessage) (taskState, bool) {
+	var state taskState
+	if json.Unmarshal(raw, &state) != nil || state.TaskID == "" {
+		return taskState{}, false
+	}
+	return state, true
+}
+
+func isTaskMethod(method string) bool {
+	return method == "tasks/get" || method == "tasks/update" || method == "tasks/cancel"
+}
+
+func taskID(params json.RawMessage) string {
+	var p struct {
+		TaskID string `json:"taskId"`
+	}
+	_ = json.Unmarshal(params, &p)
+	return p.TaskID
+}
+
+func (sess *session) applyTaskState(taskID string, raw json.RawMessage, ts time.Time) (*call, bool) {
+	state, ok := parseTaskState(raw)
+	if !ok || state.TaskID != taskID {
+		return sess.tasks[taskID], false
+	}
+	return sess.applyParsedTaskState(state, ts)
+}
+
+// applyParsedTaskState advances the originating call only when an observed task
+// reaches a terminal state. The bool reports a newly recorded failure.
+func (sess *session) applyParsedTaskState(state taskState, ts time.Time) (*call, bool) {
+	c := sess.tasks[state.TaskID]
+	if c == nil {
+		return nil, false
+	}
+	c.taskStatus = state.Status
+	if c.state != Pending {
+		return c, false
+	}
+	switch state.Status {
+	case "completed":
+		c.state = Completed
+		c.result = state.Result
+	case "failed", "cancelled":
+		c.state = Failed
+		c.err = state.Error
+		c.result = state.Result
+	default:
+		return c, false
+	}
+	c.end = ts
+	sess.pending--
+	return c, c.state == Failed
 }
 
 func (c *capabilities) applyRequest(params json.RawMessage) {

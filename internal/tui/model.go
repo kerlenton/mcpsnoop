@@ -523,7 +523,7 @@ func (m *Model) filterPlaceholder() string {
 	if m.view == viewSessions {
 		return "filter sessions by name…"
 	}
-	return "text · or tool:echo status:err dir:s2c kind:resp id:7"
+	return "text · or tool:echo status:err dir:s2c kind:resp id:7 task:01J…"
 }
 
 // drillIn. In the sessions table, enter a session's stream. In the stream, open
@@ -1040,6 +1040,8 @@ func (m *Model) matchToken(e store.EventView, tok string) bool {
 			return containsFold(e.Method, v) || (e.Call != nil && containsFold(e.Call.Method, v))
 		case "id":
 			return strings.EqualFold(e.ID, v)
+		case "task":
+			return strings.EqualFold(e.TaskID, v)
 		case "dir", "d":
 			return matchDir(e.Dir, v)
 		case "kind", "k":
@@ -1059,7 +1061,8 @@ func eventSubstr(e store.EventView, q string) bool {
 		strings.Contains(strings.ToLower(string(e.Raw)), q) {
 		return true
 	}
-	return e.Call != nil && strings.Contains(strings.ToLower(e.Call.ToolName), q)
+	return strings.Contains(strings.ToLower(e.TaskID), q) ||
+		e.Call != nil && strings.Contains(strings.ToLower(e.Call.ToolName), q)
 }
 
 func containsFold(s, sub string) bool {

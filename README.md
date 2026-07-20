@@ -211,6 +211,7 @@ matches the method, tool, id, and payload.
 | `tool:` | tool name | `tool:search` |
 | `method:` | JSON-RPC method | `method:tools/call` |
 | `id:` | request id | `id:7` |
+| `task:` | task id | `task:01J...` |
 | `dir:` | direction (`c2s`, `s2c`) | `dir:s2c` |
 | `kind:` | frame type (`req`, `resp`, `notify`, `stderr`, `invalid`) | `kind:invalid` |
 | `status:` | call outcome (`ok`, `error`, `pending`, `bad`, `warn`, `mismatch`) | `status:error` |

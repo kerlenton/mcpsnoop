@@ -13,18 +13,20 @@ import (
 
 // CallView is an immutable snapshot of a correlated request/response pair.
 type CallView struct {
-	ID       string
-	Method   string
-	ReqDir   proxy.Direction
-	IsTool   bool
-	ToolName string
-	Params   json.RawMessage
-	Result   json.RawMessage
-	Err      *proxy.RPCError
-	ToolErr  bool // result.isError == true
-	Start    time.Time
-	End      time.Time
-	State    CallState
+	ID         string
+	Method     string
+	ReqDir     proxy.Direction
+	IsTool     bool
+	ToolName   string
+	Params     json.RawMessage
+	Result     json.RawMessage
+	Err        *proxy.RPCError
+	ToolErr    bool // result.isError == true
+	Start      time.Time
+	End        time.Time
+	State      CallState
+	TaskID     string
+	TaskStatus string
 }
 
 // Failed reports a protocol error OR a tool-level error (result.isError).
@@ -70,6 +72,8 @@ type EventView struct {
 	// 2026-07-28 MCP release. It is structured like Truncated and never fails check.
 	Deprecated string
 	Call       *CallView // set for request/response events
+	TaskCall   *CallView // originating call for a tasks/* lifecycle frame
+	TaskID     string
 }
 
 // SessionHeader is a lightweight per-session summary for the left panel.
@@ -167,28 +171,35 @@ func (e *event) view(_ *session) EventView {
 		RoutingMismatch:    e.mismatch,
 		Truncated:          e.truncated,
 		Deprecated:         e.deprecated,
+		TaskID:             e.taskID,
 	}
 	if e.call != nil {
 		cv := e.call.view()
 		v.Call = &cv
+	}
+	if e.taskCall != nil {
+		cv := e.taskCall.view()
+		v.TaskCall = &cv
 	}
 	return v
 }
 
 func (c *call) view() CallView {
 	return CallView{
-		ID:       c.id,
-		Method:   c.method,
-		ReqDir:   c.reqDir,
-		IsTool:   c.isTool,
-		ToolName: c.toolName,
-		Params:   c.params,
-		Result:   c.result,
-		Err:      c.err,
-		ToolErr:  c.toolErr,
-		Start:    c.start,
-		End:      c.end,
-		State:    c.state,
+		ID:         c.id,
+		Method:     c.method,
+		ReqDir:     c.reqDir,
+		IsTool:     c.isTool,
+		ToolName:   c.toolName,
+		Params:     c.params,
+		Result:     c.result,
+		Err:        c.err,
+		ToolErr:    c.toolErr,
+		Start:      c.start,
+		End:        c.end,
+		State:      c.state,
+		TaskID:     c.taskID,
+		TaskStatus: c.taskStatus,
 	}
 }
 

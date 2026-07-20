@@ -41,6 +41,33 @@ func seed(st *store.Store) {
 	st.Ingest(env(4, proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`))
 }
 
+func TestTaskLifecycleFramesCanBeFilteredAndShowTheirParent(t *testing.T) {
+	m := Model{}
+	e := store.EventView{
+		Kind:   store.EventNotification,
+		Method: "notifications/tasks",
+		TaskID: "task-7",
+		TaskCall: &store.CallView{
+			ID: "1", Method: "tools/call", TaskID: "task-7", TaskStatus: "input_required", State: store.Pending,
+		},
+	}
+	if !m.matchToken(e, "task:task-7") {
+		t.Fatal("task filter did not match the linked task id")
+	}
+	cells := m.streamCells(e)
+	if !strings.Contains(cells.detail, "tools/call id 1") || cells.status != "input_required" {
+		t.Fatalf("task link/status not surfaced: %+v", cells)
+	}
+
+	handle := store.EventView{
+		Kind: store.EventResponse, TaskID: "task-7",
+		Call: &store.CallView{ID: "1", Method: "tools/call", TaskID: "task-7", TaskStatus: "working", State: store.Pending},
+	}
+	if got := m.streamCells(handle).status; got != "working" {
+		t.Fatalf("task handle status = %q, want working", got)
+	}
+}
+
 func drive(t *testing.T, m Model, msg tea.Msg) Model {
 	t.Helper()
 	tm, _ := m.Update(msg)
