@@ -1318,3 +1318,101 @@ func TestMRTRCountsOneCallInTheToolSummary(t *testing.T) {
 		t.Fatalf("calls = %d, want 1: a retry is a continuation, not another call", got)
 	}
 }
+
+// The 2026-07-28 revision routes sampling and roots only through MRTR, where the
+// method sits inside inputRequests, so a top-level check alone would leave the
+// deprecation flag blind for the one remaining way they are used.
+func TestDeprecationFlagsMethodsNestedInsideMRTR(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		result  string
+		want    string
+		wantNot string
+	}{
+		{
+			name:   "sampling",
+			result: `"result":{"resultType":"input_required","inputRequests":{"ask":{"method":"sampling/createMessage"}}}`,
+			want:   "sampling is deprecated",
+		},
+		{
+			name:   "roots",
+			result: `"result":{"resultType":"input_required","inputRequests":{"where":{"method":"roots/list"}}}`,
+			want:   "roots is deprecated",
+		},
+		{
+			// Elicitation is the replacement, not a deprecated feature.
+			name:    "elicitation stays clean",
+			result:  `"result":{"resultType":"input_required","inputRequests":{"who":{"method":"elicitation/create"}}}`,
+			wantNot: "deprecated",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New()
+			s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+			ev := s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1", tc.result))
+			if tc.want != "" && !strings.Contains(ev.Deprecated, tc.want) {
+				t.Fatalf("Deprecated = %q, want it to mention %q", ev.Deprecated, tc.want)
+			}
+			if tc.wantNot != "" && strings.Contains(ev.Deprecated, tc.wantNot) {
+				t.Fatalf("Deprecated = %q, want nothing", ev.Deprecated)
+			}
+		})
+	}
+}
+
+// A result may ask for several things at once. Every deprecated feature is
+// named, but a feature used twice is named once.
+func TestDeprecationNamesEachNestedFeatureOnce(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+	ev := s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","inputRequests":{`+
+			`"a":{"method":"sampling/createMessage"},`+
+			`"b":{"method":"sampling/createMessage"},`+
+			`"c":{"method":"roots/list"},`+
+			`"d":{"method":"elicitation/create"}}}`))
+
+	if got := strings.Count(ev.Deprecated, "sampling is deprecated"); got != 1 {
+		t.Fatalf("sampling named %d times, want once: %q", got, ev.Deprecated)
+	}
+	if !strings.Contains(ev.Deprecated, "roots is deprecated") {
+		t.Fatalf("roots should be named too: %q", ev.Deprecated)
+	}
+	if strings.Contains(ev.Deprecated, "elicitation") {
+		t.Fatalf("elicitation is not deprecated: %q", ev.Deprecated)
+	}
+}
+
+// The flag stays a heads-up, so a session using a deprecated feature through
+// MRTR must not fail a default check run.
+func TestNestedDeprecationIsNotAProtocolWarning(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+	ev := s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","inputRequests":{"ask":{"method":"sampling/createMessage"}}}`))
+
+	if ev.Deprecated == "" {
+		t.Fatal("the frame should carry the heads-up")
+	}
+	if ev.Warning != "" {
+		t.Fatalf("it must not become a protocol warning, got %q", ev.Warning)
+	}
+}
+
+// Flagging must not disturb the correlation the same result drives.
+func TestNestedDeprecationLeavesMRTRCorrelationIntact(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+	s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","requestState":"st","inputRequests":{"ask":{"method":"sampling/createMessage"}}}`))
+	ev := s.Ingest(req(3, t0.Add(2*time.Second), proxy.ClientToServer, "2", "tools/call",
+		`{"name":"book","requestState":"st"}`))
+	if ev.MRTRRoot != "1" {
+		t.Fatalf("the retry should still link to its root, got %q", ev.MRTRRoot)
+	}
+}

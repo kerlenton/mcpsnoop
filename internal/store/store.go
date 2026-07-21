@@ -400,6 +400,14 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 
 	if note := deprecatedMethodNote(msg.Method); note != "" {
 		ev.deprecated = note
+	} else if state, ok := parseInputRequired(msg.Result); ok {
+		// A response has no method of its own, and under MRTR the deprecated
+		// features are named inside inputRequests rather than on the frame, so
+		// the top-level check alone is blind for the one remaining way a server
+		// can ask for sampling or roots.
+		if note := deprecatedNestedNote(state.methods); note != "" {
+			ev.deprecated = note
+		}
 	}
 
 	sess.events = append(sess.events, ev)
@@ -829,6 +837,10 @@ func isToolError(result json.RawMessage) bool {
 type inputRequired struct {
 	requestState string
 	keys         string
+	// methods names the server-to-client requests carried inside inputRequests.
+	// The 2026-07-28 revision routes sampling and roots exclusively through this
+	// map, so it is the only place their method names still appear.
+	methods []string
 }
 
 // parseInputRequired recognises the result a server sends when it needs more
@@ -847,7 +859,21 @@ func parseInputRequired(raw json.RawMessage) (inputRequired, bool) {
 	if json.Unmarshal(raw, &r) != nil || r.ResultType != "input_required" {
 		return inputRequired{}, false
 	}
-	return inputRequired{requestState: r.RequestState, keys: sortedKeySet(r.InputRequests)}, true
+	methods := make([]string, 0, len(r.InputRequests))
+	for _, raw := range r.InputRequests {
+		var req struct {
+			Method string `json:"method"`
+		}
+		if json.Unmarshal(raw, &req) == nil && req.Method != "" {
+			methods = append(methods, req.Method)
+		}
+	}
+	slices.Sort(methods) // stable order, the map iteration order is not
+	return inputRequired{
+		requestState: r.RequestState,
+		keys:         sortedKeySet(r.InputRequests),
+		methods:      methods,
+	}, true
 }
 
 // retrySignals reads the two things a retry carries that can tie it back to the

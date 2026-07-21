@@ -36,3 +36,23 @@ func DeprecatedCapabilityNote(name string) string {
 		return ""
 	}
 }
+
+// deprecatedNestedNote reports the deprecated features named by the
+// server-to-client requests inside an InputRequiredResult. Since the 2026-07-28
+// revision removed server-initiated requests, MRTR is the only way a server can
+// still reach for sampling or roots, and there the method sits inside the
+// inputRequests map. Each feature is named once however many requests use it,
+// so a result asking for two samplings does not say so twice.
+func deprecatedNestedNote(methods []string) string {
+	var notes []string
+	seen := make(map[string]bool, len(methods))
+	for _, m := range methods {
+		note := deprecatedMethodNote(m)
+		if note == "" || seen[note] {
+			continue
+		}
+		seen[note] = true
+		notes = append(notes, note)
+	}
+	return strings.Join(notes, "; ")
+}
