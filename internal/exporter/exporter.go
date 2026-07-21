@@ -96,6 +96,8 @@ type CallExport struct {
 	ToolName   string          `json:"tool_name,omitempty"`
 	IsError    bool            `json:"is_error"`
 	ToolError  bool            `json:"tool_error"`
+	TaskID     string          `json:"task_id,omitempty"`
+	TaskStatus string          `json:"task_status,omitempty"`
 	StartedAt  time.Time       `json:"started_at"`
 	EndedAt    *time.Time      `json:"ended_at,omitempty"`
 	DurationMS *float64        `json:"duration_ms,omitempty"`
@@ -486,24 +488,31 @@ func exportCall(index int, c store.CallView) CallExport {
 		status = "pending"
 	case c.State == store.Superseded:
 		status = "superseded"
+	case c.TaskStatus == "cancelled":
+		// Terminal and without a result, so not ok, but the user stopped the work on
+		// purpose rather than hitting an error. Its own status ahead of Failed(),
+		// following the superseded precedent, keeps it out of the error branch.
+		status = "cancelled"
 	case c.Failed():
 		status = "error"
 	}
 	out := CallExport{
-		Index:     index,
-		ID:        c.ID,
-		Method:    c.Method,
-		Direction: c.ReqDir,
-		State:     c.State.String(),
-		Status:    status,
-		IsTool:    c.IsTool,
-		ToolName:  c.ToolName,
-		IsError:   c.Failed(),
-		ToolError: c.ToolErr,
-		StartedAt: c.Start,
-		Params:    c.Params,
-		Result:    c.Result,
-		Error:     c.Err,
+		Index:      index,
+		ID:         c.ID,
+		Method:     c.Method,
+		Direction:  c.ReqDir,
+		State:      c.State.String(),
+		Status:     status,
+		IsTool:     c.IsTool,
+		ToolName:   c.ToolName,
+		IsError:    c.Errored, // the "something went wrong" axis, so a cancel is not flagged
+		ToolError:  c.ToolErr,
+		TaskID:     c.TaskID,
+		TaskStatus: c.TaskStatus,
+		StartedAt:  c.Start,
+		Params:     c.Params,
+		Result:     c.Result,
+		Error:      c.Err,
 	}
 	// A superseded call was never answered; its stored end is the moment the id was
 	// reused, not a latency, so omit the duration the way a pending call does.

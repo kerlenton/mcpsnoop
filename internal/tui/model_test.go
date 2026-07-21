@@ -68,6 +68,36 @@ func TestTaskLifecycleFramesCanBeFilteredAndShowTheirParent(t *testing.T) {
 	}
 }
 
+func TestStatusFilterSeparatesCancelledFromError(t *testing.T) {
+	m := Model{}
+
+	// A cancelled task is Failed() (it delivered no result) but not on the error
+	// axis, so status:err must miss it and status:cancelled, the label the row uses,
+	// must find it.
+	cancelled := store.EventView{
+		Kind: store.EventResponse,
+		Call: &store.CallView{ID: "1", Method: "tools/call", State: store.Failed, TaskID: "t1", TaskStatus: "cancelled"},
+	}
+	if m.matchToken(cancelled, "status:err") {
+		t.Fatal("status:err must not match a cancelled call")
+	}
+	if !m.matchToken(cancelled, "status:cancelled") {
+		t.Fatal("status:cancelled must match a cancelled call")
+	}
+
+	// A genuine error still matches status:err and not status:cancelled.
+	errored := store.EventView{
+		Kind: store.EventResponse,
+		Call: &store.CallView{ID: "2", Method: "tools/call", State: store.Failed, Errored: true, ToolErr: true},
+	}
+	if !m.matchToken(errored, "status:err") {
+		t.Fatal("status:err must match a genuinely errored call")
+	}
+	if m.matchToken(errored, "status:cancelled") {
+		t.Fatal("status:cancelled must not match a non-cancelled error")
+	}
+}
+
 func drive(t *testing.T, m Model, msg tea.Msg) Model {
 	t.Helper()
 	tm, _ := m.Update(msg)

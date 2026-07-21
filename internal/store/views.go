@@ -13,15 +13,19 @@ import (
 
 // CallView is an immutable snapshot of a correlated request/response pair.
 type CallView struct {
-	ID         string
-	Method     string
-	ReqDir     proxy.Direction
-	IsTool     bool
-	ToolName   string
-	Params     json.RawMessage
-	Result     json.RawMessage
-	Err        *proxy.RPCError
-	ToolErr    bool // result.isError == true
+	ID       string
+	Method   string
+	ReqDir   proxy.Direction
+	IsTool   bool
+	ToolName string
+	Params   json.RawMessage
+	Result   json.RawMessage
+	Err      *proxy.RPCError
+	ToolErr  bool // result.isError == true
+	// Errored is the "something went wrong" axis, distinct from Failed(): a
+	// cancelled task is Failed() (it delivered nothing) but not Errored (the user
+	// stopped it on purpose). The session error counter and the CI gate read this.
+	Errored    bool
 	Start      time.Time
 	End        time.Time
 	State      CallState
@@ -201,6 +205,7 @@ func (c *call) view() CallView {
 		Result:     c.result,
 		Err:        c.err,
 		ToolErr:    c.toolErr,
+		Errored:    c.errored,
 		Start:      c.start,
 		End:        c.end,
 		State:      c.state,
@@ -459,14 +464,14 @@ func (s *Store) ToolSummary(sessionID string) (SessionToolSummary, bool) {
 			// (like a pending one), but has no real latency to feed the percentiles.
 			continue
 		}
-		if c.err != nil || c.toolErr {
+		if c.errored {
 			agg.stats.Errors++
 		}
 		duration := c.end.Sub(c.start)
 		agg.durations = append(agg.durations, duration)
 		slowest = append(slowest, SlowToolCall{
 			CallIndex: index, ID: c.id, ToolName: c.toolName,
-			Duration: duration, Failed: c.err != nil || c.toolErr, Start: c.start,
+			Duration: duration, Failed: c.errored, Start: c.start,
 		})
 	}
 

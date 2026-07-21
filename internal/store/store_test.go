@@ -615,6 +615,78 @@ func TestToolSummaryAggregatesLatencyErrorsAndPendingCalls(t *testing.T) {
 	}
 }
 
+// The summary must count what the stream and the CI gate count. A task that ends
+// failed with no error object, and a tool error inside a completed task, both go
+// through the error axis, so ToolSummary counts them exactly as the session error
+// counter does. Before the axis was stored, the failed-no-error case counted in the
+// stream but not here, so the summary showed zero errors for a call painted red.
+func TestToolSummaryCountsFailedAndToolErrorTasks(t *testing.T) {
+	t0 := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	s := New()
+
+	// "slow" ends failed with no error object and no isError.
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"slow"}`))
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1", `"result":{"resultType":"task","taskId":"bare-1","status":"working"}`))
+	s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: t0.Add(time.Second), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/tasks","params":{"taskId":"bare-1","status":"failed"}}`)})
+
+	// "grep" completes as a task whose result carries a tool-level error.
+	s.Ingest(req(4, t0.Add(2*time.Second), proxy.ClientToServer, "2", "tools/call", `{"name":"grep"}`))
+	s.Ingest(resp(5, t0.Add(2*time.Second+time.Millisecond), proxy.ServerToClient, "2", `"result":{"resultType":"task","taskId":"toolerr-1","status":"working"}`))
+	s.Ingest(req(6, t0.Add(3*time.Second), proxy.ClientToServer, "3", "tasks/get", `{"taskId":"toolerr-1"}`))
+	s.Ingest(resp(7, t0.Add(4*time.Second), proxy.ServerToClient, "3", `"result":{"taskId":"toolerr-1","status":"completed","result":{"content":[{"type":"text","text":"boom"}],"isError":true}}`))
+
+	sum, ok := s.ToolSummary("s1")
+	if !ok {
+		t.Fatal("ToolSummary should find the session")
+	}
+	total := 0
+	for _, tool := range sum.Tools {
+		total += tool.Errors
+	}
+	if total != 2 {
+		t.Fatalf("ToolSummary errors = %d across %+v, want 2 (failed task + tool error task)", total, sum.Tools)
+	}
+	if got := s.Sessions()[0].Errors; got != total {
+		t.Fatalf("ToolSummary errors %d disagree with the session error counter %d", total, got)
+	}
+	for _, sc := range sum.Slowest {
+		if !sc.Failed {
+			t.Fatalf("both task calls are on the error axis, so each slowest entry should read failed: %+v", sc)
+		}
+	}
+}
+
+// A cancelled task delivered no result, so its call is Failed(), but the user
+// stopped the work on purpose. That is not on the error axis, so ToolSummary and
+// the session error counter must both leave it uncounted and unflagged.
+func TestToolSummaryDoesNotCountCancelledTask(t *testing.T) {
+	t0 := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"slow"}`))
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1", `"result":{"resultType":"task","taskId":"cancel-9","status":"working"}`))
+	s.Ingest(req(3, t0.Add(time.Second), proxy.ClientToServer, "2", "tasks/cancel", `{"taskId":"cancel-9"}`))
+	s.Ingest(resp(4, t0.Add(2*time.Second), proxy.ServerToClient, "2", `"result":{}`))
+	s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 5, TS: t0.Add(3 * time.Second), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/tasks","params":{"taskId":"cancel-9","status":"cancelled"}}`)})
+
+	sum, ok := s.ToolSummary("s1")
+	if !ok || len(sum.Tools) != 1 {
+		t.Fatalf("ToolSummary = %+v ok %v, want one tool", sum, ok)
+	}
+	if sum.Tools[0].Errors != 0 {
+		t.Fatalf("a cancelled task is not an error, ToolSummary errors = %d", sum.Tools[0].Errors)
+	}
+	for _, sc := range sum.Slowest {
+		if sc.Failed {
+			t.Fatalf("a cancelled call must not read as failed in the summary: %+v", sc)
+		}
+	}
+	if got := s.Sessions()[0].Errors; got != 0 {
+		t.Fatalf("a deliberate cancel must not touch the session error counter, got %d", got)
+	}
+}
+
 func TestServerToClientRequest(t *testing.T) {
 	// Server-initiated request (e.g. sampling) must correlate with the client's
 	// response travelling the other way.

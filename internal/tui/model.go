@@ -1118,7 +1118,12 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 	}
 	switch v {
 	case "err", "error", "fail", "failed":
-		return e.Call.Failed()
+		// The "something went wrong" axis, not the Failed state: a cancelled call is
+		// Failed() but not an error, so it belongs under status:cancelled, not here.
+		return e.Call.Errored
+	case "cancelled", "canceled":
+		// The row already labels a cancelled task "cancelled"; find it the same way.
+		return e.Call.TaskStatus == "cancelled"
 	case "pending", "pend", "inflight":
 		return e.Call.State == store.Pending
 	case "ok", "success":

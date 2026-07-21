@@ -74,18 +74,25 @@ type callKey struct {
 
 // call is the mutable internal record for one request/response pair.
 type call struct {
-	id         string
-	method     string
-	reqDir     proxy.Direction
-	params     json.RawMessage
-	result     json.RawMessage
-	err        *proxy.RPCError
-	start      time.Time
-	end        time.Time
-	state      CallState
-	isTool     bool
-	toolName   string
-	toolErr    bool // result.isError == true (MCP tool-level failure)
+	id       string
+	method   string
+	reqDir   proxy.Direction
+	params   json.RawMessage
+	result   json.RawMessage
+	err      *proxy.RPCError
+	start    time.Time
+	end      time.Time
+	state    CallState
+	isTool   bool
+	toolName string
+	toolErr  bool // result.isError == true (MCP tool-level failure)
+	// errored is the "something went wrong" axis: a protocol error, a tool-level
+	// error, or a task that ended failed. It drives the session error counter and
+	// the CI gate, and is deliberately distinct from the Failed state, which also
+	// covers a cancelled task, work the user stopped on purpose that delivered no
+	// result but is not an error. One place (completeCall, applyParsedTaskState)
+	// decides this so every consumer reads the same answer.
+	errored    bool
 	taskID     string
 	taskStatus string
 }
@@ -267,7 +274,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		case !matched:
 			ev.warning = appendWarning(ev.warning, "duplicate response for the same id")
 		default:
-			if msg.Error != nil || c.toolErr {
+			if c.errored {
 				sess.errors++
 			}
 		}
@@ -456,9 +463,11 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	switch {
 	case msg.Error != nil:
 		c.state = Failed // JSON-RPC / protocol error
+		c.errored = true
 	case isToolError(msg.Result):
 		c.state = Failed // tool-level error, a 200-OK response with result.isError=true
 		c.toolErr = true
+		c.errored = true
 	default:
 		c.state = Completed
 	}
@@ -558,6 +567,7 @@ func (sess *session) applyParsedTaskState(state taskState, ts time.Time) (*call,
 		return c, false
 	}
 	c.end = ts
+	c.errored = countsAsError // the failed and completed-with-isError cases, not cancelled
 	sess.pending--
 	return c, countsAsError
 }

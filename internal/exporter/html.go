@@ -158,6 +158,9 @@ const toneOf = (ev, call) => {
   if (ev.kind === "request") return "req";
   if (ev.kind === "response") {
     if (call && call.status === "error") return "error";
+    // A cancelled task delivered no result but is not an error, so it reads as a
+    // caution like the TUI row, reusing the warn tone rather than success green.
+    if (call && call.status === "cancelled") return "warn";
     return "resp";
   }
   return "resp";

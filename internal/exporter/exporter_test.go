@@ -104,6 +104,90 @@ func TestBuildExportsSupersededCallNotAsOk(t *testing.T) {
 	}
 }
 
+func TestBuildExportsCancelledTaskWithoutFlaggingAnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cancel.jsonl")
+	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow"}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 2, TS: t0.Add(time.Millisecond),
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"resultType":"task","taskId":"cancel-9","status":"working"}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 3, TS: t0.Add(2 * time.Second),
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/tasks","params":{"taskId":"cancel-9","status":"cancelled"}}`),
+	})
+
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Calls) != 1 {
+		t.Fatalf("want 1 call, got %d: %+v", len(out.Calls), out.Calls)
+	}
+	c := out.Calls[0]
+	// The state still reports what happened (the call ended without a result), but
+	// the status is its own cancelled verdict ahead of the error branch, and is_error
+	// tracks the error axis, which a deliberate cancel is not on.
+	if c.Status != "cancelled" {
+		t.Fatalf("cancelled task status = %q, want cancelled", c.Status)
+	}
+	if c.IsError {
+		t.Fatal("a cancelled task must not be flagged is_error")
+	}
+	if c.State != "failed" {
+		t.Fatalf("state = %q, want failed", c.State)
+	}
+	// Without these the exported trace never says a task was cancelled at all.
+	if c.TaskID != "cancel-9" || c.TaskStatus != "cancelled" {
+		t.Fatalf("export must carry the task outcome, got task_id %q task_status %q", c.TaskID, c.TaskStatus)
+	}
+}
+
+func TestBuildFlagsToolErrorTaskAsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "toolerr.jsonl")
+	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"grep"}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 2, TS: t0.Add(time.Millisecond),
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"resultType":"task","taskId":"toolerr-1","status":"working"}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 3, TS: t0.Add(time.Second),
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tasks/get","params":{"taskId":"toolerr-1"}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 4, TS: t0.Add(2 * time.Second),
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"result":{"taskId":"toolerr-1","status":"completed","result":{"content":[{"type":"text","text":"boom"}],"isError":true}}}`),
+	})
+
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A tool error inside a task is on the error axis everywhere, including here.
+	call := out.Calls[0]
+	if call.ToolName != "grep" {
+		t.Fatalf("first call = %+v, want the grep tools/call", call)
+	}
+	if call.Status != "error" || !call.IsError {
+		t.Fatalf("tool error task = status %q is_error %v, want error/true", call.Status, call.IsError)
+	}
+}
+
 func TestBuildIncludesValidationWarning(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "warning.jsonl")
 	writeEnv(t, path, proxy.Envelope{
