@@ -511,7 +511,9 @@ func (sess *session) applyTaskState(taskID string, raw json.RawMessage, ts time.
 }
 
 // applyParsedTaskState advances the originating call only when an observed task
-// reaches a terminal state. The bool reports a newly recorded failure.
+// reaches a terminal state. The bool reports a newly recorded error, which is not
+// the same as a failed state: a cancelled task delivered no result, but the user
+// stopping work is not a protocol or tool error and must not fail check.
 func (sess *session) applyParsedTaskState(state taskState, ts time.Time) (*call, bool) {
 	c := sess.tasks[state.TaskID]
 	if c == nil {
@@ -521,11 +523,34 @@ func (sess *session) applyParsedTaskState(state taskState, ts time.Time) (*call,
 	if c.state != Pending {
 		return c, false
 	}
+	countsAsError := false
 	switch state.Status {
 	case "completed":
-		c.state = Completed
 		c.result = state.Result
-	case "failed", "cancelled":
+		// The terminal result is whatever the call would have returned
+		// synchronously, so a tool-level failure arrives here in exactly the same
+		// shape the fast path checks for. Without this a tool that failed inside a
+		// task reads as a success everywhere: Failed() is false, the session error
+		// count is short, status:err misses it and check --fail-on error passes.
+		if isToolError(state.Result) {
+			c.state = Failed
+			c.toolErr = true
+			countsAsError = true
+		} else {
+			c.state = Completed
+		}
+	case "failed":
+		c.state = Failed
+		c.err = state.Error
+		c.result = state.Result
+		if c.err == nil && isToolError(state.Result) {
+			c.toolErr = true
+		}
+		countsAsError = true
+	case "cancelled":
+		// Terminal and without a result, so the call did not succeed, but the
+		// session error count and the CI gate track protocol and tool errors, and a
+		// deliberate cancel is neither. TaskStatus carries the real outcome.
 		c.state = Failed
 		c.err = state.Error
 		c.result = state.Result
@@ -534,7 +559,7 @@ func (sess *session) applyParsedTaskState(state taskState, ts time.Time) (*call,
 	}
 	c.end = ts
 	sess.pending--
-	return c, c.state == Failed
+	return c, countsAsError
 }
 
 func (c *capabilities) applyRequest(params json.RawMessage) {
