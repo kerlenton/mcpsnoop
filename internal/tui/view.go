@@ -739,6 +739,16 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = link + " · " + c.detail
 		}
 	}
+	if e.MRTRRoot != "" {
+		// A multi round-trip retry carries a different id by design, so without
+		// saying what it continues the row looks like an unrelated second call.
+		link := "continues id " + e.MRTRRoot
+		if c.detail == "" {
+			c.detail = link
+		} else {
+			c.detail = link + " · " + c.detail
+		}
+	}
 	return c
 }
 

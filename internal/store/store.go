@@ -11,6 +11,8 @@ package store
 
 import (
 	"encoding/json"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,6 +97,14 @@ type call struct {
 	errored    bool
 	taskID     string
 	taskStatus string
+	// opName is the tool, prompt or resource this call names, kept so a retry can
+	// be matched back to it without re-parsing the original params.
+	opName string
+	// mrtrState and mrtrKeys park what an InputRequiredResult asked for. The spec
+	// requires the retry to carry a different JSON-RPC id, so there is no shared
+	// identifier and the link has to be inferred from these instead.
+	mrtrState string
+	mrtrKeys  string
 }
 
 // event is the mutable internal timeline entry.
@@ -118,6 +128,9 @@ type event struct {
 	call               *call  // set for request/response events
 	taskCall           *call  // originating call for a task lifecycle frame
 	taskID             string
+	// mrtrRoot is the id of the request this one continues, set when a multi
+	// round-trip retry was recognised. Empty on an ordinary request.
+	mrtrRoot string
 }
 
 // capabilities holds what each side declared, whether through the legacy
@@ -153,7 +166,10 @@ type session struct {
 	cwd     string
 	calls   map[callKey]*call
 	tasks   map[string]*call
-	events  []*event
+	// awaiting holds operations that answered with an InputRequiredResult and are
+	// waiting for the client to retry. It stays tiny, only in-flight ones live here.
+	awaiting []*call
+	events   []*event
 
 	requests, responses, notifications, errors, pending int
 
@@ -284,6 +300,21 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.id = string(msg.ID)
 		ev.warning = validationWarning(msg)
 		var reused bool
+		if root := sess.matchRetry(msg); root != nil {
+			// A continuation, not a new call. Mapping the retry id onto the same
+			// call object lets completeCall find it, so the operation keeps one
+			// pending slot and one duration however many round trips it takes.
+			sess.calls[callKey{dir: e.Direction, id: ev.id}] = root
+			root.mrtrState, root.mrtrKeys = "", ""
+			sess.unpark(root)
+			ev.call = root
+			ev.kind = EventRequest
+			ev.method = msg.Method
+			ev.mrtrRoot = root.id
+			ev.warning = validationWarning(msg)
+			sess.requests++ // a request on the wire, even though not a new call
+			break
+		}
 		ev.call, reused = sess.openCall(ev.id, msg, e)
 		if ev.call.taskID != "" {
 			ev.taskID = ev.call.taskID
@@ -430,6 +461,7 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 	if isTaskMethod(msg.Method) {
 		c.taskID = taskID(msg.Params)
 	}
+	c.opName = operationName(msg)
 	sess.calls[key] = c
 	return c, reused
 }
@@ -447,6 +479,16 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	}
 	if c.method == "tools/call" && c.taskID != "" {
 		return c, false // the task handle already continued this call
+	}
+	if state, ok := parseInputRequired(msg.Result); ok {
+		// The operation is not finished, it is waiting on the client. Keep it
+		// pending and open so its duration ends up spanning the whole exchange,
+		// including the time the user spends answering.
+		c.result = msg.Result
+		c.mrtrState = state.requestState
+		c.mrtrKeys = state.keys
+		sess.park(c)
+		return c, true
 	}
 	if c.method == "tools/call" {
 		if state, ok := parseTaskState(msg.Result); ok && state.ResultType == "task" {
@@ -783,6 +825,115 @@ func isToolError(result json.RawMessage) bool {
 // it in params.name, resources/read in params.uri); everything else returns ""
 // so a method that merely happens to carry a "name" param is never falsely
 // flagged, keeping the mismatch signal safe for a CI gate.
+// inputRequired is the parked half of a multi round-trip exchange (SEP-2322).
+type inputRequired struct {
+	requestState string
+	keys         string
+}
+
+// parseInputRequired recognises the result a server sends when it needs more
+// input before it can finish. Only prompts/get, resources/read and tools/call
+// can receive one, but the result shape is enough to tell, so the method is not
+// re-checked here.
+func parseInputRequired(raw json.RawMessage) (inputRequired, bool) {
+	if len(raw) == 0 {
+		return inputRequired{}, false
+	}
+	var r struct {
+		ResultType    string                     `json:"resultType"`
+		RequestState  string                     `json:"requestState"`
+		InputRequests map[string]json.RawMessage `json:"inputRequests"`
+	}
+	if json.Unmarshal(raw, &r) != nil || r.ResultType != "input_required" {
+		return inputRequired{}, false
+	}
+	return inputRequired{requestState: r.RequestState, keys: sortedKeySet(r.InputRequests)}, true
+}
+
+// retrySignals reads the two things a retry carries that can tie it back to the
+// request it continues.
+func retrySignals(params json.RawMessage) (state, keys string) {
+	if len(params) == 0 {
+		return "", ""
+	}
+	var p struct {
+		RequestState   string                     `json:"requestState"`
+		InputResponses map[string]json.RawMessage `json:"inputResponses"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return "", ""
+	}
+	return p.RequestState, sortedKeySet(p.InputResponses)
+}
+
+// sortedKeySet renders a key set so two of them can be compared as strings.
+func sortedKeySet(m map[string]json.RawMessage) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return strings.Join(keys, "\x00")
+}
+
+func (sess *session) park(c *call) {
+	for _, p := range sess.awaiting {
+		if p == c {
+			return // a longer chain re-parks the same operation
+		}
+	}
+	sess.awaiting = append(sess.awaiting, c)
+}
+
+func (sess *session) unpark(c *call) {
+	for i, p := range sess.awaiting {
+		if p == c {
+			sess.awaiting = append(sess.awaiting[:i], sess.awaiting[i+1:]...)
+			return
+		}
+	}
+}
+
+// matchRetry finds the operation a request continues, or nil when it is a new
+// one. Because the spec requires the retry to use a different id, the link is
+// inferred. An echoed requestState is opaque and server-minted, so an exact
+// match is conclusive on its own. When the server issued none, the fallback
+// needs the method, the operation name and the full set of answered keys to
+// agree, and gives up when more than one parked operation fits, since a wrong
+// link is worse than no link.
+func (sess *session) matchRetry(msg proxy.RPCMessage) *call {
+	state, keys := retrySignals(msg.Params)
+	if state == "" && keys == "" {
+		return nil
+	}
+	name := operationName(msg)
+	var fallback *call
+	matches := 0
+	for _, c := range sess.awaiting {
+		if c.state != Pending {
+			continue
+		}
+		if state != "" {
+			if c.mrtrState == state {
+				return c
+			}
+			continue
+		}
+		if c.mrtrState == "" && c.mrtrKeys != "" && c.mrtrKeys == keys &&
+			c.method == msg.Method && c.opName == name {
+			fallback = c
+			matches++
+		}
+	}
+	if matches == 1 {
+		return fallback
+	}
+	return nil
+}
+
 func operationName(msg proxy.RPCMessage) string {
 	if len(msg.Params) == 0 {
 		return ""

@@ -84,6 +84,9 @@ type EventView struct {
 	Call       *CallView // set for request/response events
 	TaskCall   *CallView // originating call for a tasks/* lifecycle frame
 	TaskID     string
+	// MRTRRoot is the id of the request this one continues, set when a multi
+	// round-trip retry was recognised (SEP-2322). Empty on an ordinary request.
+	MRTRRoot string
 }
 
 // SessionHeader is a lightweight per-session summary for the left panel.
@@ -182,6 +185,7 @@ func (e *event) view(_ *session) EventView {
 		Truncated:          e.truncated,
 		Deprecated:         e.deprecated,
 		TaskID:             e.taskID,
+		MRTRRoot:           e.mrtrRoot,
 	}
 	if e.call != nil {
 		cv := e.call.view()
@@ -415,7 +419,10 @@ func (s *Store) Calls(sessionID string) []CallView {
 	}
 	out := make([]CallView, 0, len(sess.events))
 	for _, ev := range sess.events {
-		if ev.kind == EventRequest && ev.call != nil {
+		// A multi round-trip retry points at the call it continues, so counting it
+		// again here would report one logical operation as several and feed its
+		// duration into the statistics twice.
+		if ev.kind == EventRequest && ev.call != nil && ev.mrtrRoot == "" {
 			out = append(out, ev.call.view())
 		}
 	}
@@ -440,7 +447,10 @@ func (s *Store) ToolSummary(sessionID string) (SessionToolSummary, bool) {
 	var slowest []SlowToolCall
 	callIndex := 0
 	for _, ev := range sess.events {
-		if ev.kind != EventRequest || ev.call == nil {
+		// Skipping a continuation matters twice over: it would count one logical
+		// operation as several calls, and feed the same duration into the
+		// percentiles once per round trip.
+		if ev.kind != EventRequest || ev.call == nil || ev.mrtrRoot != "" {
 			continue
 		}
 		c := ev.call

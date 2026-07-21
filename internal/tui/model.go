@@ -1039,7 +1039,10 @@ func (m *Model) matchToken(e store.EventView, tok string) bool {
 		case "method", "m":
 			return containsFold(e.Method, v) || (e.Call != nil && containsFold(e.Call.Method, v))
 		case "id":
-			return strings.EqualFold(e.ID, v)
+			// A retry belongs to the operation it continues, so filtering by the
+			// original id gathers the whole multi round-trip chain rather than
+			// just its first leg. Its own id still finds it on its own.
+			return strings.EqualFold(e.ID, v) || strings.EqualFold(e.MRTRRoot, v)
 		case "task":
 			return strings.EqualFold(e.TaskID, v)
 		case "dir", "d":
