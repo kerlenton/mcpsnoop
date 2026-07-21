@@ -297,6 +297,71 @@ func TestTaskBackedToolCallStaysPendingUntilTerminalState(t *testing.T) {
 	}
 }
 
+// The terminal result of a task is whatever the call would have returned
+// synchronously, so a tool that failed inside a task must read as failed rather
+// than as an empty success.
+func TestTaskCompletedWithToolErrorIsAFailure(t *testing.T) {
+	t0 := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"slow"}`))
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1", `"result":{"resultType":"task","taskId":"tool-err-1","status":"working"}`))
+	s.Ingest(req(3, t0.Add(time.Second), proxy.ClientToServer, "2", "tasks/get", `{"taskId":"tool-err-1"}`))
+	ev := s.Ingest(resp(4, t0.Add(2*time.Second), proxy.ServerToClient, "2",
+		`"result":{"taskId":"tool-err-1","status":"completed","result":{"content":[{"type":"text","text":"nope"}],"isError":true}}`))
+
+	if ev.TaskCall == nil {
+		t.Fatal("the terminal frame should link its originating call")
+	}
+	if !ev.TaskCall.ToolErr || !ev.TaskCall.Failed() {
+		t.Fatalf("a tool error inside a task must not read as a success: %+v", ev.TaskCall)
+	}
+	if got := s.Sessions()[0].Errors; got != 1 {
+		t.Fatalf("session errors = %d, want 1", got)
+	}
+}
+
+// A terminal failure carrying no error object still has to read as a failure,
+// otherwise the state says one thing and every consumer of Failed() says another.
+func TestTaskFailedWithoutErrorObjectStillReadsAsFailed(t *testing.T) {
+	t0 := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"slow"}`))
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1", `"result":{"resultType":"task","taskId":"bare-1","status":"working"}`))
+	ev := s.Ingest(proxy.Envelope{SessionID: "s1", Seq: 3, TS: t0.Add(time.Second), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/tasks","params":{"taskId":"bare-1","status":"failed"}}`)})
+
+	if ev.TaskCall == nil || ev.TaskCall.State != Failed {
+		t.Fatalf("task state = %+v, want Failed", ev.TaskCall)
+	}
+	if !ev.TaskCall.Failed() {
+		t.Fatal("Failed() must agree with a Failed state")
+	}
+}
+
+// Cancelling is terminal and delivers no result, but the user stopping work is
+// neither a protocol nor a tool error, so it must not fail a default check run.
+func TestCancelledTaskIsTerminalButNotASessionError(t *testing.T) {
+	t0 := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"slow"}`))
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1", `"result":{"resultType":"task","taskId":"cancel-2","status":"working"}`))
+	s.Ingest(req(3, t0.Add(time.Second), proxy.ClientToServer, "2", "tasks/cancel", `{"taskId":"cancel-2"}`))
+	s.Ingest(resp(4, t0.Add(2*time.Second), proxy.ServerToClient, "2", `"result":{}`))
+	ev := s.Ingest(proxy.Envelope{SessionID: "s1", Seq: 5, TS: t0.Add(3 * time.Second), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/tasks","params":{"taskId":"cancel-2","status":"cancelled"}}`)})
+
+	if ev.TaskCall == nil || ev.TaskCall.TaskStatus != "cancelled" {
+		t.Fatalf("task status = %+v, want cancelled", ev.TaskCall)
+	}
+	header := s.Sessions()[0]
+	if header.Pending != 0 {
+		t.Fatalf("a cancelled task must settle its call, pending = %d", header.Pending)
+	}
+	if header.Errors != 0 {
+		t.Fatalf("a deliberate cancel is not a session error, errors = %d", header.Errors)
+	}
+}
+
 func TestTaskFailureCancelInputAndOrphanHandling(t *testing.T) {
 	t0 := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 
