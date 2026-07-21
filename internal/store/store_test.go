@@ -1175,3 +1175,146 @@ func TestToolDriftIsExposedOnSessionHeader(t *testing.T) {
 		t.Fatalf("tool drift = %+v, ok=%v", report, ok)
 	}
 }
+
+// A server that needs more input answers the original request and the client
+// retries under a different id, so the operation has to stay one call with one
+// duration that includes the time the user spent answering.
+func TestMRTRRetryContinuesTheSameOperation(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+	s.Ingest(resp(2, t0.Add(10*time.Millisecond), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","inputRequests":{"login":{"method":"elicitation/create"}},"requestState":"opaque-blob"}`))
+
+	if h := s.Sessions()[0]; h.Pending != 1 {
+		t.Fatalf("an operation waiting on the client is still pending, got %d", h.Pending)
+	}
+
+	// The user takes 5s to answer, then the client retries under a new id.
+	ev := s.Ingest(req(3, t0.Add(5*time.Second), proxy.ClientToServer, "2", "tools/call",
+		`{"name":"book","inputResponses":{"login":{"action":"accept"}},"requestState":"opaque-blob"}`))
+	if ev.MRTRRoot != "1" {
+		t.Fatalf("retry should point at the request it continues, got %q", ev.MRTRRoot)
+	}
+	if ev.Call == nil || ev.Call.ID != "1" {
+		t.Fatalf("retry should continue the original call, got %+v", ev.Call)
+	}
+
+	done := s.Ingest(resp(4, t0.Add(6*time.Second), proxy.ServerToClient, "2", `"result":{"content":[]}`))
+	if done.Call == nil || done.Call.State != Completed {
+		t.Fatalf("the terminal answer should complete the operation, got %+v", done.Call)
+	}
+	if got := done.Call.Duration(); got < 6*time.Second {
+		t.Fatalf("duration = %v, want the whole exchange including the user wait", got)
+	}
+	h := s.Sessions()[0]
+	if h.Pending != 0 {
+		t.Fatalf("pending = %d, want 0", h.Pending)
+	}
+	if h.Requests != 2 {
+		t.Fatalf("both frames are requests on the wire, requests = %d", h.Requests)
+	}
+	if n := len(s.Calls("s1")); n != 1 {
+		t.Fatalf("one logical operation must stay one call, got %d", n)
+	}
+}
+
+// A chain can run to any length, and every retry links back to the same root.
+func TestMRTRHandlesAChainLongerThanTwo(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+	s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","requestState":"st-1"}`))
+	ev2 := s.Ingest(req(3, t0.Add(2*time.Second), proxy.ClientToServer, "2", "tools/call",
+		`{"name":"book","requestState":"st-1"}`))
+	s.Ingest(resp(4, t0.Add(3*time.Second), proxy.ServerToClient, "2",
+		`"result":{"resultType":"input_required","requestState":"st-2"}`))
+	ev3 := s.Ingest(req(5, t0.Add(4*time.Second), proxy.ClientToServer, "3", "tools/call",
+		`{"name":"book","requestState":"st-2"}`))
+	done := s.Ingest(resp(6, t0.Add(5*time.Second), proxy.ServerToClient, "3", `"result":{"content":[]}`))
+
+	for i, ev := range []EventView{ev2, ev3} {
+		if ev.MRTRRoot != "1" {
+			t.Fatalf("retry %d should link to the root, got %q", i+1, ev.MRTRRoot)
+		}
+	}
+	if done.Call.State != Completed || done.Call.Duration() < 5*time.Second {
+		t.Fatalf("chain should close once and span the whole exchange, got %+v", done.Call)
+	}
+	if n := len(s.Calls("s1")); n != 1 {
+		t.Fatalf("a three-step chain is still one call, got %d", n)
+	}
+}
+
+// Without a requestState the fallback needs method, operation name and the full
+// answered key set to agree.
+func TestMRTRLinksOnKeySetWhenNoRequestState(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "resources/read", `{"uri":"file:///a"}`))
+	s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","inputRequests":{"who":{"method":"elicitation/create"}}}`))
+	ev := s.Ingest(req(3, t0.Add(2*time.Second), proxy.ClientToServer, "2", "resources/read",
+		`{"uri":"file:///a","inputResponses":{"who":{"action":"accept"}}}`))
+	if ev.MRTRRoot != "1" {
+		t.Fatalf("a non-tool request should link too, got %q", ev.MRTRRoot)
+	}
+}
+
+// Two identical operations in flight cannot be told apart without a state, so
+// neither is linked. A wrong link is worse than none.
+func TestMRTRRefusesAnAmbiguousLink(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	for i, id := range []string{"1", "2"} {
+		s.Ingest(req(uint64(2*i+1), t0, proxy.ClientToServer, id, "tools/call", `{"name":"book"}`))
+		s.Ingest(resp(uint64(2*i+2), t0.Add(time.Second), proxy.ServerToClient, id,
+			`"result":{"resultType":"input_required","inputRequests":{"who":{"method":"elicitation/create"}}}`))
+	}
+	ev := s.Ingest(req(9, t0.Add(2*time.Second), proxy.ClientToServer, "3", "tools/call",
+		`{"name":"book","inputResponses":{"who":{"action":"accept"}}}`))
+	if ev.MRTRRoot != "" {
+		t.Fatalf("an ambiguous retry must not be linked, got %q", ev.MRTRRoot)
+	}
+	if n := len(s.Calls("s1")); n != 3 {
+		t.Fatalf("an unlinked retry stays its own call, got %d", n)
+	}
+}
+
+// An ordinary request that happens to follow one must not be swallowed.
+func TestMRTRLeavesUnrelatedRequestsAlone(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+	s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","requestState":"st-1"}`))
+	ev := s.Ingest(req(3, t0.Add(2*time.Second), proxy.ClientToServer, "2", "tools/call", `{"name":"other"}`))
+	if ev.MRTRRoot != "" {
+		t.Fatalf("an unrelated call must not be linked, got %q", ev.MRTRRoot)
+	}
+	if n := len(s.Calls("s1")); n != 2 {
+		t.Fatalf("want two independent calls, got %d", n)
+	}
+}
+
+// The per-tool statistics must see one call, not one per round trip, or a
+// chatty elicitation would inflate both the call count and the percentiles.
+func TestMRTRCountsOneCallInTheToolSummary(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+	s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","requestState":"st-1"}`))
+	s.Ingest(req(3, t0.Add(2*time.Second), proxy.ClientToServer, "2", "tools/call",
+		`{"name":"book","requestState":"st-1"}`))
+	s.Ingest(resp(4, t0.Add(3*time.Second), proxy.ServerToClient, "2", `"result":{"content":[]}`))
+
+	summary, ok := s.ToolSummary("s1")
+	if !ok || len(summary.Tools) != 1 {
+		t.Fatalf("want one tool, got %+v", summary.Tools)
+	}
+	if got := summary.Tools[0].Calls; got != 1 {
+		t.Fatalf("calls = %d, want 1: a retry is a continuation, not another call", got)
+	}
+}

@@ -210,19 +210,25 @@ matches the method, tool, id, and payload.
 |---|---|---|
 | `tool:` | tool name | `tool:search` |
 | `method:` | JSON-RPC method | `method:tools/call` |
-| `id:` | request id | `id:7` |
+| `id:` | request id, and any retry continuing it | `id:7` |
 | `task:` | task id | `task:01J...` |
 | `dir:` | direction (`c2s`, `s2c`) | `dir:s2c` |
 | `kind:` | frame type (`req`, `resp`, `notify`, `stderr`, `invalid`) | `kind:invalid` |
-| `status:` | call outcome (`ok`, `error`, `pending`, `bad`, `warn`, `mismatch`) | `status:error` |
+| `status:` | call outcome (`ok`, `error`, `cancelled`, `pending`, `bad`, `warn`, `mismatch`) | `status:error` |
 
 Stack tokens to get specific.
 
 ```text
 tool:search status:pending        # in-flight calls to one search tool
 method:tools/call status:error    # tool calls that failed
-dir:s2c kind:req                  # server-initiated requests (sampling, roots)
+dir:s2c kind:req                  # server-initiated requests (servers before 2026-07-28)
 ```
+
+The last one only finds anything on a server speaking 2025-11-25 or earlier. The
+2026-07-28 revision removed server-initiated requests, and a server that needs
+something from the client now answers the client's own request asking for it,
+then the client retries. mcpsnoop links those retries back to the request they
+continue, so the exchange reads as one call rather than several.
 
 ## Exporting sessions
 
