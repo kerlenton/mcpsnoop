@@ -1,7 +1,7 @@
 // Package replay re-runs a captured request against a fresh, isolated copy of
-// the server. It spawns the server command itself, performs its own MCP
-// handshake, and sends the request, so it never touches or corrupts the live
-// client session being observed.
+// the server. It spawns the server command itself, negotiates whatever protocol
+// revision that server speaks, and sends the request, so it never touches or
+// corrupts the live client session being observed.
 package replay
 
 import (
@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
@@ -26,7 +27,18 @@ type Result struct {
 	Duration  time.Duration
 }
 
-const clientName = "mcpsnoop-replay"
+const (
+	clientName = "mcpsnoop-replay"
+
+	// legacyProtocolVersion is announced in the initialize handshake, which the
+	// 2026-07-28 revision removed (SEP-2575, SEP-2567).
+	legacyProtocolVersion = "2025-06-18"
+
+	// statelessProtocolVersion is announced per request instead, since a
+	// stateless server negotiates nothing up front and every request has to
+	// describe itself.
+	statelessProtocolVersion = "2026-07-28"
+)
 
 // Replay spawns command, handshakes, and sends one request (method+params),
 // returning the correlated response and its latency. The server is always shut
@@ -69,18 +81,37 @@ func Replay(ctx context.Context, command []string, cwd, method string, params js
 
 	r := bufio.NewReaderSize(stdout, 1<<20)
 
-	// 1. initialize
+	// 1. Try the legacy handshake first and let the answer decide the revision.
+	// A server on 2026-07-28 or later does not implement initialize and answers
+	// with an error, which is the signal that it is stateless. Probing the other
+	// way round, as the SDK clients do, would mean sending server/discover to a
+	// server that may silently drop unknown methods, and bounding that read
+	// needs a second reader on the same stream. Going legacy-first keeps the
+	// path that works today byte for byte unchanged, at the cost of one doomed
+	// request against a new server, which is cheap for a one-shot replay.
 	initParams := json.RawMessage(fmt.Sprintf(
-		`{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":%q,"version":"dev"}}`, clientName))
+		`{"protocolVersion":%q,"capabilities":{},"clientInfo":{"name":%q,"version":"dev"}}`,
+		legacyProtocolVersion, clientName))
 	if err := writeRequest(stdin, 1, "initialize", initParams); err != nil {
 		return Result{}, err
 	}
-	if _, err := readResponse(r, "1"); err != nil {
+	initResp, err := readResponse(r, "1")
+	if err != nil {
 		return Result{}, fmt.Errorf("replay: initialize: %w", err)
 	}
-	// 2. initialized notification
-	if err := writeNotification(stdin, "notifications/initialized", nil); err != nil {
-		return Result{}, err
+
+	stateless := false
+	if msg, ok := proxy.ParseRPC(initResp); ok && msg.Error != nil {
+		stateless = true
+	}
+	if !stateless {
+		// 2. initialized notification, only meaningful once a handshake happened
+		if err := writeNotification(stdin, "notifications/initialized", nil); err != nil {
+			return Result{}, err
+		}
+	} else {
+		// Every stateless request carries its own client identity instead.
+		params = withClientMeta(params)
 	}
 
 	// 3. the actual request, timed
@@ -103,6 +134,39 @@ func Replay(ctx context.Context, command []string, cwd, method string, params js
 		Err:       msg.Error,
 		Duration:  dur,
 	}, nil
+}
+
+// withClientMeta adds the self-describing _meta a stateless server expects,
+// merging into whatever the captured request already carried so a progress
+// token or anything else survives. The key names match the ones the store
+// parses, so a replayed frame reads the same as a live one.
+func withClientMeta(params json.RawMessage) json.RawMessage {
+	obj := map[string]json.RawMessage{}
+	if len(params) > 0 {
+		if json.Unmarshal(params, &obj) != nil {
+			return params // not a JSON object, nothing safe to merge into
+		}
+	}
+	meta := map[string]json.RawMessage{}
+	if raw, ok := obj["_meta"]; ok {
+		if json.Unmarshal(raw, &meta) != nil {
+			return params // a _meta we do not understand, leave the request alone
+		}
+	}
+	meta["io.modelcontextprotocol/protocolVersion"] = json.RawMessage(strconv.Quote(statelessProtocolVersion))
+	meta["io.modelcontextprotocol/clientInfo"] = json.RawMessage(
+		fmt.Sprintf(`{"name":%q,"version":"dev"}`, clientName))
+
+	encodedMeta, err := json.Marshal(meta)
+	if err != nil {
+		return params
+	}
+	obj["_meta"] = encodedMeta
+	encoded, err := json.Marshal(obj)
+	if err != nil {
+		return params
+	}
+	return encoded
 }
 
 func writeRequest(w io.Writer, id int, method string, params json.RawMessage) error {
