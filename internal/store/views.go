@@ -29,8 +29,14 @@ type CallView struct {
 	TaskStatus string
 }
 
-// Failed reports a protocol error OR a tool-level error (result.isError).
-func (c CallView) Failed() bool { return c.Err != nil || c.ToolErr }
+// Failed reports a protocol error, a tool-level error (result.isError), or any
+// call the store already settled as Failed. The last clause matters for a task
+// that ends in a terminal failure carrying no error object, where the state would
+// otherwise say Failed while this predicate said otherwise, and everything that
+// judges an outcome through here (the exporter, the stream, status:err) reads it.
+// On the synchronous path it changes nothing, since Failed is only ever set there
+// alongside an error or a tool error.
+func (c CallView) Failed() bool { return c.Err != nil || c.ToolErr || c.State == Failed }
 
 // Done reports whether a response has arrived.
 func (c CallView) Done() bool { return c.State != Pending }
