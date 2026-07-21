@@ -722,7 +722,11 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			switch e.TaskCall.TaskStatus {
 			case "input_required":
 				c.status = "input_required"
-			case "failed", "cancelled":
+			case "cancelled":
+				// Terminal without a result, but stopped on purpose rather than broken,
+				// so it should not read as a generic error in the row.
+				c.status = "cancelled"
+			case "failed":
 				c.status = "err"
 				if e.TaskCall.Err != nil {
 					link += " · " + e.TaskCall.Err.Message
