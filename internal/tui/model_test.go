@@ -68,6 +68,23 @@ func TestTaskLifecycleFramesCanBeFilteredAndShowTheirParent(t *testing.T) {
 	}
 }
 
+func TestMRTRRequestStateFindingHasDedicatedMarker(t *testing.T) {
+	m := Model{}
+	e := store.EventView{
+		Kind:           store.EventRequest,
+		Warning:        "MRTR retry changed requestState",
+		MRTRRoot:       "1",
+		MRTRStateIssue: store.MRTRStateChanged,
+	}
+	cells := m.streamCells(e)
+	if cells.status != "state!" {
+		t.Fatalf("requestState finding status = %q, want state!", cells.status)
+	}
+	if !strings.Contains(cells.detail, "changed") || !strings.Contains(cells.detail, "continues id 1") {
+		t.Fatalf("requestState finding detail did not include its category and MRTR link: %q", cells.detail)
+	}
+}
+
 func TestStatusFilterSeparatesCancelledFromError(t *testing.T) {
 	m := Model{}
 
