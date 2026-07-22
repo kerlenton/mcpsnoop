@@ -791,10 +791,13 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 
 		sess.advertisedSet[tool.Name] = struct{}{}
 		sess.advertisedTools = append(sess.advertisedTools, tool.Name)
+		schema := append(json.RawMessage(nil), tool.InputSchema...)
+
 		sess.toolDefinitions[tool.Name] = ToolDefinition{
 			Name:        tool.Name,
 			Description: tool.Description,
-			InputSchema: append(json.RawMessage(nil), tool.InputSchema...),
+			InputSchema: schema,
+			Findings:    analyzeSchema(schema),
 		}
 	}
 	sess.toolListComplete = r.NextCursor == ""
