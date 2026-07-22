@@ -124,6 +124,8 @@ func checkSignalFailureReason(sessionID string, signal checkSignal, count int) s
 		singular, plural = "pending call", "pending calls"
 	case checkDrift:
 		singular, plural = "tool definition change", "tool definition changes"
+	case checkDeprecated:
+		singular, plural = "deprecated protocol feature", "deprecated protocol features"
 	default:
 		singular, plural = "signal", "signals"
 	}

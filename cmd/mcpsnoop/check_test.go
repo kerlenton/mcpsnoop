@@ -91,8 +91,8 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
 		t.Fatalf("exit = %d, want 1", code)
 	}
 	const want = `<?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="mcpsnoop check" tests="7" failures="3" errors="0" skipped="0" time="0">
-  <testsuite name="s1" tests="7" failures="3" errors="0" skipped="0" time="0">
+<testsuites name="mcpsnoop check" tests="8" failures="3" errors="0" skipped="0" time="0">
+  <testsuite name="s1" tests="8" failures="3" errors="0" skipped="0" time="0">
     <testcase classname="mcpsnoop.check" name="s1/error" time="0">
       <failure message="session s1 has 2 errors" type="mcpsnoop.check.error">session s1 has 2 errors</failure>
     </testcase>
@@ -105,6 +105,7 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
     <testcase classname="mcpsnoop.check" name="s1/mismatch" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/pending" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/drift" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/deprecated" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/assertions" time="0"></testcase>
   </testsuite>
 </testsuites>
@@ -125,7 +126,7 @@ func TestCheckJUnitHonorsFailOn(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 because errors are not selected", code)
 	}
-	for _, want := range []string{`tests="7"`, `failures="0"`, `name="s1/error"`} {
+	for _, want := range []string{`tests="8"`, `failures="0"`, `name="s1/error"`} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q\n%s", want, stdout)
 		}
@@ -479,6 +480,34 @@ func TestCheckPassesForDeprecatedFeature(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "warnings=0") || !strings.Contains(stdout, "check passed") {
 		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
+func TestCheckFailsForSelectedDeprecatedFeature(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	deprecated := checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"roots/list"}`)
+
+	code, stdout, stderr := executeCheck(t, []string{"--fail-on", "deprecated", "-"}, encodeCheckLog(t, deprecated))
+	if code != 1 || stderr != "" {
+		t.Fatalf("deprecated gate = code %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "check failed: deprecated") {
+		t.Fatalf("stdout = %q, want deprecated failure", stdout)
+	}
+}
+
+func TestCheckJUnitReportsSelectedDeprecatedFeature(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	deprecated := checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"roots/list"}`)
+
+	code, stdout, stderr := executeCheck(t, []string{"--format", "junit", "--fail-on", "deprecated", "-"}, encodeCheckLog(t, deprecated))
+	if code != 1 || stderr != "" {
+		t.Fatalf("deprecated junit gate = code %d, stderr %q", code, stderr)
+	}
+	for _, want := range []string{`name="s1/deprecated"`, `type="mcpsnoop.check.deprecated"`, `1 deprecated protocol feature`} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("junit stdout missing %q\n%s", want, stdout)
+		}
 	}
 }
 
