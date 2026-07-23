@@ -168,13 +168,27 @@ func (a checkAssertions) eval(st *store.Store, sessionID string) []string {
 
 	var failures []string
 	if a.maxDuration > 0 {
+		var overBudget []store.CallView
 		for _, c := range calls {
 			// Only a call that actually got a response has a real latency. Pending and
 			// superseded calls never did, so they are not judged here.
 			if c.IsTool && c.Done() && c.State != store.Superseded && c.Duration() > a.maxDuration {
-				failures = append(failures, fmt.Sprintf("tool %q took %s, over the %s budget",
-					c.ToolName, c.Duration().Round(time.Millisecond), a.maxDuration))
+				overBudget = append(overBudget, c)
 			}
+		}
+		if len(overBudget) > 0 {
+			worst := overBudget[0]
+			for _, c := range overBudget[1:] {
+				if c.Duration() > worst.Duration() {
+					worst = c
+				}
+			}
+			callWord := "calls"
+			if len(overBudget) == 1 {
+				callWord = "call"
+			}
+			failures = append(failures, fmt.Sprintf("%d tool %s exceeded the %s budget (worst: tool %q took %s)",
+				len(overBudget), callWord, a.maxDuration, worst.ToolName, worst.Duration().Round(time.Millisecond)))
 		}
 	}
 	for _, name := range a.expectTools {
