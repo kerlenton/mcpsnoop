@@ -1318,6 +1318,12 @@ func (m Model) summaryContent() string {
 		}
 	}
 
+	// TABLE: every advertised tool plus any called one, so the full tool set is
+	// visible from the start and its counts fill in as calls arrive. Uncalled
+	// tools are faint 0-call rows; problems sort to the top (errors first, then by
+	// the shown median latency descending), so idle tools sink to the bottom. The
+	// ERR column carries the only verdict color, plus the cyan pending spinner,
+	// and SCHEMA carries warn.
 	tools := slices.Clone(summary.Tools)
 	for _, name := range unused {
 		tools = append(tools, store.ToolStats{Name: name})
@@ -1351,17 +1357,23 @@ func (m Model) summaryContent() string {
 		if tool.Errors > 0 {
 			errCell = m.styles.respErr.Render(fmt.Sprintf("%d", tool.Errors))
 		}
+		// LATENCY is the median (p50), a plain number the reader judges for
+		// themselves. A tool whose calls are all still in flight shows a live cyan
+		// spinner rather than a dash.
 		lat := base.Render(formatLatency(tool.P50))
 		if tool.Pending > 0 && tool.Pending == tool.Calls {
 			lat = m.styles.pending.Render(m.spinnerFrame())
 		}
-		// SCHEMA names the first (highest-priority) construct a tool's advertised
-		// schema uses that is known to travel badly across clients, plus a "+" when
-		// there is more than one. Purely observational, so it carries the warn
-		// color, never the ERR column's red.
-		schemaCell := m.styles.faint.Render(cellL("·", sumSchemaW))
+		// SCHEMA names the most notable construct a tool's advertised schema uses
+		// that is known to travel badly across clients, plus a "+" when there is
+		// more than one kind. Purely observational, so it carries the warn color,
+		// never the ERR column's red.
+		// An empty cell is left blank rather than dotted. The ERR column already
+		// uses · to mean zero, and repeating it here both adds noise on the common
+		// case of a clean schema and makes a row match a search for either column.
+		schemaCell := cellL("", sumSchemaW)
 		if findings := findingsByName[tool.Name]; len(findings) > 0 {
-			label := schemaKindLabel(findings[0].Kind)
+			label := schemaKindLabel(headlineFinding(findings))
 			if len(findings) > 1 {
 				label += "+"
 			}
@@ -1375,12 +1387,45 @@ func (m Model) summaryContent() string {
 	}
 	sections = append(sections, t.String())
 
+	// DRIFT: tools the client called that the server never advertised in
+	// tools/list. They appear in the table too, but a red line flags them as a
+	// contract mismatch worth noticing.
 	if len(undeclared) > 0 {
 		indent := strings.Repeat(" ", covLabelW)
 		sections = append(sections, m.styles.dim.Render(cellL("undeclared", covLabelW))+m.styles.respErr.Render(wrapWords(undeclared, indent, w)))
 	}
 
 	return header + "\n\n" + strings.Join(sections, "\n\n")
+}
+
+// schemaHeadlineOrder ranks findings for the single-label SCHEMA column. An
+// external reference leads because it points outside the wire entirely, which is
+// both the least portable case and the one the spec warns implementers about.
+// The composition keywords follow, then an internal reference, then an untyped
+// property, which is the weakest signal since a description often carries the
+// meaning a type would.
+var schemaHeadlineOrder = []store.SchemaFindingKind{
+	store.FindingExternalRef,
+	store.FindingOneOf,
+	store.FindingAnyOf,
+	store.FindingAllOf,
+	store.FindingNot,
+	store.FindingRef,
+	store.FindingUntypedProperty,
+}
+
+// headlineFinding picks which finding the column names. The store returns them
+// in the order the walk met them, which is an artifact of schema layout rather
+// than of how much each one matters, so the choice is made here.
+func headlineFinding(findings []store.SchemaFinding) store.SchemaFindingKind {
+	for _, want := range schemaHeadlineOrder {
+		for _, f := range findings {
+			if f.Kind == want {
+				return want
+			}
+		}
+	}
+	return findings[0].Kind
 }
 
 // schemaKindLabel is the short display text for a schema finding kind in the
