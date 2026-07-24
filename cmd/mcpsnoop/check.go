@@ -15,15 +15,16 @@ import (
 type checkSignal string
 
 const (
-	checkError    checkSignal = "error"
-	checkInvalid  checkSignal = "invalid"
-	checkWarn     checkSignal = "warn"
-	checkMismatch checkSignal = "mismatch"
-	checkPending  checkSignal = "pending"
-	checkDrift    checkSignal = "drift"
+	checkError      checkSignal = "error"
+	checkInvalid    checkSignal = "invalid"
+	checkWarn       checkSignal = "warn"
+	checkMismatch   checkSignal = "mismatch"
+	checkPending    checkSignal = "pending"
+	checkDrift      checkSignal = "drift"
+	checkDeprecated checkSignal = "deprecated"
 )
 
-var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift}
+var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated}
 
 type checkOutputFormat string
 
@@ -39,6 +40,7 @@ type checkSummary struct {
 	warnings        int
 	mismatches      int
 	pending         int
+	deprecated      int
 	drift           store.ToolDrift
 	baselineCreated bool
 }
@@ -98,8 +100,8 @@ func newCheckCmd() *cobra.Command {
 				}
 			} else {
 				for i, summary := range summaries {
-					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d\n",
-						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending)
+					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d deprecated=%d\n",
+						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.deprecated)
 					if summary.baselineCreated {
 						// No baseline existed, so this run trusted the current definitions
 						// rather than verifying them. Say so, or an ephemeral CI reads green
@@ -133,7 +135,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().SortFlags = false
-	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, drift")
+	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, drift, deprecated")
 	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text or junit")
 	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
 	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this duration (e.g. 500ms), disabled when zero")
@@ -168,27 +170,32 @@ func (a checkAssertions) eval(st *store.Store, sessionID string) []string {
 
 	var failures []string
 	if a.maxDuration > 0 {
-		var overBudget []store.CallView
+		exceeded := 0
+		var worstDuration time.Duration
+		var worstTool string
 		for _, c := range calls {
 			// Only a call that actually got a response has a real latency. Pending and
 			// superseded calls never did, so they are not judged here.
-			if c.IsTool && c.Done() && c.State != store.Superseded && c.Duration() > a.maxDuration {
-				overBudget = append(overBudget, c)
+			if !c.IsTool || !c.Done() || c.State == store.Superseded {
+				continue
+			}
+			duration := c.Duration()
+			if duration <= a.maxDuration {
+				continue
+			}
+			exceeded++
+			if duration > worstDuration {
+				worstDuration = duration
+				worstTool = c.ToolName
 			}
 		}
-		if len(overBudget) > 0 {
-			worst := overBudget[0]
-			for _, c := range overBudget[1:] {
-				if c.Duration() > worst.Duration() {
-					worst = c
-				}
-			}
+		if exceeded > 0 {
 			callWord := "calls"
-			if len(overBudget) == 1 {
+			if exceeded == 1 {
 				callWord = "call"
 			}
 			failures = append(failures, fmt.Sprintf("%d tool %s exceeded the %s budget (worst: tool %q took %s)",
-				len(overBudget), callWord, a.maxDuration, worst.ToolName, worst.Duration().Round(time.Millisecond)))
+				exceeded, callWord, a.maxDuration, worstTool, worstDuration.Round(time.Millisecond)))
 		}
 	}
 	for _, name := range a.expectTools {
@@ -209,10 +216,10 @@ func parseCheckSignals(value string) (map[checkSignal]bool, error) {
 	for _, part := range strings.Split(value, ",") {
 		signal := checkSignal(strings.TrimSpace(part))
 		switch signal {
-		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift:
+		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated:
 			signals[signal] = true
 		default:
-			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, or drift, got %q", part)
+			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, drift, or deprecated, got %q", part)
 		}
 	}
 	return signals, nil
@@ -269,6 +276,9 @@ func summarizeCheck(st *store.Store, baselines *toolbaseline.Manager) []checkSum
 			if event.RoutingMismatch {
 				summary.mismatches++
 			}
+			if event.Deprecated != "" {
+				summary.deprecated++
+			}
 		}
 		summaries = append(summaries, summary)
 	}
@@ -304,6 +314,8 @@ func (s checkSummary) count(signal checkSignal) int {
 			n++
 		}
 		return n
+	case checkDeprecated:
+		return s.deprecated
 	default:
 		return 0
 	}
