@@ -22,7 +22,7 @@ func TestCheckFailsOnSelectedSessionSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1\ncheck failed: error,invalid,warn\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 deprecated=0\ncheck failed: error,invalid,warn\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -38,7 +38,7 @@ func TestCheckFailsOnlyOnSelectedSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 because the fixture contains an invalid frame", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1\ncheck failed: invalid\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 deprecated=0\ncheck failed: invalid\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -53,7 +53,7 @@ func TestCheckIgnoresUnselectedSignals(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=2 invalid=0 warnings=0 mismatches=0 pending=0\ncheck passed\n" {
+	if stdout != "session s1: errors=2 invalid=0 warnings=0 mismatches=0 pending=0 deprecated=0\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -72,7 +72,7 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0\nrecorded first-seen tool baseline (trusted, not verified)\ncheck passed\n" {
+	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0 deprecated=0\nrecorded first-seen tool baseline (trusted, not verified)\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -519,6 +519,33 @@ func TestCheckFailsForSelectedDeprecatedFeature(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "check failed: deprecated") {
 		t.Fatalf("stdout = %q, want deprecated failure", stdout)
+	}
+}
+
+// The text output has to say how many deprecated calls there were, not just that
+// there were some. The JUnit path already reports a count, and for a signal whose
+// whole purpose is tracking a migration, "how many are left" is the question.
+func TestCheckTextOutputReportsDeprecatedCount(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"roots/list"}`),
+		checkEnvelope(2, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"sampling/createMessage"}`),
+		checkEnvelope(3, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"logging/setLevel"}`),
+	)
+
+	// The count is reported whether or not the signal is selected, the same way
+	// errors and warnings are always counted and only gate when chosen.
+	_, stdout, _ := executeCheck(t, []string{"-"}, log)
+	if !strings.Contains(stdout, "deprecated=3") {
+		t.Fatalf("a default run should still report the count, got %q", stdout)
+	}
+
+	code, stdout, _ := executeCheck(t, []string{"--fail-on", "deprecated", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 when the signal is selected", code)
+	}
+	if !strings.Contains(stdout, "deprecated=3") {
+		t.Fatalf("stdout = %q, want the count alongside the failure", stdout)
 	}
 }
 
