@@ -306,17 +306,20 @@ regression too. Improvements (added tools, fixed calls, speedups) still exit zer
 ## Checking sessions in CI
 
 Gate a recorded agent run on errors, stream corruption, protocol warnings,
-routing-header mismatches, or calls that never got a response.
+routing-header mismatches, calls that never got a response, tool-definition
+drift, or use of deprecated protocol features.
 
 ```bash
-mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,drift,deprecated] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
-to gate on calls that never got a response, or `mismatch` to gate specifically on
-a routing header (Mcp-Method or Mcp-Name) disagreeing with the body. Pass a
-comma-separated subset to select only the conditions relevant to a job. Omit the
-session to check the newest capture, or use `-` to read JSONL from stdin.
+to gate on calls that never got a response, `mismatch` to gate specifically on a
+routing header (Mcp-Method or Mcp-Name) disagreeing with the body, `drift` to gate
+on tool definitions changing after approval, or `deprecated` to gate on features
+the spec has deprecated. Pass a comma-separated subset to select only the
+conditions relevant to a job. Omit the session to check the newest capture, or use
+`-` to read JSONL from stdin.
 Use `--format junit` to write one JUnit `<testcase>` per signal and session;
 failures follow the same `--fail-on` selection as the text output.
 
@@ -381,6 +384,26 @@ mcpsnoop check --fail-on drift --baseline .mcpsnoop/baselines session.jsonl
 ```
 
 `drift` is opt-in for `check`; the default `error,invalid,warn` gate is unchanged.
+
+### Flag deprecated protocol features
+
+The 2026-07-28 revision deprecates Roots, Sampling, and Logging. They keep working
+for at least a year, so mcpsnoop marks them rather than treating them as errors.
+The stream, the capability inspector, and the export all flag them, and each marker
+names the replacement.
+
+Two of the three are now reachable only through a multi round-trip request, where
+the method name sits inside the server's `inputRequests` map rather than on the
+frame itself. Those are flagged too, so a server that moved to the new pattern
+does not silently stop reporting.
+
+```bash
+mcpsnoop check --fail-on deprecated session.jsonl
+```
+
+Like `drift`, `deprecated` is opt-in. A default run reports the count and stays
+green, so a session using a still-legal deprecated feature never turns CI red on
+its own.
 
 ## Watching from another machine
 

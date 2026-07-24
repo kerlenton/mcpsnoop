@@ -100,8 +100,8 @@ func newCheckCmd() *cobra.Command {
 				}
 			} else {
 				for i, summary := range summaries {
-					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d\n",
-						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending)
+					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d deprecated=%d\n",
+						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.deprecated)
 					if summary.baselineCreated {
 						// No baseline existed, so this run trusted the current definitions
 						// rather than verifying them. Say so, or an ephemeral CI reads green
