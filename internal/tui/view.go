@@ -749,6 +749,9 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = link + " · " + c.detail
 		}
 	}
+	if e.MRTRStateIssue != "" {
+		c.status = "state!"
+	}
 	return c
 }
 

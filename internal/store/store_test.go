@@ -1226,6 +1226,111 @@ func TestMRTRRetryContinuesTheSameOperation(t *testing.T) {
 	}
 }
 
+func TestMRTRFlagsRequestStateIntegrityViolations(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	const issued = "server-opaque-state-never-render"
+	const changed = "client-altered-state-never-render"
+
+	tests := []struct {
+		name         string
+		resultState  string
+		retryState   string
+		wantCategory string
+	}{
+		{
+			name:         "changed",
+			resultState:  `,"requestState":"` + issued + `"`,
+			retryState:   `,"requestState":"` + changed + `"`,
+			wantCategory: "changed",
+		},
+		{
+			name:         "missing",
+			resultState:  `,"requestState":"` + issued + `"`,
+			wantCategory: "missing",
+		},
+		{
+			name:         "invented",
+			retryState:   `,"requestState":"` + changed + `"`,
+			wantCategory: "invented",
+		},
+		{
+			name:        "correct",
+			resultState: `,"requestState":"` + issued + `"`,
+			retryState:  `,"requestState":"` + issued + `"`,
+		},
+		{
+			name:        "present empty correct",
+			resultState: `,"requestState":""`,
+			retryState:  `,"requestState":""`,
+		},
+		{
+			name:         "present empty missing",
+			resultState:  `,"requestState":""`,
+			wantCategory: "missing",
+		},
+		{
+			name:         "present empty invented",
+			retryState:   `,"requestState":""`,
+			wantCategory: "invented",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New()
+			s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+			s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+				`"result":{"resultType":"input_required","inputRequests":{"login":{"method":"elicitation/create"}}`+tc.resultState+`}`))
+			ev := s.Ingest(req(3, t0.Add(2*time.Second), proxy.ClientToServer, "2", "tools/call",
+				`{"name":"book","inputResponses":{"login":{"action":"accept"}}`+tc.retryState+`}`))
+
+			if ev.MRTRRoot != "1" {
+				t.Fatal("retry with unique MRTR evidence was not linked to its root")
+			}
+			if ev.MRTRStateIssue != MRTRStateIssue(tc.wantCategory) {
+				t.Fatalf("requestState issue = %q, want %q", ev.MRTRStateIssue, tc.wantCategory)
+			}
+			if tc.wantCategory == "" {
+				if strings.Contains(ev.Warning, "requestState") {
+					t.Fatal("a correct requestState echo produced a finding")
+				}
+			} else if !strings.Contains(ev.Warning, "requestState") ||
+				!strings.Contains(ev.Warning, tc.wantCategory) {
+				t.Fatalf("requestState finding did not identify the %s category", tc.wantCategory)
+			}
+			if strings.Contains(ev.Warning, issued) || strings.Contains(ev.Warning, changed) {
+				t.Fatal("requestState finding disclosed an opaque value")
+			}
+			if n := len(s.Calls("s1")); n != 1 {
+				t.Fatalf("linked retry created %d calls, want one logical operation", n)
+			}
+			done := s.Ingest(resp(4, t0.Add(3*time.Second), proxy.ServerToClient, "2", `"result":{"content":[]}`))
+			if done.Call == nil || done.Call.State != Completed || s.Sessions()[0].Pending != 0 {
+				t.Fatal("requestState finding disturbed terminal MRTR completion")
+			}
+		})
+	}
+}
+
+func TestMRTRDoesNotGuessARequestStateViolationBetweenAmbiguousCalls(t *testing.T) {
+	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	for i, id := range []string{"1", "2"} {
+		s.Ingest(req(uint64(2*i+1), t0, proxy.ClientToServer, id, "tools/call", `{"name":"book"}`))
+		s.Ingest(resp(uint64(2*i+2), t0.Add(time.Second), proxy.ServerToClient, id,
+			fmt.Sprintf(`"result":{"resultType":"input_required","inputRequests":{"login":{"method":"elicitation/create"}},"requestState":"issued-%s"}`, id)))
+	}
+
+	ev := s.Ingest(req(5, t0.Add(2*time.Second), proxy.ClientToServer, "3", "tools/call",
+		`{"name":"book","inputResponses":{"login":{"action":"accept"}},"requestState":"unknown"}`))
+	if ev.MRTRRoot != "" || ev.MRTRStateIssue != "" || strings.Contains(ev.Warning, "requestState") {
+		t.Fatal("ambiguous structural evidence must stay unlinked and unclassified")
+	}
+	if n := len(s.Calls("s1")); n != 3 {
+		t.Fatalf("ambiguous retry produced %d calls, want three unlinked calls", n)
+	}
+}
+
 // A chain can run to any length, and every retry links back to the same root.
 func TestMRTRHandlesAChainLongerThanTwo(t *testing.T) {
 	t0 := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
@@ -1421,5 +1526,42 @@ func TestNestedDeprecationLeavesMRTRCorrelationIntact(t *testing.T) {
 		`{"name":"book","requestState":"st"}`))
 	if ev.MRTRRoot != "1" {
 		t.Fatalf("the retry should still link to its root, got %q", ev.MRTRRoot)
+	}
+}
+
+// A server may answer with requestState and no inputRequests, and then a
+// tampered retry has nothing left to link it by: the state matches nothing and
+// there are no answered keys to fall back on. It reads as an unrelated call
+// rather than a violation. This pins that limit so widening the fallback later
+// is a deliberate choice rather than an accident.
+func TestMRTRCannotSeeTamperingOnAStateOnlyExchange(t *testing.T) {
+	t0 := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+	s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","requestState":"st-1"}`))
+
+	// The correct echo still links, so the limit is only about tampering.
+	ok := s.Ingest(req(3, t0.Add(2*time.Second), proxy.ClientToServer, "2", "tools/call",
+		`{"name":"book","requestState":"st-1"}`))
+	if ok.MRTRRoot != "1" || ok.MRTRStateIssue != "" {
+		t.Fatalf("a correct echo must still link cleanly, got root=%q issue=%q", ok.MRTRRoot, ok.MRTRStateIssue)
+	}
+
+	s2 := New()
+	s2.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+	s2.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","requestState":"st-1"}`))
+	tampered := s2.Ingest(req(3, t0.Add(2*time.Second), proxy.ClientToServer, "2", "tools/call",
+		`{"name":"book","requestState":"tampered"}`))
+
+	if tampered.MRTRRoot != "" {
+		t.Fatalf("with nothing to link by, the retry must not be attached, got root=%q", tampered.MRTRRoot)
+	}
+	if tampered.MRTRStateIssue != "" {
+		t.Fatalf("an unlinked retry cannot be classified, got %q", tampered.MRTRStateIssue)
+	}
+	if n := len(s2.Calls("s1")); n != 2 {
+		t.Fatalf("it reads as two independent calls, got %d", n)
 	}
 }

@@ -47,6 +47,28 @@ func (s CallState) String() string {
 	}
 }
 
+// MRTRStateIssue classifies how a retry violated the requestState echo contract.
+type MRTRStateIssue string
+
+const (
+	MRTRStateChanged  MRTRStateIssue = "changed"
+	MRTRStateMissing  MRTRStateIssue = "missing"
+	MRTRStateInvented MRTRStateIssue = "invented"
+)
+
+func (i MRTRStateIssue) warning() string {
+	switch i {
+	case MRTRStateChanged:
+		return "MRTR retry changed requestState"
+	case MRTRStateMissing:
+		return "MRTR retry is missing requestState"
+	case MRTRStateInvented:
+		return "MRTR retry invented requestState"
+	default:
+		return ""
+	}
+}
+
 // EventKind classifies a single timeline entry.
 type EventKind int
 
@@ -100,11 +122,12 @@ type call struct {
 	// opName is the tool, prompt or resource this call names, kept so a retry can
 	// be matched back to it without re-parsing the original params.
 	opName string
-	// mrtrState and mrtrKeys park what an InputRequiredResult asked for. The spec
-	// requires the retry to carry a different JSON-RPC id, so there is no shared
-	// identifier and the link has to be inferred from these instead.
-	mrtrState string
-	mrtrKeys  string
+	// mrtrState, its presence bit, and mrtrKeys park what an InputRequiredResult
+	// asked for. The retry uses a different JSON-RPC id, so these are also the
+	// evidence used to infer the link.
+	mrtrState    string
+	mrtrHasState bool
+	mrtrKeys     string
 }
 
 // event is the mutable internal timeline entry.
@@ -131,6 +154,9 @@ type event struct {
 	// mrtrRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised. Empty on an ordinary request.
 	mrtrRoot string
+	// mrtrStateIssue is set only when a linked retry changed the opaque state,
+	// omitted an issued state, or supplied one the server never issued.
+	mrtrStateIssue MRTRStateIssue
 }
 
 // capabilities holds what each side declared, whether through the legacy
@@ -300,18 +326,28 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.id = string(msg.ID)
 		ev.warning = validationWarning(msg)
 		var reused bool
-		if root := sess.matchRetry(msg); root != nil {
+		if root, stateIssue := sess.matchRetry(msg); root != nil {
 			// A continuation, not a new call. Mapping the retry id onto the same
 			// call object lets completeCall find it, so the operation keeps one
 			// pending slot and one duration however many round trips it takes.
 			sess.calls[callKey{dir: e.Direction, id: ev.id}] = root
 			root.mrtrState, root.mrtrKeys = "", ""
+			root.mrtrHasState = false
 			sess.unpark(root)
 			ev.call = root
 			ev.kind = EventRequest
 			ev.method = msg.Method
 			ev.mrtrRoot = root.id
 			ev.warning = validationWarning(msg)
+			ev.mrtrStateIssue = stateIssue
+			if warning := stateIssue.warning(); warning != "" {
+				// The spec makes the echo a MUST for the client, so a violation is a
+				// protocol error on the wire rather than an observation of ours. It
+				// therefore rides the warning field like any other protocol warning,
+				// which means a default check run fails on it. That is deliberate: a
+				// client mangling server state is worth stopping a build for.
+				ev.warning = appendWarning(ev.warning, warning)
+			}
 			sess.requests++ // a request on the wire, even though not a new call
 			break
 		}
@@ -494,6 +530,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 		// including the time the user spends answering.
 		c.result = msg.Result
 		c.mrtrState = state.requestState
+		c.mrtrHasState = state.hasRequestState
 		c.mrtrKeys = state.keys
 		sess.park(c)
 		return c, true
@@ -838,8 +875,9 @@ func isToolError(result json.RawMessage) bool {
 // flagged, keeping the mismatch signal safe for a CI gate.
 // inputRequired is the parked half of a multi round-trip exchange (SEP-2322).
 type inputRequired struct {
-	requestState string
-	keys         string
+	requestState    string
+	hasRequestState bool
+	keys            string
 	// methods names the server-to-client requests carried inside inputRequests.
 	// The 2026-07-28 revision routes sampling and roots exclusively through this
 	// map, so it is the only place their method names still appear.
@@ -856,7 +894,7 @@ func parseInputRequired(raw json.RawMessage) (inputRequired, bool) {
 	}
 	var r struct {
 		ResultType    string                     `json:"resultType"`
-		RequestState  string                     `json:"requestState"`
+		RequestState  *string                    `json:"requestState"`
 		InputRequests map[string]json.RawMessage `json:"inputRequests"`
 	}
 	if json.Unmarshal(raw, &r) != nil || r.ResultType != "input_required" {
@@ -872,27 +910,34 @@ func parseInputRequired(raw json.RawMessage) (inputRequired, bool) {
 		}
 	}
 	slices.Sort(methods) // stable order, the map iteration order is not
-	return inputRequired{
-		requestState: r.RequestState,
-		keys:         sortedKeySet(r.InputRequests),
-		methods:      methods,
-	}, true
+	state := inputRequired{
+		hasRequestState: r.RequestState != nil,
+		keys:            sortedKeySet(r.InputRequests),
+		methods:         methods,
+	}
+	if r.RequestState != nil {
+		state.requestState = *r.RequestState
+	}
+	return state, true
 }
 
 // retrySignals reads the two things a retry carries that can tie it back to the
 // request it continues.
-func retrySignals(params json.RawMessage) (state, keys string) {
+func retrySignals(params json.RawMessage) (state string, hasState bool, keys string) {
 	if len(params) == 0 {
-		return "", ""
+		return "", false, ""
 	}
 	var p struct {
-		RequestState   string                     `json:"requestState"`
+		RequestState   *string                    `json:"requestState"`
 		InputResponses map[string]json.RawMessage `json:"inputResponses"`
 	}
 	if json.Unmarshal(params, &p) != nil {
-		return "", ""
+		return "", false, ""
 	}
-	return p.RequestState, sortedKeySet(p.InputResponses)
+	if p.RequestState != nil {
+		state, hasState = *p.RequestState, true
+	}
+	return state, hasState, sortedKeySet(p.InputResponses)
 }
 
 // sortedKeySet renders a key set so two of them can be compared as strings.
@@ -929,38 +974,61 @@ func (sess *session) unpark(c *call) {
 // matchRetry finds the operation a request continues, or nil when it is a new
 // one. Because the spec requires the retry to use a different id, the link is
 // inferred. An echoed requestState is opaque and server-minted, so an exact
-// match is conclusive on its own. When the server issued none, the fallback
-// needs the method, the operation name and the full set of answered keys to
-// agree, and gives up when more than one parked operation fits, since a wrong
-// link is worse than no link.
-func (sess *session) matchRetry(msg proxy.RPCMessage) *call {
-	state, keys := retrySignals(msg.Params)
-	if state == "" && keys == "" {
-		return nil
+// match is conclusive on its own. Otherwise the fallback needs the method, the
+// operation name and the full set of answered keys to agree, and gives up when
+// more than one parked operation fits, since a wrong link is worse than no link.
+func (sess *session) matchRetry(msg proxy.RPCMessage) (*call, MRTRStateIssue) {
+	state, hasState, keys := retrySignals(msg.Params)
+	if !hasState && keys == "" {
+		return nil, ""
 	}
+	if hasState {
+		for _, c := range sess.awaiting {
+			if c.state == Pending && c.mrtrHasState && c.mrtrState == state {
+				return c, ""
+			}
+		}
+	}
+
 	name := operationName(msg)
 	var fallback *call
 	matches := 0
 	for _, c := range sess.awaiting {
-		if c.state != Pending {
-			continue
-		}
-		if state != "" {
-			if c.mrtrState == state {
-				return c
-			}
-			continue
-		}
-		if c.mrtrState == "" && c.mrtrKeys != "" && c.mrtrKeys == keys &&
+		if c.state == Pending && c.mrtrKeys != "" && c.mrtrKeys == keys &&
 			c.method == msg.Method && c.opName == name {
 			fallback = c
 			matches++
 		}
 	}
 	if matches == 1 {
-		return fallback
+		return fallback, classifyMRTRState(fallback, state, hasState)
 	}
-	return nil
+	return nil, ""
+}
+
+// classifyMRTRState compares the state a retry carried with the one the server
+// issued. It only ever compares opaque bytes: the spec forbids the client from
+// inspecting the contents, and an observer has no more reason to than a client
+// does.
+//
+// One case is out of reach. A server may answer with requestState and no
+// inputRequests at all, and then a tampered retry echoes a state that matches
+// nothing and answers no keys, so there is nothing left to link it by and it
+// reads as an unrelated call rather than a violation. Linking on the method and
+// operation name alone would catch it, but would also fuse two genuinely
+// separate calls to the same tool, and a wrong link is worse than a missed one.
+// See TestMRTRCannotSeeTamperingOnAStateOnlyExchange.
+func classifyMRTRState(c *call, retryState string, retryHasState bool) MRTRStateIssue {
+	switch {
+	case c.mrtrHasState && !retryHasState:
+		return MRTRStateMissing
+	case !c.mrtrHasState && retryHasState:
+		return MRTRStateInvented
+	case c.mrtrHasState && retryHasState && c.mrtrState != retryState:
+		return MRTRStateChanged
+	default:
+		return ""
+	}
 }
 
 func operationName(msg proxy.RPCMessage) string {

@@ -87,6 +87,9 @@ type EventView struct {
 	// MRTRRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised (SEP-2322). Empty on an ordinary request.
 	MRTRRoot string
+	// MRTRStateIssue classifies a changed, missing, or invented requestState on
+	// this retry. It never contains the opaque state itself.
+	MRTRStateIssue MRTRStateIssue
 }
 
 // SessionHeader is a lightweight per-session summary for the left panel.
@@ -187,6 +190,7 @@ func (e *event) view(_ *session) EventView {
 		Deprecated:         e.deprecated,
 		TaskID:             e.taskID,
 		MRTRRoot:           e.mrtrRoot,
+		MRTRStateIssue:     e.mrtrStateIssue,
 	}
 	if e.call != nil {
 		cv := e.call.view()
