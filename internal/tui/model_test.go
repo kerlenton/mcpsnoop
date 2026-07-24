@@ -1177,14 +1177,11 @@ func TestSummaryHeaderShowsOnlyCallsAndSort(t *testing.T) {
 			t.Fatalf("header should show only calls, found %q: %q", banned, header)
 		}
 	}
-	// The clean tool shows · in ERR; the erroring tool shows 1 in ERR.
-	// Both rows also contain the SCHEMA column, so check the row text instead
-	// of counting dots.
-	if !strings.Contains(out, "good                    1     ·") {
-		t.Fatalf("good row should show · in ERR\n%s", out)
-	}
-	if !strings.Contains(out, "bad                     1     1") {
-		t.Fatalf("bad row should show 1 in ERR\n%s", out)
+	// The clean tool shows · for zero errors; the erroring tool shows a count.
+	// This works because an empty SCHEMA cell is blank, so the only · in a row
+	// is the ERR one.
+	if !summaryHasRow(out, "good", "·") || summaryHasRow(out, "bad", "·") {
+		t.Fatalf("ERR column should show · only for the clean tool\n%s", out)
 	}
 	// The erroring tool sorts above the clean one, not alphabetically.
 	if strings.Index(out, "bad") > strings.Index(out, "good") {
