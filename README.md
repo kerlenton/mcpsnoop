@@ -331,7 +331,7 @@ other and with `--fail-on`, and any failure exits non-zero.
 
 | Flag | Fails when |
 |---|---|
-| `--max-duration <dur>` | a completed tool call took longer than the budget, e.g. `--max-duration 500ms` |
+| `--max-duration <dur>` | one or more completed tool calls exceeded the budget; reports their count and the worst call |
 | `--expect-tool <name>` | the named tool was never called (repeatable) |
 | `--forbid-tool <name>` | the named tool was called (repeatable) |
 

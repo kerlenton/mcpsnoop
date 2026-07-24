@@ -399,13 +399,39 @@ func TestCheckMaxDurationAssertion(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 for a call over the budget", code)
 	}
-	if !strings.Contains(stdout, `assertion failed: tool "echo" took 1s, over the 500ms budget`) {
+	if !strings.Contains(stdout, `assertion failed: 1 tool call exceeded the 500ms budget; worst was "echo" at 1s`) {
 		t.Fatalf("stdout = %q", stdout)
 	}
 
 	code, stdout, _ = executeCheck(t, []string{"--max-duration", "2s", "-"}, log)
 	if code != 0 || !strings.Contains(stdout, "check passed") {
 		t.Fatalf("a call within budget should pass, code %d stdout %q", code, stdout)
+	}
+}
+
+func TestCheckMaxDurationSummarizesSlowCalls(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`),
+		checkEnvelope(3, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+		checkEnvelope(4, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}`),
+		checkEnvelope(9, proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`),
+		checkEnvelope(10, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lookup"}}`),
+		checkEnvelope(13, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`),
+		checkEnvelope(14, proxy.ClientToServer, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fast"}}`),
+		checkEnvelope(15, proxy.ServerToClient, `{"jsonrpc":"2.0","id":4,"result":{"content":[]}}`),
+		checkEnvelope(16, proxy.ClientToServer, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"pending"}}`),
+	)
+
+	code, stdout, _ := executeCheck(t, []string{"--max-duration", "1s", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 for calls over the budget", code)
+	}
+	if strings.Count(stdout, "assertion failed:") != 1 {
+		t.Fatalf("stdout should contain one bounded assertion failure, got %q", stdout)
+	}
+	if !strings.Contains(stdout, `assertion failed: 3 tool calls exceeded the 1s budget; worst was "search" at 5s`) {
+		t.Fatalf("stdout = %q", stdout)
 	}
 }
 
@@ -446,7 +472,7 @@ func TestCheckAssertionsCompose(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 when either assertion fails", code)
 	}
-	for _, want := range []string{`tool "echo" took`, `expected tool "search" was never called`} {
+	for _, want := range []string{`worst was "echo" at 1s`, `expected tool "search" was never called`} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q\n%s", want, stdout)
 		}

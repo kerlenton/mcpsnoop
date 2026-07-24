@@ -168,13 +168,32 @@ func (a checkAssertions) eval(st *store.Store, sessionID string) []string {
 
 	var failures []string
 	if a.maxDuration > 0 {
+		exceeded := 0
+		var worstDuration time.Duration
+		var worstTool string
 		for _, c := range calls {
 			// Only a call that actually got a response has a real latency. Pending and
 			// superseded calls never did, so they are not judged here.
-			if c.IsTool && c.Done() && c.State != store.Superseded && c.Duration() > a.maxDuration {
-				failures = append(failures, fmt.Sprintf("tool %q took %s, over the %s budget",
-					c.ToolName, c.Duration().Round(time.Millisecond), a.maxDuration))
+			if !c.IsTool || !c.Done() || c.State == store.Superseded {
+				continue
 			}
+			duration := c.Duration()
+			if duration <= a.maxDuration {
+				continue
+			}
+			exceeded++
+			if duration > worstDuration {
+				worstDuration = duration
+				worstTool = c.ToolName
+			}
+		}
+		if exceeded > 0 {
+			plural := ""
+			if exceeded > 1 {
+				plural = "s"
+			}
+			failures = append(failures, fmt.Sprintf("%d tool call%s exceeded the %s budget; worst was %q at %s",
+				exceeded, plural, a.maxDuration, worstTool, worstDuration.Round(time.Millisecond)))
 		}
 	}
 	for _, name := range a.expectTools {
