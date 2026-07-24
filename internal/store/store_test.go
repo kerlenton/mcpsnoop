@@ -1144,7 +1144,7 @@ func TestToolDefinitionsCaptureDescriptionsSchemasAndCompletePagination(t *testi
 	}
 
 	s.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/list", `{"cursor":"p2"}`))
-	s.Ingest(resp(4, t0, proxy.ServerToClient, "2", `"result":{"tools":[{"name":"fetch","description":"Fetch a page","inputSchema":{"type":"object"}}]}`))
+	s.Ingest(resp(4, t0, proxy.ServerToClient, "2", `"result":{"tools":[{"name":"fetch","description":"Fetch a page","inputSchema":{"oneOf":[{"type":"object"},{"type":"string"}]}}]}`))
 
 	definitions, ok := s.ToolDefinitions("s1")
 	if !ok {
@@ -1156,8 +1156,15 @@ func TestToolDefinitionsCaptureDescriptionsSchemasAndCompletePagination(t *testi
 	if definitions[0].Name != "search" || definitions[0].Description != "Search docs" || string(definitions[0].InputSchema) == "" {
 		t.Fatalf("search definition = %+v", definitions[0])
 	}
+	if len(definitions[0].Findings) != 0 {
+		t.Fatalf("search findings = %v, want none (flat typed schema)", definitions[0].Findings)
+	}
 	if definitions[1].Name != "fetch" || definitions[1].Description != "Fetch a page" {
 		t.Fatalf("fetch definition = %+v", definitions[1])
+	}
+	got := definitions[1].Findings
+	if len(got) != 1 || got[0].Kind != FindingOneOf {
+		t.Fatalf("fetch findings = %v, want one oneOf finding", got)
 	}
 }
 

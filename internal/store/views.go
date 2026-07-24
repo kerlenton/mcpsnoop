@@ -111,6 +111,7 @@ type ToolDefinition struct {
 	Name        string
 	Description string
 	InputSchema json.RawMessage
+	Findings    []SchemaFinding
 }
 
 // ToolDrift is the difference between the current complete tool list and the
