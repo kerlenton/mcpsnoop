@@ -190,12 +190,12 @@ func (a checkAssertions) eval(st *store.Store, sessionID string) []string {
 			}
 		}
 		if exceeded > 0 {
-			plural := ""
-			if exceeded > 1 {
-				plural = "s"
+			callWord := "calls"
+			if exceeded == 1 {
+				callWord = "call"
 			}
-			failures = append(failures, fmt.Sprintf("%d tool call%s exceeded the %s budget; worst was %q at %s",
-				exceeded, plural, a.maxDuration, worstTool, worstDuration.Round(time.Millisecond)))
+			failures = append(failures, fmt.Sprintf("%d tool %s exceeded the %s budget (worst: tool %q took %s)",
+				exceeded, callWord, a.maxDuration, worstTool, worstDuration.Round(time.Millisecond)))
 		}
 	}
 	for _, name := range a.expectTools {

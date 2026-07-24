@@ -400,7 +400,7 @@ func TestCheckMaxDurationAssertion(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 for a call over the budget", code)
 	}
-	if !strings.Contains(stdout, `assertion failed: 1 tool call exceeded the 500ms budget; worst was "echo" at 1s`) {
+	if !strings.Contains(stdout, `assertion failed: 1 tool call exceeded the 500ms budget (worst: tool "echo" took 1s)`) {
 		t.Fatalf("stdout = %q", stdout)
 	}
 
@@ -431,7 +431,7 @@ func TestCheckMaxDurationSummarizesSlowCalls(t *testing.T) {
 	if strings.Count(stdout, "assertion failed:") != 1 {
 		t.Fatalf("stdout should contain one bounded assertion failure, got %q", stdout)
 	}
-	if !strings.Contains(stdout, `assertion failed: 3 tool calls exceeded the 1s budget; worst was "search" at 5s`) {
+	if !strings.Contains(stdout, `assertion failed: 3 tool calls exceeded the 1s budget (worst: tool "search" took 5s)`) {
 		t.Fatalf("stdout = %q", stdout)
 	}
 }
@@ -473,7 +473,7 @@ func TestCheckAssertionsCompose(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 when either assertion fails", code)
 	}
-	for _, want := range []string{`worst was "echo" at 1s`, `expected tool "search" was never called`} {
+	for _, want := range []string{`worst: tool "echo" took 1s`, `expected tool "search" was never called`} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q\n%s", want, stdout)
 		}
