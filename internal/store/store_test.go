@@ -1521,3 +1521,40 @@ func TestNestedDeprecationLeavesMRTRCorrelationIntact(t *testing.T) {
 		t.Fatalf("the retry should still link to its root, got %q", ev.MRTRRoot)
 	}
 }
+
+// A server may answer with requestState and no inputRequests, and then a
+// tampered retry has nothing left to link it by: the state matches nothing and
+// there are no answered keys to fall back on. It reads as an unrelated call
+// rather than a violation. This pins that limit so widening the fallback later
+// is a deliberate choice rather than an accident.
+func TestMRTRCannotSeeTamperingOnAStateOnlyExchange(t *testing.T) {
+	t0 := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	s := New()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+	s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","requestState":"st-1"}`))
+
+	// The correct echo still links, so the limit is only about tampering.
+	ok := s.Ingest(req(3, t0.Add(2*time.Second), proxy.ClientToServer, "2", "tools/call",
+		`{"name":"book","requestState":"st-1"}`))
+	if ok.MRTRRoot != "1" || ok.MRTRStateIssue != "" {
+		t.Fatalf("a correct echo must still link cleanly, got root=%q issue=%q", ok.MRTRRoot, ok.MRTRStateIssue)
+	}
+
+	s2 := New()
+	s2.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"book"}`))
+	s2.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"input_required","requestState":"st-1"}`))
+	tampered := s2.Ingest(req(3, t0.Add(2*time.Second), proxy.ClientToServer, "2", "tools/call",
+		`{"name":"book","requestState":"tampered"}`))
+
+	if tampered.MRTRRoot != "" {
+		t.Fatalf("with nothing to link by, the retry must not be attached, got root=%q", tampered.MRTRRoot)
+	}
+	if tampered.MRTRStateIssue != "" {
+		t.Fatalf("an unlinked retry cannot be classified, got %q", tampered.MRTRStateIssue)
+	}
+	if n := len(s2.Calls("s1")); n != 2 {
+		t.Fatalf("it reads as two independent calls, got %d", n)
+	}
+}
