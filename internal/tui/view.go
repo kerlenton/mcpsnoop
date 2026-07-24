@@ -1269,6 +1269,7 @@ func (m Model) capsTitle(label, version string, w int) string {
 // stay aligned.
 const (
 	sumToolW    = 18
+	sumSchemaW  = 7
 	sumCallsW   = 7
 	sumErrW     = 6
 	sumLatW     = 10
@@ -1282,6 +1283,13 @@ func (m Model) summaryContent() string {
 	summary, _ := m.store.ToolSummary(sid)
 	_, unused, undeclared, hasTools := m.store.ToolUsage(sid)
 	drift, hasDrift := m.store.ToolDrift(sid)
+	findingsByName := map[string][]store.SchemaFinding{}
+
+	if definitions, ok := m.store.ToolDefinitions(sid); ok {
+		for _, d := range definitions {
+			findingsByName[d.Name] = d.Findings
+		}
+	}
 	w, _ := m.overlayDims()
 
 	calls := 0
@@ -1314,7 +1322,8 @@ func (m Model) summaryContent() string {
 	// visible from the start and its counts fill in as calls arrive. Uncalled
 	// tools are faint 0-call rows; problems sort to the top (errors first, then by
 	// the shown median latency descending), so idle tools sink to the bottom. The
-	// ERR column carries the only verdict color, plus the cyan pending spinner.
+	// ERR column carries the only verdict color, plus the cyan pending spinner,
+	// and SCHEMA carries warn.
 	tools := slices.Clone(summary.Tools)
 	for _, name := range unused {
 		tools = append(tools, store.ToolStats{Name: name})
@@ -1337,7 +1346,8 @@ func (m Model) summaryContent() string {
 	})
 	var t strings.Builder
 	t.WriteString(m.styles.dim.Render(cellL("TOOL", sumToolW) +
-		cellR("CALLS", sumCallsW) + cellR("ERR", sumErrW) + cellR("LATENCY", sumLatW)))
+		cellR("CALLS", sumCallsW) + cellR("ERR", sumErrW) + cellR("LATENCY", sumLatW) +
+		"  " + cellL("SCHEMA", sumSchemaW)))
 	for _, tool := range tools {
 		base := m.styles.neutral
 		if tool.Calls == 0 {
@@ -1354,10 +1364,26 @@ func (m Model) summaryContent() string {
 		if tool.Pending > 0 && tool.Pending == tool.Calls {
 			lat = m.styles.pending.Render(m.spinnerFrame())
 		}
+		// SCHEMA names the most notable construct a tool's advertised schema uses
+		// that is known to travel badly across clients, plus a "+" when there is
+		// more than one kind. Purely observational, so it carries the warn color,
+		// never the ERR column's red.
+		// An empty cell is left blank rather than dotted. The ERR column already
+		// uses · to mean zero, and repeating it here both adds noise on the common
+		// case of a clean schema and makes a row match a search for either column.
+		schemaCell := cellL("", sumSchemaW)
+		if findings := findingsByName[tool.Name]; len(findings) > 0 {
+			label := schemaKindLabel(headlineFinding(findings))
+			if len(findings) > 1 {
+				label += "+"
+			}
+			schemaCell = m.styles.warn.Render(cellL(label, sumSchemaW))
+		}
 		t.WriteString("\n" + base.Render(cellL(tool.Name, sumToolW)) +
 			cellR(base.Render(fmt.Sprintf("%d", tool.Calls)), sumCallsW) +
 			cellR(errCell, sumErrW) +
-			cellR(lat, sumLatW))
+			cellR(lat, sumLatW) +
+			"  " + schemaCell)
 	}
 	sections = append(sections, t.String())
 
@@ -1370,6 +1396,49 @@ func (m Model) summaryContent() string {
 	}
 
 	return header + "\n\n" + strings.Join(sections, "\n\n")
+}
+
+// schemaHeadlineOrder ranks findings for the single-label SCHEMA column. An
+// external reference leads because it points outside the wire entirely, which is
+// both the least portable case and the one the spec warns implementers about.
+// The composition keywords follow, then an internal reference, then an untyped
+// property, which is the weakest signal since a description often carries the
+// meaning a type would.
+var schemaHeadlineOrder = []store.SchemaFindingKind{
+	store.FindingExternalRef,
+	store.FindingOneOf,
+	store.FindingAnyOf,
+	store.FindingAllOf,
+	store.FindingNot,
+	store.FindingRef,
+	store.FindingUntypedProperty,
+}
+
+// headlineFinding picks which finding the column names. The store returns them
+// in the order the walk met them, which is an artifact of schema layout rather
+// than of how much each one matters, so the choice is made here.
+func headlineFinding(findings []store.SchemaFinding) store.SchemaFindingKind {
+	for _, want := range schemaHeadlineOrder {
+		for _, f := range findings {
+			if f.Kind == want {
+				return want
+			}
+		}
+	}
+	return findings[0].Kind
+}
+
+// schemaKindLabel is the short display text for a schema finding kind in the
+// narrow SCHEMA column. Display wording is a TUI concern, not the store's.
+func schemaKindLabel(k store.SchemaFindingKind) string {
+	switch k {
+	case store.FindingExternalRef:
+		return "ext ref"
+	case store.FindingUntypedProperty:
+		return "untyped"
+	default:
+		return string(k)
+	}
 }
 
 func (m Model) definitionDriftSection(drift store.ToolDrift, width int) string {

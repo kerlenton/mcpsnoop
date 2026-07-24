@@ -1178,6 +1178,8 @@ func TestSummaryHeaderShowsOnlyCallsAndSort(t *testing.T) {
 		}
 	}
 	// The clean tool shows · for zero errors; the erroring tool shows a count.
+	// This works because an empty SCHEMA cell is blank, so the only · in a row
+	// is the ERR one.
 	if !summaryHasRow(out, "good", "·") || summaryHasRow(out, "bad", "·") {
 		t.Fatalf("ERR column should show · only for the clean tool\n%s", out)
 	}
