@@ -22,7 +22,7 @@ func TestCheckFailsOnSelectedSessionSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1\ncheck failed: error,invalid,warn\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 deprecated=0\ncheck failed: error,invalid,warn\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -38,7 +38,7 @@ func TestCheckFailsOnlyOnSelectedSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 because the fixture contains an invalid frame", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1\ncheck failed: invalid\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 deprecated=0\ncheck failed: invalid\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -53,7 +53,7 @@ func TestCheckIgnoresUnselectedSignals(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=2 invalid=0 warnings=0 mismatches=0 pending=0\ncheck passed\n" {
+	if stdout != "session s1: errors=2 invalid=0 warnings=0 mismatches=0 pending=0 deprecated=0\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -72,7 +72,7 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0\nrecorded first-seen tool baseline (trusted, not verified)\ncheck passed\n" {
+	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0 deprecated=0\nrecorded first-seen tool baseline (trusted, not verified)\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -91,8 +91,8 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
 		t.Fatalf("exit = %d, want 1", code)
 	}
 	const want = `<?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="mcpsnoop check" tests="7" failures="3" errors="0" skipped="0" time="0">
-  <testsuite name="s1" tests="7" failures="3" errors="0" skipped="0" time="0">
+<testsuites name="mcpsnoop check" tests="8" failures="3" errors="0" skipped="0" time="0">
+  <testsuite name="s1" tests="8" failures="3" errors="0" skipped="0" time="0">
     <testcase classname="mcpsnoop.check" name="s1/error" time="0">
       <failure message="session s1 has 2 errors" type="mcpsnoop.check.error">session s1 has 2 errors</failure>
     </testcase>
@@ -105,6 +105,7 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
     <testcase classname="mcpsnoop.check" name="s1/mismatch" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/pending" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/drift" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/deprecated" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/assertions" time="0"></testcase>
   </testsuite>
 </testsuites>
@@ -125,7 +126,7 @@ func TestCheckJUnitHonorsFailOn(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 because errors are not selected", code)
 	}
-	for _, want := range []string{`tests="7"`, `failures="0"`, `name="s1/error"`} {
+	for _, want := range []string{`tests="8"`, `failures="0"`, `name="s1/error"`} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q\n%s", want, stdout)
 		}
@@ -409,28 +410,29 @@ func TestCheckMaxDurationAssertion(t *testing.T) {
 	}
 }
 
-func TestCheckMaxDurationAssertionCollapsesManySlowCalls(t *testing.T) {
+func TestCheckMaxDurationSummarizesSlowCalls(t *testing.T) {
 	t.Setenv("MCPSNOOP_HOME", t.TempDir())
-	// Three slow calls: echo 1s, search 2s, delete 3s — all over a 500ms budget.
 	log := encodeCheckLog(t,
 		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`),
-		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
-		checkEnvelope(3, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}`),
-		checkEnvelope(5, proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`),
-		checkEnvelope(6, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"delete"}}`),
-		checkEnvelope(9, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`),
+		checkEnvelope(3, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+		checkEnvelope(4, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}`),
+		checkEnvelope(9, proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`),
+		checkEnvelope(10, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lookup"}}`),
+		checkEnvelope(13, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`),
+		checkEnvelope(14, proxy.ClientToServer, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fast"}}`),
+		checkEnvelope(15, proxy.ServerToClient, `{"jsonrpc":"2.0","id":4,"result":{"content":[]}}`),
+		checkEnvelope(16, proxy.ClientToServer, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"pending"}}`),
 	)
 
-	code, stdout, _ := executeCheck(t, []string{"--max-duration", "500ms", "-"}, log)
+	code, stdout, _ := executeCheck(t, []string{"--max-duration", "1s", "-"}, log)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 for calls over the budget", code)
 	}
-	want := `assertion failed: 3 tool calls exceeded the 500ms budget (worst: tool "delete" took 3s)`
-	if !strings.Contains(stdout, want) {
-		t.Fatalf("stdout missing collapsed message\nwant substring: %q\ngot:\n%s", want, stdout)
-	}
 	if strings.Count(stdout, "assertion failed:") != 1 {
-		t.Fatalf("expected exactly one assertion line, got:\n%s", stdout)
+		t.Fatalf("stdout should contain one bounded assertion failure, got %q", stdout)
+	}
+	if !strings.Contains(stdout, `assertion failed: 3 tool calls exceeded the 1s budget (worst: tool "search" took 5s)`) {
+		t.Fatalf("stdout = %q", stdout)
 	}
 }
 
@@ -471,7 +473,7 @@ func TestCheckAssertionsCompose(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 when either assertion fails", code)
 	}
-	for _, want := range []string{`tool "echo" took 1s`, `expected tool "search" was never called`} {
+	for _, want := range []string{`worst: tool "echo" took 1s`, `expected tool "search" was never called`} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q\n%s", want, stdout)
 		}
@@ -504,6 +506,61 @@ func TestCheckPassesForDeprecatedFeature(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "warnings=0") || !strings.Contains(stdout, "check passed") {
 		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
+func TestCheckFailsForSelectedDeprecatedFeature(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	deprecated := checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"roots/list"}`)
+
+	code, stdout, stderr := executeCheck(t, []string{"--fail-on", "deprecated", "-"}, encodeCheckLog(t, deprecated))
+	if code != 1 || stderr != "" {
+		t.Fatalf("deprecated gate = code %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "check failed: deprecated") {
+		t.Fatalf("stdout = %q, want deprecated failure", stdout)
+	}
+}
+
+// The text output has to say how many deprecated calls there were, not just that
+// there were some. The JUnit path already reports a count, and for a signal whose
+// whole purpose is tracking a migration, "how many are left" is the question.
+func TestCheckTextOutputReportsDeprecatedCount(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"roots/list"}`),
+		checkEnvelope(2, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"sampling/createMessage"}`),
+		checkEnvelope(3, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"logging/setLevel"}`),
+	)
+
+	// The count is reported whether or not the signal is selected, the same way
+	// errors and warnings are always counted and only gate when chosen.
+	_, stdout, _ := executeCheck(t, []string{"-"}, log)
+	if !strings.Contains(stdout, "deprecated=3") {
+		t.Fatalf("a default run should still report the count, got %q", stdout)
+	}
+
+	code, stdout, _ := executeCheck(t, []string{"--fail-on", "deprecated", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 when the signal is selected", code)
+	}
+	if !strings.Contains(stdout, "deprecated=3") {
+		t.Fatalf("stdout = %q, want the count alongside the failure", stdout)
+	}
+}
+
+func TestCheckJUnitReportsSelectedDeprecatedFeature(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	deprecated := checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"roots/list"}`)
+
+	code, stdout, stderr := executeCheck(t, []string{"--format", "junit", "--fail-on", "deprecated", "-"}, encodeCheckLog(t, deprecated))
+	if code != 1 || stderr != "" {
+		t.Fatalf("deprecated junit gate = code %d, stderr %q", code, stderr)
+	}
+	for _, want := range []string{`name="s1/deprecated"`, `type="mcpsnoop.check.deprecated"`, `1 deprecated protocol feature`} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("junit stdout missing %q\n%s", want, stdout)
+		}
 	}
 }
 
