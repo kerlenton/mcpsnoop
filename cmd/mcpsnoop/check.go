@@ -15,15 +15,16 @@ import (
 type checkSignal string
 
 const (
-	checkError    checkSignal = "error"
-	checkInvalid  checkSignal = "invalid"
-	checkWarn     checkSignal = "warn"
-	checkMismatch checkSignal = "mismatch"
-	checkPending  checkSignal = "pending"
-	checkDrift    checkSignal = "drift"
+	checkError      checkSignal = "error"
+	checkInvalid    checkSignal = "invalid"
+	checkWarn       checkSignal = "warn"
+	checkMismatch   checkSignal = "mismatch"
+	checkPending    checkSignal = "pending"
+	checkDrift      checkSignal = "drift"
+	checkDeprecated checkSignal = "deprecated"
 )
 
-var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift}
+var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated}
 
 type checkOutputFormat string
 
@@ -39,6 +40,7 @@ type checkSummary struct {
 	warnings        int
 	mismatches      int
 	pending         int
+	deprecated      int
 	drift           store.ToolDrift
 	baselineCreated bool
 }
@@ -133,7 +135,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().SortFlags = false
-	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, drift")
+	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, drift, deprecated")
 	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text or junit")
 	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
 	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this duration (e.g. 500ms), disabled when zero")
@@ -214,10 +216,10 @@ func parseCheckSignals(value string) (map[checkSignal]bool, error) {
 	for _, part := range strings.Split(value, ",") {
 		signal := checkSignal(strings.TrimSpace(part))
 		switch signal {
-		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift:
+		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated:
 			signals[signal] = true
 		default:
-			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, or drift, got %q", part)
+			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, drift, or deprecated, got %q", part)
 		}
 	}
 	return signals, nil
@@ -274,6 +276,9 @@ func summarizeCheck(st *store.Store, baselines *toolbaseline.Manager) []checkSum
 			if event.RoutingMismatch {
 				summary.mismatches++
 			}
+			if event.Deprecated != "" {
+				summary.deprecated++
+			}
 		}
 		summaries = append(summaries, summary)
 	}
@@ -309,6 +314,8 @@ func (s checkSummary) count(signal checkSignal) int {
 			n++
 		}
 		return n
+	case checkDeprecated:
+		return s.deprecated
 	default:
 		return 0
 	}
