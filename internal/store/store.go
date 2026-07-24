@@ -341,6 +341,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			ev.warning = validationWarning(msg)
 			ev.mrtrStateIssue = stateIssue
 			if warning := stateIssue.warning(); warning != "" {
+				// The spec makes the echo a MUST for the client, so a violation is a
+				// protocol error on the wire rather than an observation of ours. It
+				// therefore rides the warning field like any other protocol warning,
+				// which means a default check run fails on it. That is deliberate: a
+				// client mangling server state is worth stopping a build for.
 				ev.warning = appendWarning(ev.warning, warning)
 			}
 			sess.requests++ // a request on the wire, even though not a new call
@@ -998,6 +1003,18 @@ func (sess *session) matchRetry(msg proxy.RPCMessage) (*call, MRTRStateIssue) {
 	return nil, ""
 }
 
+// classifyMRTRState compares the state a retry carried with the one the server
+// issued. It only ever compares opaque bytes: the spec forbids the client from
+// inspecting the contents, and an observer has no more reason to than a client
+// does.
+//
+// One case is out of reach. A server may answer with requestState and no
+// inputRequests at all, and then a tampered retry echoes a state that matches
+// nothing and answers no keys, so there is nothing left to link it by and it
+// reads as an unrelated call rather than a violation. Linking on the method and
+// operation name alone would catch it, but would also fuse two genuinely
+// separate calls to the same tool, and a wrong link is worse than a missed one.
+// See TestMRTRCannotSeeTamperingOnAStateOnlyExchange.
 func classifyMRTRState(c *call, retryState string, retryHasState bool) MRTRStateIssue {
 	switch {
 	case c.mrtrHasState && !retryHasState:
