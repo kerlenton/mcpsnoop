@@ -405,6 +405,63 @@ Like `drift`, `deprecated` is opt-in. A default run reports the count and stays
 green, so a session using a still-legal deprecated feature never turns CI red on
 its own.
 
+### Flag schema constructs clients handle badly
+
+A server can be perfectly valid and still be hard for an agent to use. Clients
+differ in how much of JSON Schema they really support, and a tool the model keeps
+calling wrongly is often a tool whose schema asked for more than the client
+delivers.
+
+The tool summary, opened with `s`, has a SCHEMA column naming the most notable
+construct each advertised tool uses, with a trailing `+` when the schema uses
+more than one kind.
+
+| Shown | Means |
+|---|---|
+| `ext ref` | a `$ref` pointing outside the document, which is also the case the spec warns implementers not to follow blindly |
+| `oneOf`, `anyOf`, `allOf`, `not` | a composition keyword, handled inconsistently across clients |
+| `ref` | a `$ref` pointing inside the same document |
+| `untyped` | a property that declares no type and no other way of saying what it accepts |
+
+This is an observation, not a verdict. A schema using `oneOf` is not wrong, only
+likely to be read differently by different clients, so the column carries the
+warning color and never the red of the ERR column. There is no `check` signal for
+it, and nothing about MCP traffic changes.
+
+Nothing is resolved or fetched. An external `$ref` is recognized by its form
+alone, and the schema it points at is never read.
+
+### Detect a client that mangles server state
+
+Under the multi round-trip pattern the server hands the client an opaque
+`requestState` and the client must echo it back untouched on the retry. The
+server is told to treat it as attacker-controlled input, because a client that
+tampers with it can try to alter server behaviour or bypass an authorization
+check.
+
+Sitting in the pipe, mcpsnoop sees the value leave and come back, so it can say
+when the contract was broken. Three ways it can break, each reported as a
+protocol warning on the retry.
+
+| Reported | Means |
+|---|---|
+| `MRTR retry changed requestState` | the client sent back something other than what the server issued |
+| `MRTR retry is missing requestState` | the server issued one and the retry omitted it |
+| `MRTR retry invented requestState` | the retry carried one the server never issued |
+
+These are protocol violations by the client rather than observations of ours, so
+they ride the ordinary warning signal and **a default `check` run fails on one**.
+That is deliberate. A client mangling server state is worth stopping a build for.
+
+The value itself is never displayed or logged, and nothing decodes or parses it.
+It may be an encrypted blob carrying a principal and a token, and comparing
+opaque bytes is the whole check.
+
+One case is out of reach. When a server answers with a `requestState` and no
+`inputRequests`, a tampered retry matches nothing and answers no keys, so there
+is nothing left to tie it to the original request and it reads as an unrelated
+call rather than a violation.
+
 ## Watching from another machine
 
 Keep capture local to the machine where the traffic happens and use SSH for the
