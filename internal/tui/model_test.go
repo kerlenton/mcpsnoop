@@ -687,6 +687,71 @@ func TestCapsOverlayUpdatesLive(t *testing.T) {
 	}
 }
 
+// TestCapsContentShowsAgreedExtension checks the block renders, and renders the
+// id verbatim in reverse-DNS form rather than prettified, since that is the
+// string someone will grep for in the traffic.
+func TestCapsContentShowsAgreedExtension(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","clientInfo":{"name":"cli"},"capabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2026-07-28","capabilities":{"tools":{},"extensions":{"io.modelcontextprotocol/tasks":{}}},"serverInfo":{"name":"demo"}}}`))
+
+	m := ready(t, st)
+	m = typeRunes(t, m, "c")
+	out := m.overlayRaw
+
+	for _, want := range []string{"extensions", "● io.modelcontextprotocol/tasks"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("caps body missing %q\n%s", want, out)
+		}
+	}
+	// An agreed extension is in play, so it must not carry a one-sided note.
+	for _, absent := range []string{"client only", "server only"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("an agreed extension should not read as one-sided (%q)\n%s", absent, out)
+		}
+	}
+	// The extensions map is a container, not a capability, so it must not also
+	// appear as a capability row in either section.
+	if strings.Contains(out, "● extensions") || strings.Contains(out, "○ extensions") {
+		t.Fatalf("extensions must not render as a capability row\n%s", out)
+	}
+}
+
+// TestCapsContentMarksOneSidedExtension is the case the section exists for: an
+// extension one side advertised and the other did not is not in play, and has
+// to look that way rather than look supported.
+func TestCapsContentMarksOneSidedExtension(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","clientInfo":{"name":"cli"},"capabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2026-07-28","capabilities":{"tools":{}},"serverInfo":{"name":"demo"}}}`))
+
+	m := ready(t, st)
+	m = typeRunes(t, m, "c")
+	out := m.overlayRaw
+
+	if !strings.Contains(out, "○ io.modelcontextprotocol/tasks (client only)") {
+		t.Fatalf("a client-only extension should read as not agreed\n%s", out)
+	}
+	if strings.Contains(out, "● io.modelcontextprotocol/tasks") {
+		t.Fatalf("a one-sided extension must not carry the agreed marker\n%s", out)
+	}
+}
+
+// TestCapsContentOmitsEmptyExtensionsSection locks the no-regression half: a
+// session without extensions renders exactly as it did before this section
+// existed, with no empty heading.
+func TestCapsContentOmitsEmptyExtensionsSection(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"cli"},"capabilities":{"roots":{}}}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"demo"}}}`))
+
+	m := ready(t, st)
+	m = typeRunes(t, m, "c")
+	if strings.Contains(m.overlayRaw, "extensions") {
+		t.Fatalf("no side advertised extensions, so the section must be absent\n%s", m.overlayRaw)
+	}
+}
+
 func TestCapabilitiesAndHelp(t *testing.T) {
 	st := store.New()
 	seed(st)

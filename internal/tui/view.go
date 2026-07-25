@@ -1250,6 +1250,13 @@ func (m Model) capsContent() string {
 	server := m.capSection("server", caps.ServerInfo, serverCapOrder, caps.Server)
 	// A blank line under the title and one between the two groups.
 	body := title + "\n\n" + client + "\n\n" + server
+	// Extensions are negotiated per pair rather than declared per side, so they
+	// get one block under both sections instead of a row inside each. The block
+	// is omitted entirely when neither side advertised any, so an ordinary
+	// session renders exactly as it did before.
+	if section := m.extensionsSection(caps.Extensions); section != "" {
+		body += "\n\n" + section
+	}
 	// The server may attach usage guidance for the model. Show it under the two
 	// sections when present, dim so it never competes with the capability markers.
 	if caps.Instructions != "" {
@@ -1615,9 +1622,44 @@ func (m Model) capRow(present bool, name string) string {
 	return "  " + m.styles.faint.Render("○") + " " + m.styles.faint.Render(label)
 }
 
+// extensionsSection renders the negotiated extensions (SEP-2133) as one block
+// under both capability sections, or "" when neither side advertised any, so
+// the screen never grows an empty heading.
+func (m Model) extensionsSection(extensions []store.ExtensionView) string {
+	if len(extensions) == 0 {
+		return ""
+	}
+	rows := make([]string, 0, len(extensions)+1)
+	rows = append(rows, m.styles.dim.Render("extensions"))
+	for _, e := range extensions {
+		rows = append(rows, m.extensionRow(e))
+	}
+	return strings.Join(rows, "\n")
+}
+
+// extensionRow is one extension line, matching capRow's two-space indent and
+// one-cell marker so the blocks align. The useful signal is agreement, not
+// presence, so a filled ● means both sides advertised it and a hollow ○ names
+// the side that advertised it alone. The glyph carries the state on its own so
+// NO_COLOR stays legible, and the id is printed exactly as advertised, in
+// reverse-DNS form, because that is what appears in the spec, in the traffic
+// and in a bug report.
+func (m Model) extensionRow(e store.ExtensionView) string {
+	if e.Agreed() {
+		return "  " + m.styles.resp.Render("●") + " " + m.styles.neutral.Render(e.ID)
+	}
+	side := "server only"
+	if e.Client {
+		side = "client only"
+	}
+	return "  " + m.styles.faint.Render("○") + " " + m.styles.faint.Render(e.ID+" ("+side+")")
+}
+
 // capNames returns the set of capability names a side declared. Values are
 // ignored: this screen shows only whether a capability was declared, not its
-// sub-flags.
+// sub-flags. The extensions map is skipped: it is a container of extension ids
+// rather than a capability, and it has its own section, so listing it here
+// would render a phantom "extensions" capability alongside the real ones.
 func capNames(raw json.RawMessage) map[string]bool {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(raw, &obj) != nil {
@@ -1625,6 +1667,9 @@ func capNames(raw json.RawMessage) map[string]bool {
 	}
 	set := make(map[string]bool, len(obj))
 	for name := range obj {
+		if name == store.ExtensionsCapability {
+			continue
+		}
 		set[name] = true
 	}
 	return set
