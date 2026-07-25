@@ -662,7 +662,7 @@ func (m Model) streamCells(e store.EventView) streamCell {
 				c.detail = compactJSON(e.Call.Result)
 			case e.Call.Err != nil:
 				c.status = "err"
-				c.detail = e.Call.Err.Message
+				c.detail = rpcErrorText(*e.Call.Err)
 			case e.Call.ToolErr:
 				c.status = "err"
 				c.detail = toolErrorText(e.Call.Result)
@@ -832,6 +832,17 @@ func transportBody(e store.EventView) string {
 		}
 	}
 	return b.String()
+}
+
+// rpcErrorText renders a JSON-RPC error for a one-line preview. The code was
+// missing from this row entirely, so a reader could not tell a spec-defined
+// -32601 from whatever number a server picked for itself.
+func rpcErrorText(err proxy.RPCError) string {
+	head := store.ErrorCodeText(err.Code)
+	if err.Message == "" {
+		return head
+	}
+	return head + ": " + err.Message
 }
 
 // compactJSON renders raw JSON on a single line for the DETAIL preview column.

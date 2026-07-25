@@ -1691,3 +1691,36 @@ func TestInspectorHeaderHeightFollowsTheStatusLine(t *testing.T) {
 		t.Fatal("a stdio frame has no transport chrome line")
 	}
 }
+
+// TestStreamRowNamesAnErrorCode. The row carried only the message, so a
+// spec-defined -32601 was indistinguishable from whatever number a server chose
+// for itself, and the code a reader needs to look up was nowhere on screen.
+func TestStreamRowNamesAnErrorCode(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nope"}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no such tool"}}`))
+
+	m := ready(t, st)
+	var detail string
+	for _, e := range st.Timeline("s1") {
+		if e.Kind == store.EventResponse {
+			detail = m.streamCells(e).detail
+		}
+	}
+	if !strings.Contains(detail, "-32601") || !strings.Contains(detail, "method not found") {
+		t.Fatalf("the row should carry the code and its name, got %q", detail)
+	}
+	if !strings.Contains(detail, "no such tool") {
+		t.Fatalf("the server's own message must survive, got %q", detail)
+	}
+}
+
+// TestStreamRowLeavesAnImplementationCodeUnnamed. -32000 to -32019 means
+// whatever the sender decided, so the row shows the number and the sender's
+// message and invents nothing.
+func TestStreamRowLeavesAnImplementationCodeUnnamed(t *testing.T) {
+	got := rpcErrorText(proxy.RPCError{Code: -32001, Message: "rate limited"})
+	if got != "-32001: rate limited" {
+		t.Fatalf("an implementation-defined code should render bare, got %q", got)
+	}
+}

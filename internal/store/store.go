@@ -526,6 +526,22 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		if note := deprecatedNestedNote(state.methods); note != "" {
 			ev.deprecated = note
 		}
+	} else if msg.Error != nil {
+		// An error response has no method and no result, so neither branch above
+		// can see it. Its code is the one place a retired feature still shows.
+		if note := deprecatedErrorCodeNote(msg.Error.Code); note != "" {
+			ev.deprecated = note
+		}
+	}
+
+	// The server's own verdict on the header checks mcpsnoop performs itself.
+	// Flagged structurally rather than as a warning: the frame is already an
+	// error and already counted, and what this adds is that the failure was a
+	// routing one. It matters because the server validates more than mcpsnoop
+	// can (Mcp-Param-{Name} values, malformed encodings), so its rejection is
+	// sometimes the only evidence a mismatch happened at all.
+	if msg.Error != nil && msg.Error.Code == ErrorCodeHeaderMismatch {
+		ev.mismatch = true
 	}
 
 	sess.events = append(sess.events, ev)

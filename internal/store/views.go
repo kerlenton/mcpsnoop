@@ -77,8 +77,11 @@ type EventView struct {
 	AuthChallenge string
 	// RoutingMismatch is true when a routing header (Mcp-Method/Mcp-Name) or the
 	// MCP-Protocol-Version header disagrees with the body, or a routing header rides
-	// a batch. It is a structured handle for the same condition the warning
-	// describes, so filters and exporters need not match warning text.
+	// a batch, or a required one is missing. It is also true on a server's -32020
+	// response, which is that same condition as the server saw it: it validates
+	// values mcpsnoop cannot check, so its rejection is sometimes the only
+	// evidence. A structured handle for the condition the warning describes, so
+	// filters and exporters need not match warning text.
 	RoutingMismatch bool
 	// Truncated is true when mcpsnoop capped its own observed copy of a large body.
 	// It is a structured marker, not a protocol warning, so it never fails check.
