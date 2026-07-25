@@ -411,6 +411,7 @@ type otlpScope struct {
 type otlpSpan struct {
 	TraceID           string          `json:"traceId"`
 	SpanID            string          `json:"spanId"`
+	ParentSpanID      string          `json:"parentSpanId,omitempty"`
 	Name              string          `json:"name"`
 	Kind              string          `json:"kind"`
 	StartTimeUnixNano string          `json:"startTimeUnixNano"`
@@ -436,9 +437,15 @@ type otlpAnyValue struct {
 
 // WriteOTLP writes data using the OTLP JSON encoding.
 func WriteOTLP(w io.Writer, data SessionExport) error {
-	traceID := otlpID(16, "trace", data.Session.ID)
+	sessionTraceID := otlpID(16, "trace", data.Session.ID)
 	spans := make([]otlpSpan, 0, len(data.Calls))
 	for _, call := range data.Calls {
+		traceID := sessionTraceID
+		parentSpanID := ""
+		if propagatedTraceID, propagatedParentSpanID, ok := traceContext(call.Params); ok {
+			traceID = propagatedTraceID
+			parentSpanID = propagatedParentSpanID
+		}
 		end := call.StartedAt
 		if call.EndedAt != nil {
 			end = *call.EndedAt
@@ -473,6 +480,7 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 		spans = append(spans, otlpSpan{
 			TraceID:           traceID,
 			SpanID:            otlpID(8, "span", data.Session.ID, call.ID, string(call.Direction)),
+			ParentSpanID:      parentSpanID,
 			Name:              call.Method,
 			Kind:              kind,
 			StartTimeUnixNano: fmt.Sprint(call.StartedAt.UnixNano()),
@@ -492,6 +500,77 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payload)
+}
+
+func traceContext(params json.RawMessage) (traceID, parentSpanID string, ok bool) {
+	// Maps keep the SEP carrier keys exact; struct decoding also matches keys
+	// case-insensitively, which would accept a different carrier by accident.
+	var request map[string]json.RawMessage
+	if err := json.Unmarshal(params, &request); err != nil {
+		return "", "", false
+	}
+	rawMeta, ok := request["_meta"]
+	if !ok {
+		return "", "", false
+	}
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(rawMeta, &meta); err != nil {
+		return "", "", false
+	}
+	rawTraceparent, ok := meta["traceparent"]
+	if !ok {
+		return "", "", false
+	}
+	var traceparent string
+	if err := json.Unmarshal(rawTraceparent, &traceparent); err != nil {
+		return "", "", false
+	}
+	return parseTraceparent(traceparent)
+}
+
+func parseTraceparent(value string) (traceID, parentSpanID string, ok bool) {
+	const fixedLength = 55
+	if len(value) < fixedLength || value[2] != '-' || value[35] != '-' || value[52] != '-' {
+		return "", "", false
+	}
+
+	version := value[:2]
+	traceID = value[3:35]
+	parentSpanID = value[36:52]
+	flags := value[53:55]
+	if !lowerHex(version) || version == "ff" ||
+		!lowerHex(traceID) || allZero(traceID) ||
+		!lowerHex(parentSpanID) || allZero(parentSpanID) ||
+		!lowerHex(flags) {
+		return "", "", false
+	}
+	if version == "00" && len(value) != fixedLength {
+		return "", "", false
+	}
+	// Later versions may append fields. Their fixed prefix remains usable, but
+	// the first unknown field still has to begin at a field boundary.
+	if len(value) > fixedLength && value[fixedLength] != '-' {
+		return "", "", false
+	}
+	return traceID, parentSpanID, true
+}
+
+func lowerHex(value string) bool {
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func allZero(value string) bool {
+	for _, c := range value {
+		if c != '0' {
+			return false
+		}
+	}
+	return true
 }
 
 func otlpID(length int, parts ...string) string {

@@ -85,6 +85,49 @@ func TestSinkPostsCompletedCallAsOTLP(t *testing.T) {
 	}
 }
 
+func TestSinkPostsRequestTraceContext(t *testing.T) {
+	const (
+		traceID      = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parentSpanID = "00f067aa0ba902b7"
+		traceparent  = "00-" + traceID + "-" + parentSpanID + "-01"
+	)
+	received := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode OTLP payload: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		received <- payload
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sink := New(Config{Endpoint: server.URL})
+	defer sink.Close()
+	request, response := callEnvelopes("session-1", 1, time.Unix(1_700_000_000, 0))
+	request.Raw = json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lookup","_meta":{"traceparent":"` + traceparent + `"}}}`)
+	sink.Emit(request)
+	sink.Emit(response)
+
+	select {
+	case payload := <-received:
+		resourceSpans := payload["resourceSpans"].([]any)
+		scopeSpans := resourceSpans[0].(map[string]any)["scopeSpans"].([]any)
+		spans := scopeSpans[0].(map[string]any)["spans"].([]any)
+		if len(spans) != 1 {
+			t.Fatalf("posted %d spans, want 1", len(spans))
+		}
+		span := spans[0].(map[string]any)
+		if span["traceId"] != traceID || span["parentSpanId"] != parentSpanID {
+			t.Fatalf("posted trace context = %v/%v, want %s/%s", span["traceId"], span["parentSpanId"], traceID, parentSpanID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for OTLP payload")
+	}
+}
+
 func TestSinkPostsDuplicateResponseOnlyOnce(t *testing.T) {
 	var posts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
