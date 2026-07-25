@@ -390,8 +390,16 @@ func newSessionID(label string) string {
 // sessionNonce is the short random tag that tells apart two runs sharing a PID.
 // crypto/rand.Read has no error path worth handling here: on every supported
 // platform it either succeeds or panics, so there is nothing to degrade into.
+//
+// Six bytes, not three. A collision needs the label, the PID and the nonce to
+// coincide. The case this exists for is a container where the server always
+// starts under the same PID, hundreds of times a run, which holds the first two
+// fixed and leaves the nonce carrying the whole guarantee. Three bytes is a 3%
+// birthday collision over a thousand such runs, and a collision here is exactly
+// the silent whole-session drop described above. Six settles the arithmetic for
+// good, at the price of six characters in an id nobody types twice.
 func sessionNonce() string {
-	var b [3]byte
+	var b [6]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }
