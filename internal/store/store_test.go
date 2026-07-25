@@ -1565,3 +1565,115 @@ func TestMRTRCannotSeeTamperingOnAStateOnlyExchange(t *testing.T) {
 		t.Fatalf("it reads as two independent calls, got %d", n)
 	}
 }
+
+// sessionErrors is the session's error counter, which is what a default check
+// run gates on.
+func sessionErrors(t *testing.T, s *Store) int {
+	t.Helper()
+	headers := s.Sessions()
+	if len(headers) != 1 {
+		t.Fatalf("expected one session, got %d", len(headers))
+	}
+	return headers[0].Errors
+}
+
+// TestIngestClassifiesATransportFailure covers both halves: a status-only frame
+// becomes a transport event rather than nothing, and it counts toward the error
+// signal so a default check run gates on it.
+func TestIngestClassifiesATransportFailure(t *testing.T) {
+	const challenge = `Bearer resource_metadata="https://auth.example/.well-known/oauth-protected-resource"`
+	s := New()
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+		Direction: proxy.ServerToClient, Transport: "http",
+		Status: 401, AuthChallenge: challenge,
+	})
+	if ev.Kind != EventTransport {
+		t.Fatalf("a bodiless 401 should be a transport event, got kind %v", ev.Kind)
+	}
+	if ev.HTTPStatus != 401 || ev.AuthChallenge != challenge {
+		t.Fatalf("the status and challenge must reach the view, got %d %q", ev.HTTPStatus, ev.AuthChallenge)
+	}
+	if got := sessionErrors(t, s); got != 1 {
+		t.Fatalf("a 401 should count toward the error signal, got %d", got)
+	}
+}
+
+// TestIngestDoesNotCountASuccessfulTransportFrame pins the other side of the
+// counter. A 202 acknowledging a notification has no body by spec requirement,
+// so it must be visible without turning a correct session red.
+func TestIngestDoesNotCountASuccessfulTransportFrame(t *testing.T) {
+	s := New()
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+		Direction: proxy.ServerToClient, Transport: "http", Status: 202,
+	})
+	if ev.Kind != EventTransport {
+		t.Fatalf("a bodiless 202 should still be visible, got kind %v", ev.Kind)
+	}
+	if got := sessionErrors(t, s); got != 0 {
+		t.Fatalf("a 202 is not a failure, got %d errors", got)
+	}
+}
+
+// TestIngestDoesNotCallAnHTTPErrorPageStreamCorruption keeps the diagnosis
+// honest. A gateway's HTML 502 is not a server printing to stdout, and saying so
+// sends the reader after the wrong problem.
+func TestIngestDoesNotCallAnHTTPErrorPageStreamCorruption(t *testing.T) {
+	s := New()
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+		Direction: proxy.ServerToClient, Transport: "http", Status: 502,
+		Text: "<html><body>502 Bad Gateway</body></html>",
+	})
+	if ev.Kind == EventInvalid {
+		t.Fatal("an HTTP error page is a transport failure, not a corrupted stream")
+	}
+	if ev.Kind != EventTransport {
+		t.Fatalf("expected a transport event, got kind %v", ev.Kind)
+	}
+	if got := sessionErrors(t, s); got != 1 {
+		t.Fatalf("a 502 should count toward the error signal, got %d", got)
+	}
+}
+
+// TestIngestStillReportsStdioStreamCorruption pins the other side: with no
+// status there is no transport layer to blame, so stray stdout stays invalid.
+func TestIngestStillReportsStdioStreamCorruption(t *testing.T) {
+	s := New()
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+		Direction: proxy.ServerToClient, Transport: "stdio",
+		Text: "Listening on port 3000...",
+	})
+	if ev.Kind != EventInvalid {
+		t.Fatalf("stray stdout on stdio is still stream corruption, got kind %v", ev.Kind)
+	}
+}
+
+// TestIngestCountsAnHTTPFailureOnce guards against double counting when a 400
+// carries a JSON-RPC error body of its own: the body takes the response branch,
+// which already counts it.
+func TestIngestCountsAnHTTPFailureOnce(t *testing.T) {
+	s := New()
+	req := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer, Transport: "http",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`),
+	}
+	s.Ingest(req)
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(),
+		Direction: proxy.ServerToClient, Transport: "http", Status: 400,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"error":{"code":-32020,"message":"bad request"}}`),
+	})
+	if ev.Kind != EventResponse {
+		t.Fatalf("a JSON-RPC error body is a response, not a transport event, got kind %v", ev.Kind)
+	}
+	if ev.HTTPStatus != 400 {
+		t.Fatalf("the status should still ride the response frame, got %d", ev.HTTPStatus)
+	}
+	if got := sessionErrors(t, s); got != 1 {
+		t.Fatalf("one failure must be counted once, got %d", got)
+	}
+}

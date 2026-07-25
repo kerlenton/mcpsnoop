@@ -475,3 +475,40 @@ func TestExportCarriesContextCost(t *testing.T) {
 		t.Fatalf("worst-case result missing from the export: %+v", out.Summary.Tools)
 	}
 }
+
+// TestExportCarriesTheTransportEvent checks the export end of the new event
+// kind. A 401 that produced no envelope at all before this now has to survive
+// into a machine-readable artefact, status and challenge included, and the text
+// export has to stay one line per frame.
+func TestExportCarriesTheTransportEvent(t *testing.T) {
+	const challenge = `Bearer resource_metadata="https://auth.example/x"`
+	st := store.New()
+	st.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: time.Now(),
+		Direction: proxy.ServerToClient, Transport: "http",
+		Status: 401, AuthChallenge: challenge,
+	})
+
+	out, err := Build(st, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Events) != 1 {
+		t.Fatalf("expected one exported event, got %d", len(out.Events))
+	}
+	ev := out.Events[0]
+	if ev.Kind != "transport" {
+		t.Fatalf("kind = %q, want transport", ev.Kind)
+	}
+	if ev.Status != 401 || ev.AuthChallenge != challenge {
+		t.Fatalf("the status and challenge must reach the export, got %d %q", ev.Status, ev.AuthChallenge)
+	}
+
+	var buf bytes.Buffer
+	if err := Write(&buf, out, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "transport") {
+		t.Fatalf("the text export should name the kind, got %q", buf.String())
+	}
+}

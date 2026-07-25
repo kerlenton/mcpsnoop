@@ -66,7 +66,7 @@ func TestBodyTapConcurrentReadAndClose(t *testing.T) {
 // emitterTo adapts a captureSink into the emit func httpProxyHandler expects.
 func emitterTo(sink *captureSink) func(Direction, []byte, route) {
 	return func(d Direction, raw []byte, rt route) {
-		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, MCPProtocolVersion: rt.protocolVersion, Batch: rt.batch, Truncated: rt.truncated})
+		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, MCPProtocolVersion: rt.protocolVersion, Batch: rt.batch, Truncated: rt.truncated, Status: rt.status, AuthChallenge: rt.challenge})
 	}
 }
 
@@ -440,5 +440,118 @@ func TestSSETapMultilineData(t *testing.T) {
 
 	if len(got) != 1 || got[0] != "first line\nsecond line" {
 		t.Fatalf("sseTap parsed %v", got)
+	}
+}
+
+// TestHTTPObservesAnEmptyBodiedFailure is the regression. A 401 carries its
+// challenge in a header and no body, and emitFrames returns early on an empty
+// body, so the most common failure of a remote MCP server produced no envelope
+// at all: an empty session with no explanation.
+func TestHTTPObservesAnEmptyBodiedFailure(t *testing.T) {
+	const challenge = `Bearer resource_metadata="https://auth.example/.well-known/oauth-protected-resource"`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set(wwwAuthenticateHeader, challenge)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	resp, err := http.Post(front.URL, "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("the client must still receive the real status, got %d", resp.StatusCode)
+	}
+
+	s2c := sink.byDir(ServerToClient)
+	if len(s2c) != 1 {
+		t.Fatalf("a 401 with no body must still produce one frame; producing none is the bug, got %d", len(s2c))
+	}
+	if s2c[0].Status != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", s2c[0].Status)
+	}
+	if s2c[0].AuthChallenge != challenge {
+		t.Fatalf("the challenge should survive verbatim, got %q", s2c[0].AuthChallenge)
+	}
+	if len(s2c[0].Raw) != 0 {
+		t.Fatalf("a bodiless response should carry no raw bytes, got %q", s2c[0].Raw)
+	}
+}
+
+// TestHTTPObservesAnUnreachableTarget covers the path that never reaches
+// ModifyResponse: the reverse proxy synthesises the 502 itself and writes it
+// straight to the client. Pointing mcpsnoop at the wrong port is a common first
+// mistake, and an empty screen is the worst answer to it.
+func TestHTTPObservesAnUnreachableTarget(t *testing.T) {
+	// Closed before use, so the address is real and nothing is listening on it.
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	target, _ := url.Parse(dead.URL)
+	dead.Close()
+
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	resp, err := http.Post(front.URL, "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("the client should get the synthesised 502, got %d", resp.StatusCode)
+	}
+
+	s2c := sink.byDir(ServerToClient)
+	if len(s2c) != 1 {
+		t.Fatalf("an unreachable target must not be silent, got %d frames", len(s2c))
+	}
+	if s2c[0].Status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", s2c[0].Status)
+	}
+}
+
+// TestHTTPStatusRidesEveryBatchElement pins the response-scoped half of the
+// route. Routing headers describe one operation so they ride only the first
+// element, but the status belongs to the response as a whole, and dropping it
+// would make a batched response the one place the transport layer went missing.
+func TestHTTPStatusRidesEveryBatchElement(t *testing.T) {
+	const body = `[{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nope"}},{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"nope"}}]`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, emitterTo(sink)))
+	defer front.Close()
+
+	resp, err := http.Post(front.URL, "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	s2c := sink.byDir(ServerToClient)
+	if len(s2c) != 2 {
+		t.Fatalf("a two-element batch should split into two frames, got %d", len(s2c))
+	}
+	for i, env := range s2c {
+		if env.Status != http.StatusInternalServerError {
+			t.Fatalf("batch element %d lost the status: %d", i, env.Status)
+		}
 	}
 }

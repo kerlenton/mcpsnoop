@@ -77,8 +77,15 @@ type route struct {
 	name            string // Mcp-Name
 	protocolVersion string // MCP-Protocol-Version (request-scoped, not per operation)
 	batch           bool
-	truncated       bool // the observed copy was cut at the frame-size cap
+	truncated       bool   // the observed copy was cut at the frame-size cap
+	status          int    // HTTP status of the response carrying this frame
+	challenge       string // WWW-Authenticate on that response
 }
+
+// wwwAuthenticateHeader carries the challenge on a 401. It is kept verbatim
+// because it names the auth scheme and, under the MCP authorization spec, the
+// resource metadata URL a client is meant to follow next.
+const wwwAuthenticateHeader = "WWW-Authenticate"
 
 // newHTTPEmitter returns an emit function bound to a session and sink.
 func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
@@ -98,6 +105,8 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 			MCPProtocolVersion: r.protocolVersion,
 			Batch:              r.batch,
 			Truncated:          r.truncated,
+			Status:             r.status,
+			AuthChallenge:      r.challenge,
 		}
 		if raw != nil {
 			env.Raw = append([]byte(nil), raw...)
@@ -177,6 +186,15 @@ func observeBody(emit func(Direction, []byte, route), dir Direction, observed []
 		emit(dir, observed, rt)
 		return
 	}
+	// A response with an empty body still says something, and until now it said
+	// it to nobody: emitFrames returns early on empty, so a 401 challenge and the
+	// 202 that acknowledges a notification produced no envelope at all. Emit one
+	// frame carrying just the status. Gated on the status being set, which is
+	// true only for responses, so an empty request body stays silent.
+	if rt.status != 0 && len(bytes.TrimSpace(observed)) == 0 {
+		emit(dir, nil, rt)
+		return
+	}
 	emitFrames(emit, dir, observed, rt)
 }
 
@@ -200,6 +218,9 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			// them to the target verbatim; the Director leaves them untouched.
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			// The status and the challenge ride every frame observed on this
+			// response, so the transport layer is visible even when the body is not.
+			rt := route{status: resp.StatusCode, challenge: resp.Header.Get(wwwAuthenticateHeader)}
 			// Defensive fallback. If the target ignored the identity request and
 			// still compressed the body, skip observation rather than push binary
 			// into a frame. Forwarding is untouched, the client gets the original body.
@@ -209,7 +230,7 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 				// Streaming case, tap SSE data frames as bytes flow to the client.
 				resp.Body = newSSETap(resp.Body, func(data []byte) {
-					emitFrames(emit, ServerToClient, data, route{})
+					emitFrames(emit, ServerToClient, data, rt)
 				})
 				return nil
 			}
@@ -217,9 +238,17 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			// maxFrameBytes for observation, so it is never buffered whole. The body
 			// passes through unchanged, so Content-Length stays correct with no rewrite.
 			resp.Body = newBodyTap(resp.Body, maxFrameBytes, func(observed []byte, truncated bool) {
-				observeBody(emit, ServerToClient, observed, truncated, route{})
+				observeBody(emit, ServerToClient, observed, truncated, rt)
 			})
 			return nil
+		},
+		// A target that refuses the connection, times out, or speaks garbage never
+		// reaches ModifyResponse: the reverse proxy synthesises a 502 and writes it
+		// straight to the client. Pointing mcpsnoop at the wrong port is a common
+		// first mistake, and an empty screen is the worst possible answer to it.
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			emit(ServerToClient, nil, route{status: http.StatusBadGateway})
+			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
 
@@ -252,7 +281,11 @@ func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte,
 		var arr []json.RawMessage
 		if json.Unmarshal(b, &arr) == nil {
 			for i, m := range arr {
-				er := route{batch: true, protocolVersion: rt.protocolVersion}
+				// The status and the challenge belong to the response as a whole, not
+				// to one operation in it, so unlike the routing headers they ride every
+				// element. Dropping them here would make a batched response the one
+				// place the transport layer went missing again.
+				er := route{batch: true, protocolVersion: rt.protocolVersion, status: rt.status, challenge: rt.challenge}
 				if i == 0 {
 					er.method, er.name = rt.method, rt.name
 				}

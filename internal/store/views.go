@@ -70,6 +70,11 @@ type EventView struct {
 	MCPName   string
 	// MCPProtocolVersion is the MCP-Protocol-Version request header.
 	MCPProtocolVersion string
+	// HTTPStatus is the status of the response this frame arrived on, zero on
+	// stdio and on client frames. AuthChallenge is that response's
+	// WWW-Authenticate header.
+	HTTPStatus    int
+	AuthChallenge string
 	// RoutingMismatch is true when a routing header (Mcp-Method/Mcp-Name) or the
 	// MCP-Protocol-Version header disagrees with the body, or a routing header rides
 	// a batch. It is a structured handle for the same condition the warning
@@ -258,6 +263,8 @@ func (e *event) view(_ *session) EventView {
 		MCPMethod:          e.mcpMethod,
 		MCPName:            e.mcpName,
 		MCPProtocolVersion: e.mcpProtocolVersion,
+		HTTPStatus:         e.status,
+		AuthChallenge:      e.authChallenge,
 		RoutingMismatch:    e.mismatch,
 		Truncated:          e.truncated,
 		Deprecated:         e.deprecated,

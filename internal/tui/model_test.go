@@ -1609,3 +1609,83 @@ func TestReplayGuards(t *testing.T) {
 		t.Fatalf("replay without a recorded command should flash, got flash=%q", m.flash)
 	}
 }
+
+// TestStreamRowReadsAnHTTPStatusOutLoud covers the row this event kind exists
+// for. A 401 carries its challenge in a header and no body, so the status and
+// the challenge are the entire content of the frame.
+func TestStreamRowReadsAnHTTPStatusOutLoud(t *testing.T) {
+	m := Model{}
+	c := m.streamCells(store.EventView{
+		Kind: store.EventTransport, Dir: proxy.ServerToClient,
+		HTTPStatus: 401, AuthChallenge: `Bearer resource_metadata="https://auth.example/x"`,
+	})
+	if c.method != "http 401" {
+		t.Fatalf("the row should name the status, got %q", c.method)
+	}
+	if c.status != "err" {
+		t.Fatalf("a 401 is a failure in the row, got %q", c.status)
+	}
+	if !strings.Contains(c.detail, "Unauthorized") || !strings.Contains(c.detail, "resource_metadata") {
+		t.Fatalf("the detail should carry the status text and the challenge, got %q", c.detail)
+	}
+}
+
+// TestStreamRowKeepsATransportBodyOnOneLine guards the layout. The body of a
+// transport frame is written by whatever is on the other end, and a gateway's
+// HTML page spans many lines, while a row is one.
+func TestStreamRowKeepsATransportBodyOnOneLine(t *testing.T) {
+	m := Model{}
+	c := m.streamCells(store.EventView{
+		Kind: store.EventTransport, Dir: proxy.ServerToClient, HTTPStatus: 502,
+		Text: "<html>\n<body>\x1b[31m502 Bad Gateway\x1b[0m</body>\n</html>",
+	})
+	if strings.ContainsAny(c.detail, "\n\r\x1b") {
+		t.Fatalf("a row must stay on one line and drive no terminal, got %q", c.detail)
+	}
+	if !strings.Contains(c.detail, "502 Bad Gateway") {
+		t.Fatalf("the readable part of the page should survive, got %q", c.detail)
+	}
+}
+
+// TestStreamFilterFindsAnHTTPStatus covers the bare-number filter and the fact
+// that a transport failure has no call to carry the error flag, so status:err
+// has to match it on the status.
+func TestStreamFilterFindsAnHTTPStatus(t *testing.T) {
+	st := store.New()
+	seed(st) // clean calls, no failures
+	fail := env(5, proxy.ServerToClient, "")
+	fail.Raw = nil
+	fail.Transport = "http"
+	fail.Status = 401
+	st.Ingest(fail)
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+	total := len(m.timeline)
+
+	for _, q := range []string{"status:401", "status:err"} {
+		mm := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+		mm = typeRunes(t, mm, q)
+		f := drive(t, mm, tea.KeyMsg{Type: tea.KeyEnter})
+		if len(f.timeline) != 1 || total <= 1 {
+			t.Fatalf("%s should find exactly the 401, got %d of %d", q, len(f.timeline), total)
+		}
+		if f.timeline[0].HTTPStatus != 401 {
+			t.Fatalf("%s matched the wrong frame: %+v", q, f.timeline[0])
+		}
+	}
+}
+
+// TestInspectorHeaderHeightFollowsTheStatusLine is the off-by-one guard. The
+// renderer and the height calculation both decide whether a second chrome line
+// exists, and a frame carrying only a status is the case that used to make them
+// disagree.
+func TestInspectorHeaderHeightFollowsTheStatusLine(t *testing.T) {
+	statusOnly := store.EventView{Kind: store.EventTransport, HTTPStatus: 502}
+	if !hasTransportMeta(statusOnly) {
+		t.Fatal("a frame carrying only a status still needs its chrome line")
+	}
+	if hasTransportMeta(store.EventView{Kind: store.EventResponse}) {
+		t.Fatal("a stdio frame has no transport chrome line")
+	}
+}
