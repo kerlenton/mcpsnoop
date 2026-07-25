@@ -383,8 +383,14 @@ func Write(w io.Writer, data SessionExport, opts Options) error {
 	}
 }
 
-// otlpExport follows the OTLP JSON encoding. Each correlated MCP call becomes
-// a span in one trace, making a session importable into tracing backends.
+// otlpExport follows the OTLP JSON encoding. Each correlated MCP call becomes a
+// span, making a session importable into tracing backends.
+//
+// A call whose request carried a traceparent joins the caller's trace, so the
+// spans of one session can legitimately span several traces. The rest share a
+// trace derived from the session id, so a session with no propagation still
+// reads as one unit. Either way mcpsnoop.session.id is a resource attribute
+// rather than a span one, so the tie back to the capture survives the split.
 type otlpExport struct {
 	ResourceSpans []otlpResourceSpans `json:"resourceSpans"`
 }
@@ -412,6 +418,7 @@ type otlpSpan struct {
 	TraceID           string          `json:"traceId"`
 	SpanID            string          `json:"spanId"`
 	ParentSpanID      string          `json:"parentSpanId,omitempty"`
+	TraceState        string          `json:"traceState,omitempty"`
 	Name              string          `json:"name"`
 	Kind              string          `json:"kind"`
 	StartTimeUnixNano string          `json:"startTimeUnixNano"`
@@ -440,11 +447,11 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 	sessionTraceID := otlpID(16, "trace", data.Session.ID)
 	spans := make([]otlpSpan, 0, len(data.Calls))
 	for _, call := range data.Calls {
-		traceID := sessionTraceID
-		parentSpanID := ""
-		if propagatedTraceID, propagatedParentSpanID, ok := traceContext(call.Params); ok {
-			traceID = propagatedTraceID
-			parentSpanID = propagatedParentSpanID
+		traceID, parentSpanID, traceState := sessionTraceID, "", ""
+		if propagated, ok := traceContext(call.Params); ok {
+			traceID = propagated.TraceID
+			parentSpanID = propagated.ParentSpanID
+			traceState = propagated.TraceState
 		}
 		end := call.StartedAt
 		if call.EndedAt != nil {
@@ -481,6 +488,7 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 			TraceID:           traceID,
 			SpanID:            otlpID(8, "span", data.Session.ID, call.ID, string(call.Direction)),
 			ParentSpanID:      parentSpanID,
+			TraceState:        traceState,
 			Name:              call.Method,
 			Kind:              kind,
 			StartTimeUnixNano: fmt.Sprint(call.StartedAt.UnixNano()),
@@ -502,30 +510,100 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 	return enc.Encode(payload)
 }
 
-func traceContext(params json.RawMessage) (traceID, parentSpanID string, ok bool) {
+// propagatedContext is the W3C trace context a request carried. TraceState is
+// empty when the caller sent none, or sent one this cannot make sense of.
+type propagatedContext struct {
+	TraceID      string
+	ParentSpanID string
+	TraceState   string
+}
+
+// traceContext reads the trace context from a request's params.
+//
+// The keys are deliberately unprefixed. Every other _meta key in MCP is
+// reverse-DNS namespaced, but the specification carves out traceparent,
+// tracestate and baggage by name so that trace context stays wire-compatible
+// with OpenTelemetry; namespacing them is called out as the thing that would
+// break traces. baggage is not read here: it is propagation state, not part of
+// a span.
+func traceContext(params json.RawMessage) (propagatedContext, bool) {
 	// Maps keep the SEP carrier keys exact; struct decoding also matches keys
 	// case-insensitively, which would accept a different carrier by accident.
 	var request map[string]json.RawMessage
 	if err := json.Unmarshal(params, &request); err != nil {
-		return "", "", false
+		return propagatedContext{}, false
 	}
 	rawMeta, ok := request["_meta"]
 	if !ok {
-		return "", "", false
+		return propagatedContext{}, false
 	}
 	var meta map[string]json.RawMessage
 	if err := json.Unmarshal(rawMeta, &meta); err != nil {
-		return "", "", false
+		return propagatedContext{}, false
 	}
-	rawTraceparent, ok := meta["traceparent"]
+	traceID, parentSpanID, ok := parseTraceparent(metaString(meta, "traceparent"))
 	if !ok {
-		return "", "", false
+		return propagatedContext{}, false
 	}
-	var traceparent string
-	if err := json.Unmarshal(rawTraceparent, &traceparent); err != nil {
-		return "", "", false
+	// Only once traceparent is valid: W3C requires tracestate to be discarded
+	// when the traceparent it belongs to cannot be trusted, since the state
+	// describes a trace we would otherwise be unable to name.
+	return propagatedContext{
+		TraceID:      traceID,
+		ParentSpanID: parentSpanID,
+		TraceState:   validTraceState(metaString(meta, "tracestate")),
+	}, true
+}
+
+// metaString returns a string-valued _meta entry, or "" when it is absent or is
+// some other JSON type. A carrier of the wrong type is treated as no carrier,
+// because a number where a traceparent belongs says nothing about the trace.
+func metaString(meta map[string]json.RawMessage, key string) string {
+	raw, ok := meta[key]
+	if !ok {
+		return ""
 	}
-	return parseTraceparent(traceparent)
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
+}
+
+// maxTraceStateMembers is the W3C limit. A list longer than this is to be
+// discarded rather than truncated, since dropping members silently would change
+// which vendor's state survives.
+const maxTraceStateMembers = 32
+
+// validTraceState returns a tracestate worth carrying, or "".
+//
+// The grammar is checked only as far as it has to be. mcpsnoop observes rather
+// than participates: it adds no member of its own and mutates nothing, so the
+// value it emits is the caller's, and a backend that rejects it would have
+// rejected the caller's request identically. Parsing each member's key and value
+// against the full grammar would mostly create ways to drop a valid header,
+// which is the failure that would be silent. What is checked is what cannot be
+// passed on meaningfully: an empty list, a member that is not a key=value pair,
+// and a list past the limit at which the spec says to discard rather than trim.
+func validTraceState(value string) string {
+	if value == "" {
+		return ""
+	}
+	members := strings.Split(value, ",")
+	if len(members) > maxTraceStateMembers {
+		return ""
+	}
+	for _, member := range members {
+		member = strings.TrimSpace(member)
+		if member == "" {
+			continue // OWS between members is allowed, and so is a trailing comma
+		}
+		key, _, ok := strings.Cut(member, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return ""
+		}
+	}
+	return value
 }
 
 func parseTraceparent(value string) (traceID, parentSpanID string, ok bool) {
