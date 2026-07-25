@@ -454,7 +454,9 @@ mcpsnoop export -T json | jq '.summary.definitions'
 
 The export carries the same figures, per tool and split into description and
 schema bytes, so a fat description and a fat schema stay separable and either
-can be tracked across captures or compared with `mcpsnoop diff`.
+can be tracked across captures. `mcpsnoop diff` tells you a description or
+schema changed between two sessions; the export is where the size of that
+change lives.
 
 These are **bytes, not tokens**. A token count depends on the model, so
 measuring one would mean shipping a tokeniser and picking whose. Bytes are
