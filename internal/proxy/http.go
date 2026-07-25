@@ -98,7 +98,7 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 			Seq:                seq.Add(1),
 			TS:                 time.Now(),
 			Direction:          dir,
-			Transport:          "http",
+			Transport:          TransportHTTP,
 			Text:               text,
 			MCPMethod:          r.method,
 			MCPName:            r.name,

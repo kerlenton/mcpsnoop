@@ -113,9 +113,12 @@ func TestIngestProtocolVersionMismatch(t *testing.T) {
 	// The MCP-Protocol-Version header says 2026-07-28 but the version the request
 	// repeats in its _meta says otherwise. A gateway routes on the header while the
 	// server reads the body, so flag the disagreement.
+	// The routing headers are filled in on every frame here so the version
+	// disagreement stays the only variable: on 2026-07-28 they are REQUIRED, and a
+	// frame omitting them would carry a second, unrelated warning.
 	bad := proxy.Envelope{
 		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
-		Transport: "http", MCPProtocolVersion: "2026-07-28",
+		Transport: "http", MCPProtocolVersion: "2026-07-28", MCPMethod: "tools/call", MCPName: "echo",
 		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25"}}}`),
 	}
 	ev := s.Ingest(bad)
@@ -129,7 +132,7 @@ func TestIngestProtocolVersionMismatch(t *testing.T) {
 	// Header agreeing with the _meta version is clean.
 	good := proxy.Envelope{
 		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ClientToServer,
-		Transport: "http", MCPProtocolVersion: "2026-07-28",
+		Transport: "http", MCPProtocolVersion: "2026-07-28", MCPMethod: "tools/call", MCPName: "echo",
 		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`),
 	}
 	if g := s.Ingest(good); g.RoutingMismatch || strings.Contains(g.Warning, "disagrees") {
@@ -139,7 +142,7 @@ func TestIngestProtocolVersionMismatch(t *testing.T) {
 	// Header present but no _meta version means nothing to disagree with.
 	noMeta := proxy.Envelope{
 		SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: now, Direction: proxy.ClientToServer,
-		Transport: "http", MCPProtocolVersion: "2026-07-28",
+		Transport: "http", MCPProtocolVersion: "2026-07-28", MCPMethod: "tools/list",
 		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":3,"method":"tools/list"}`),
 	}
 	if g := s.Ingest(noMeta); g.RoutingMismatch {

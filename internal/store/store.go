@@ -159,6 +159,7 @@ type event struct {
 	mcpName            string // Mcp-Name routing header
 	mcpProtocolVersion string // MCP-Protocol-Version request header
 	batch              bool   // one element of a JSON-RPC batch (routing headers cannot address it)
+	transport          string // the channel this frame was observed on (proxy.TransportHTTP, …)
 	status             int    // HTTP status of the response this frame arrived on (zero on stdio)
 	authChallenge      string // WWW-Authenticate on that response
 	mismatch           bool   // a routing header disagrees with the body (structured flag for warning)
@@ -282,7 +283,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		return EventView{Kind: EventOther} // control frame, not shown in the stream
 	}
 
-	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName, mcpProtocolVersion: e.MCPProtocolVersion, batch: e.Batch, status: e.Status, authChallenge: e.AuthChallenge}
+	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName, mcpProtocolVersion: e.MCPProtocolVersion, batch: e.Batch, transport: e.Transport, status: e.Status, authChallenge: e.AuthChallenge}
 
 	if e.Direction == proxy.ServerStderr {
 		ev.kind = EventStderr
@@ -490,6 +491,27 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			ev.warning = appendWarning(ev.warning,
 				"MCP-Protocol-Version header "+ev.mcpProtocolVersion+
 					" disagrees with _meta protocolVersion "+mv)
+			ev.mismatch = true
+		}
+	}
+
+	// Absent headers, as opposed to disagreeing ones. A compliant server rejects
+	// both with 400 and -32020, so they share a signal, but they are different
+	// questions and the guards are not the same: a disagreement needs the header
+	// to be there, this needs to know it should have been.
+	//
+	// initialize is exempt. Its params carry the version the client proposes, not
+	// one anything has agreed to, and the store folds that proposal into the
+	// session before this runs, so judging the handshake by its own opening bid
+	// accuses a client whose server then negotiates down to a revision where these
+	// headers do not exist. The exemption costs nothing on the revision that
+	// requires them: 2026-07-28 removed the initialize handshake (SEP-2575), so a
+	// session genuinely speaking it has no initialize to skip.
+	if ev.transport == proxy.TransportHTTP && e.Direction == proxy.ClientToServer &&
+		!ev.batch && msg.Method != "" && msg.Method != "initialize" &&
+		requestRequiresRoutingHeaders(sess, ev) {
+		for _, h := range missingRoutingHeaders(ev, msg.Method) {
+			ev.warning = appendWarning(ev.warning, "required routing header "+h+" is missing")
 			ev.mismatch = true
 		}
 	}
@@ -1149,6 +1171,54 @@ func operationName(msg proxy.RPCMessage) string {
 	default:
 		return ""
 	}
+}
+
+// routingHeadersRequiredFrom is the revision that introduced the Streamable HTTP
+// routing headers and made them REQUIRED. They do not appear in any earlier
+// revision at all, so a session speaking one of those is correct to omit them.
+const routingHeadersRequiredFrom = "2026-07-28"
+
+// requiresRoutingHeaders reports whether a protocol version mandates them.
+// Revisions are dated YYYY-MM-DD, so string order is chronological, and a named
+// pre-release such as "draft" sorts after every date, which is the right answer:
+// it is ahead of the last release, not behind it. An empty version is false by
+// the same comparison, which is what we want, since a version we never saw is not
+// evidence and guessing would mean accusing a client on none.
+func requiresRoutingHeaders(version string) bool {
+	return version >= routingHeadersRequiredFrom
+}
+
+// requestRequiresRoutingHeaders asks whether this frame is evidence of a
+// revision that mandates the headers. Either source counts on its own: the
+// session may have settled a version through the handshake or through _meta,
+// and a client can also state one in this very request's header without the
+// session having settled anything yet.
+func requestRequiresRoutingHeaders(sess *session, ev *event) bool {
+	return requiresRoutingHeaders(sess.caps.protocolVersion) ||
+		requiresRoutingHeaders(ev.mcpProtocolVersion)
+}
+
+// namedOperationMethods are the three methods whose target Mcp-Name must carry.
+// Deliberately narrower than operationName, which also maps resources/subscribe
+// and resources/unsubscribe: those are not in the spec's table, and demanding a
+// header there would flag a client the spec does not oblige. (They are also gone
+// from 2026-07-28, replaced by subscriptions/listen.)
+var namedOperationMethods = []string{"tools/call", "resources/read", "prompts/get"}
+
+// missingRoutingHeaders lists the standard headers this request had to carry and
+// did not, in the order the spec tabulates them.
+func missingRoutingHeaders(ev *event, method string) []string {
+	var missing []string
+	if ev.mcpProtocolVersion == "" {
+		missing = append(missing, "MCP-Protocol-Version")
+	}
+	if ev.mcpMethod == "" {
+		missing = append(missing, "Mcp-Method")
+	}
+	if ev.mcpName == "" && slices.Contains(namedOperationMethods, method) {
+		missing = append(missing, "Mcp-Name")
+	}
+	return missing
 }
 
 // metaProtocolVersion returns the protocol version a request repeats in its

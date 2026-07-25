@@ -23,6 +23,13 @@ const (
 	DirectionMeta Direction = "meta"
 )
 
+// Transport names the channel an envelope was observed on. The store gates its
+// header checks on this, since only Streamable HTTP has headers to check.
+const (
+	TransportStdio = "stdio"
+	TransportHTTP  = "http"
+)
+
 // SessionMeta describes a proxied session so it can be replayed later (even from
 // a backfilled log). It travels as the first envelope of a session.
 type SessionMeta struct {
