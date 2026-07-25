@@ -88,7 +88,7 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 			Seq:         seq.Add(1),
 			TS:          time.Now(),
 			Direction:   dir,
-			Transport:   "stdio",
+			Transport:   TransportStdio,
 		}
 		if raw != nil {
 			// Copy, because the underlying buffer is reused by the next read.

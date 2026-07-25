@@ -113,7 +113,7 @@ func demoEnvelope(session string, seq uint64, f demoFrame) proxy.Envelope {
 		Seq:         seq,
 		TS:          time.Now(),
 		Direction:   f.dir,
-		Transport:   "stdio",
+		Transport:   proxy.TransportStdio,
 	}
 	switch {
 	case f.text != "":

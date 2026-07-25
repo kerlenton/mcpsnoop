@@ -332,6 +332,11 @@ conditions relevant to a job. Omit the session to check the newest capture, or u
 A name or resource URI that will not fit in an HTTP field value travels Base64 in
 a `=?base64?…?=` sentinel; it is decoded before the comparison, so a client that
 encodes correctly is never flagged.
+The same signal covers a required routing header that is missing entirely, which
+2026-07-28 made a validation failure a compliant server rejects with `400` and
+`-32020`. It is raised only once the session is known to speak that revision or
+later: earlier revisions do not define these headers, so omitting them there is
+correct.
 Use `--format junit` to write one JUnit `<testcase>` per signal and session;
 failures follow the same `--fail-on` selection as the text output.
 
