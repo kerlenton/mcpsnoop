@@ -1240,10 +1240,15 @@ func summaryHasRow(styled, name, cell string) bool {
 func TestSummaryHeaderShowsOnlyCallsAndSort(t *testing.T) {
 	st := store.New()
 	base := time.Now()
-	st.Ingest(envAt(1, proxy.ClientToServer, base, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"good"}}`))
-	st.Ingest(envAt(2, proxy.ServerToClient, base.Add(time.Millisecond), `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
-	st.Ingest(envAt(3, proxy.ClientToServer, base.Add(2*time.Millisecond), `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"bad"}}`))
-	st.Ingest(envAt(4, proxy.ServerToClient, base.Add(3*time.Millisecond), `{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[]}}`))
+	// Advertise both tools so the DEF column shows a byte count rather than the ·
+	// it uses for an unadvertised tool. That · would otherwise collide with the
+	// one this test reads in the ERR column, which is the only column it is about.
+	st.Ingest(envAt(1, proxy.ClientToServer, base, `{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{}}`))
+	st.Ingest(envAt(2, proxy.ServerToClient, base, `{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"good"},{"name":"bad"}]}}`))
+	st.Ingest(envAt(3, proxy.ClientToServer, base.Add(time.Millisecond), `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"good"}}`))
+	st.Ingest(envAt(4, proxy.ServerToClient, base.Add(2*time.Millisecond), `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
+	st.Ingest(envAt(5, proxy.ClientToServer, base.Add(3*time.Millisecond), `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"bad"}}`))
+	st.Ingest(envAt(6, proxy.ServerToClient, base.Add(4*time.Millisecond), `{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[]}}`))
 
 	m := ready(t, st)
 	m = typeRunes(t, m, "s")
@@ -1268,6 +1273,66 @@ func TestSummaryHeaderShowsOnlyCallsAndSort(t *testing.T) {
 	// The erroring tool sorts above the clean one, not alphabetically.
 	if strings.Index(out, "bad") > strings.Index(out, "good") {
 		t.Fatalf("erroring tool should sort first\n%s", out)
+	}
+}
+
+// TestSummaryReportsContextCostInBytes checks the numbers reach the screen and
+// that the wording never implies a token count, which is the scope line the
+// issue drew: bytes are exact, tokens would mean shipping someone's tokeniser.
+func TestSummaryReportsContextCostInBytes(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"`+strings.Repeat("long ", 200)+`","inputSchema":{"type":"object"}},{"name":"ping","description":"Ping.","inputSchema":{"type":"object"}}]}}`))
+	st.Ingest(env(3, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}`))
+	st.Ingest(env(4, proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"`+strings.Repeat("y", 3000)+`"}]}}`))
+
+	m := ready(t, st)
+	m = typeRunes(t, m, "s")
+	out := m.overlayRaw
+
+	for _, want := range []string{"definitions", "2 tools", "DEF", "RESULT", "KiB", "paid on every conversation", "heaviest"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("tool summary missing %q\n%s", want, out)
+		}
+	}
+	// Bytes, never tokens, in any casing.
+	if strings.Contains(strings.ToLower(out), "token") {
+		t.Fatalf("the summary must not mention tokens\n%s", out)
+	}
+}
+
+// TestSummaryMarksAnUnfinishedToolList locks the misleading-total guard: a list
+// still paginating must not present its partial sum as the cost of the server.
+func TestSummaryMarksAnUnfinishedToolList(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"d","inputSchema":{"type":"object"}}],"nextCursor":"page2"}}`))
+
+	m := ready(t, st)
+	m = typeRunes(t, m, "s")
+	out := m.overlayRaw
+
+	for _, want := range []string{"so far", "never finished paginating"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("an unfinished list must say so, missing %q\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "paid on every conversation") {
+		t.Fatalf("a partial sum must not be worded as the settled cost\n%s", out)
+	}
+}
+
+// TestSummaryWithoutAToolsListOmitsTheCostLine keeps the screen unchanged for a
+// session that never listed tools, where there is nothing measured to report.
+func TestSummaryWithoutAToolsListOmitsTheCostLine(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search"}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
+
+	m := ready(t, st)
+	m = typeRunes(t, m, "s")
+	if strings.Contains(m.overlayRaw, "definitions") {
+		t.Fatalf("no tools/list was seen, so there is no fixed cost to claim\n%s", m.overlayRaw)
 	}
 }
 

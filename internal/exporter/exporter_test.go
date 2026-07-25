@@ -11,7 +11,26 @@ import (
 
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/store"
 )
+
+// ingest folds raw JSON-RPC frames into a fresh session, alternating client and
+// server direction, so a test can build a store to export without a log file.
+func ingest(t *testing.T, st *store.Store, raws ...string) {
+	t.Helper()
+	now := time.Now()
+	for i, raw := range raws {
+		dir := proxy.ClientToServer
+		if i%2 == 1 {
+			dir = proxy.ServerToClient
+		}
+		st.Ingest(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "srv", Seq: uint64(i + 1),
+			TS: now.Add(time.Duration(i) * time.Millisecond), Direction: dir,
+			Raw: json.RawMessage(raw),
+		})
+	}
+}
 
 func writeEnv(t *testing.T, path string, env proxy.Envelope) {
 	t.Helper()
@@ -421,5 +440,38 @@ func TestDefaultOutputPathExtensions(t *testing.T) {
 		if got := DefaultOutputPath("s1", format); !strings.HasSuffix(got, suffix) {
 			t.Errorf("DefaultOutputPath(%q) = %q, want suffix %q", format, got, suffix)
 		}
+	}
+}
+
+// TestExportCarriesContextCost checks the figures reach the export, which is
+// what makes them trackable over time and diffable between two captures.
+func TestExportCarriesContextCost(t *testing.T) {
+	st := store.New()
+	ingest(t, st,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search things.","inputSchema":{"type":"object"}}]}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}`,
+		`{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"hello"}]}}`,
+	)
+
+	out, err := Build(st, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Summary.Definitions == nil {
+		t.Fatal("the export should carry the tool list's fixed cost")
+	}
+	def := out.Summary.Definitions
+	if !def.Complete || def.Tools != 1 || def.Bytes == 0 {
+		t.Fatalf("definitions = %+v", def)
+	}
+	if len(def.PerTool) != 1 || def.PerTool[0].Name != "search" || def.PerTool[0].SchemaBytes == 0 {
+		t.Fatalf("per-tool breakdown = %+v", def.PerTool)
+	}
+	if len(out.Summary.Tools) != 1 || out.Summary.Tools[0].ResultBytes == 0 {
+		t.Fatalf("result bytes missing from the export: %+v", out.Summary.Tools)
+	}
+	if out.Summary.Tools[0].MaxResultBytes == 0 {
+		t.Fatalf("worst-case result missing from the export: %+v", out.Summary.Tools)
 	}
 }

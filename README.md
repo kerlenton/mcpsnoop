@@ -431,6 +431,32 @@ it, and nothing about MCP traffic changes.
 Nothing is resolved or fetched. An external `$ref` is recognized by its form
 alone, and the schema it points at is never read.
 
+### See what the server costs you in context
+
+Tool definitions enter the model's context on every conversation, and tool
+results on every call. The tool summary (`s`) measures both from the session
+you actually captured.
+
+The `definitions` line is the fixed cost: what this server's `tools/list`
+weighs before a single call is made. The `DEF` column breaks that down per
+tool, sorted so the two or three tools carrying most of it lead, and `RESULT`
+is what each tool's answers have cost so far. A line under the table names the
+single heaviest result, which a total hides.
+
+```bash
+mcpsnoop export -T json | jq '.summary.definitions'
+```
+
+The export carries the same figures, per tool and split into description and
+schema bytes, so a fat description and a fat schema stay separable and either
+can be tracked across captures or compared with `mcpsnoop diff`.
+
+These are **bytes, not tokens**. A token count depends on the model, so
+measuring one would mean shipping a tokeniser and picking whose. Bytes are
+exact and you can apply your own ratio. An unfinished `tools/list` reports what
+it saw as a floor and says so, rather than passing a partial sum off as the
+total.
+
 ### Detect a client that mangles server state
 
 Under the multi round-trip pattern the server hands the client an opaque

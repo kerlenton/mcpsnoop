@@ -1283,6 +1283,8 @@ const (
 	sumCallsW   = 7
 	sumErrW     = 6
 	sumLatW     = 10
+	sumDefW     = 9
+	sumResW     = 10
 	covLabelW   = 11
 	driftLabelW = 20
 )
@@ -1299,6 +1301,15 @@ func (m Model) summaryContent() string {
 		for _, d := range definitions {
 			findingsByName[d.Name] = d.Findings
 		}
+	}
+	// Costs come from ToolCosts rather than ToolDefinitions because that one is
+	// gated on a complete tool list. A half-paginated list still has a real
+	// per-tool weight, and blanking the column while showing the rows would read
+	// as "this tool is free".
+	costByName := map[string]store.ToolCost{}
+	listCost, hasCost := m.store.ToolCosts(sid)
+	for _, c := range listCost.PerTool {
+		costByName[c.Name] = c
 	}
 	w, _ := m.overlayDims()
 
@@ -1326,6 +1337,11 @@ func (m Model) summaryContent() string {
 		if drift.Count() > 0 {
 			sections = append(sections, m.definitionDriftSection(drift, w))
 		}
+	}
+	// The fixed cost leads, because it is the one paid whether or not anything
+	// below it was ever called.
+	if hasCost {
+		sections = append(sections, m.definitionCostLine(listCost))
 	}
 
 	// TABLE: every advertised tool plus any called one, so the full tool set is
@@ -1357,6 +1373,7 @@ func (m Model) summaryContent() string {
 	var t strings.Builder
 	t.WriteString(m.styles.dim.Render(cellL("TOOL", sumToolW) +
 		cellR("CALLS", sumCallsW) + cellR("ERR", sumErrW) + cellR("LATENCY", sumLatW) +
+		cellR("DEF", sumDefW) + cellR("RESULT", sumResW) +
 		"  " + cellL("SCHEMA", sumSchemaW)))
 	for _, tool := range tools {
 		base := m.styles.neutral
@@ -1389,13 +1406,32 @@ func (m Model) summaryContent() string {
 			}
 			schemaCell = m.styles.warn.Render(cellL(label, sumSchemaW))
 		}
+		// DEF is what advertising the tool costs, once per conversation. RESULT
+		// is what its answers have cost so far, and grows per call. Both carry
+		// their unit so neither can be read as a token count. A tool the server
+		// never advertised has no definition cost to show, which is a real state
+		// (see the undeclared line below) rather than a zero.
+		defCell := m.styles.faint.Render(cellR("·", sumDefW))
+		if c, ok := costByName[tool.Name]; ok {
+			defCell = cellR(base.Render(formatBytes(int64(c.Bytes))), sumDefW)
+		}
+		resCell := cellR(base.Render(formatBytes(tool.ResultBytes)), sumResW)
 		t.WriteString("\n" + base.Render(cellL(tool.Name, sumToolW)) +
 			cellR(base.Render(fmt.Sprintf("%d", tool.Calls)), sumCallsW) +
 			cellR(errCell, sumErrW) +
 			cellR(lat, sumLatW) +
+			defCell + resCell +
 			"  " + schemaCell)
 	}
 	sections = append(sections, t.String())
+
+	// The worst single result is the per-call cost's tail, which a total hides:
+	// one 4 MiB answer among a hundred small ones reads as an unremarkable
+	// average until it is named.
+	if name, worst := heaviestResult(summary.Tools); worst > 0 {
+		sections = append(sections, m.styles.dim.Render(cellL("heaviest", covLabelW))+
+			m.styles.neutral.Render(fmt.Sprintf("%s returned %s in one result", name, formatBytes(int64(worst)))))
+	}
 
 	// DRIFT: tools the client called that the server never advertised in
 	// tools/list. They appear in the table too, but a red line flags them as a
@@ -1508,6 +1544,56 @@ func formatLatency(d time.Duration) string {
 		return d.Round(100 * time.Microsecond).String()
 	default:
 		return d.Round(10 * time.Millisecond).String()
+	}
+}
+
+// definitionCostLine states the fixed half of the context bill: what this
+// server's tool list weighs before a single call is made. An unfinished
+// tools/list reports a floor and says so, since presenting a partial sum as the
+// total is the one way this number could mislead.
+func (m Model) definitionCostLine(cost store.ToolListCost) string {
+	tools := "tools"
+	if cost.Tools == 1 {
+		tools = "tool"
+	}
+	value := fmt.Sprintf("%d %s · %s", cost.Tools, tools, formatBytes(int64(cost.Bytes)))
+	note := " of tool definitions, paid on every conversation"
+	style := m.styles.neutral
+	if !cost.Complete {
+		value = fmt.Sprintf("%d %s · %s so far", cost.Tools, tools, formatBytes(int64(cost.Bytes)))
+		note = ", tools/list never finished paginating"
+		style = m.styles.warn
+	}
+	return m.styles.dim.Render(cellL("definitions", covLabelW)) + style.Render(value) + m.styles.faint.Render(note)
+}
+
+// heaviestResult names the tool with the largest single observed result.
+func heaviestResult(tools []store.ToolStats) (string, int) {
+	name, worst := "", 0
+	for _, t := range tools {
+		if t.MaxResultBytes > worst {
+			name, worst = t.Name, t.MaxResultBytes
+		}
+	}
+	return name, worst
+}
+
+// formatBytes renders a byte count for a narrow column. Bytes and never tokens:
+// a token count is model specific, so mcpsnoop reports the exact bytes and lets
+// the reader apply whatever ratio their model implies. The unit rides every
+// value so no cell can be mistaken for a token count, and the binary units are
+// spelled KiB and MiB rather than kB, because a number presented as exact
+// should not quietly mean 1024.
+func formatBytes(n int64) string {
+	switch {
+	case n <= 0:
+		return "·"
+	case n < 1<<10:
+		return fmt.Sprintf("%d B", n)
+	case n < 1<<20:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
 	}
 }
 

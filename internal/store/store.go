@@ -185,8 +185,12 @@ type session struct {
 	advertisedSet    map[string]struct{}
 	toolDefinitions  map[string]ToolDefinition
 	toolListComplete bool
-	toolDrift        ToolDrift
-	toolDriftSet     bool
+	// toolListSeen records that a tools/list response was observed at all, which
+	// toolListComplete cannot express: a server advertising no tools leaves the
+	// set empty and the list complete, exactly like a session that never listed.
+	toolListSeen bool
+	toolDrift    ToolDrift
+	toolDriftSet bool
 
 	command []string
 	cwd     string
@@ -799,18 +803,19 @@ func (c *capabilities) applyResponseMeta(result json.RawMessage) {
 // and supersedes what we had (a tools/list_changed re-list can drop tools). A
 // cursored request is a pagination continuation, so it extends the set.
 func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
+	// The tools array is decoded element by element so each definition's exact
+	// bytes stay available to measure, and so one malformed entry skips only
+	// itself. Decoding straight into a typed slice did neither: it discarded the
+	// whole list on a single bad element and left no handle on what was sent.
 	var r struct {
-		Tools []struct {
-			Name        string          `json:"name"`
-			Description string          `json:"description"`
-			InputSchema json.RawMessage `json:"inputSchema"`
-		} `json:"tools"`
-		NextCursor string `json:"nextCursor"`
+		Tools      []json.RawMessage `json:"tools"`
+		NextCursor string            `json:"nextCursor"`
 	}
 
 	if json.Unmarshal(result, &r) != nil {
 		return
 	}
+	sess.toolListSeen = true
 
 	if !hasListCursor(reqParams) {
 		clear(sess.advertisedSet)
@@ -818,8 +823,13 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		sess.advertisedTools = nil
 	}
 
-	for _, tool := range r.Tools {
-		if tool.Name == "" {
+	for _, rawTool := range r.Tools {
+		var tool struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"inputSchema"`
+		}
+		if json.Unmarshal(rawTool, &tool) != nil || tool.Name == "" {
 			continue
 		}
 		if _, ok := sess.advertisedSet[tool.Name]; ok {
@@ -835,6 +845,12 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 			Description: tool.Description,
 			InputSchema: schema,
 			Findings:    analyzeSchema(schema),
+			Cost: ToolCost{
+				Name:             tool.Name,
+				Bytes:            len(rawTool),
+				DescriptionBytes: len(tool.Description),
+				SchemaBytes:      len(tool.InputSchema),
+			},
 		}
 	}
 	sess.toolListComplete = r.NextCursor == ""
