@@ -193,3 +193,108 @@ func TestStdioNonJSONLine(t *testing.T) {
 		}
 	}
 }
+
+// TestPumpFramesFlagsTruncated checks that stdio observation marks an oversized
+// line as truncated, so the store reports a capped copy rather than diagnosing
+// the server's stream as corrupted.
+//
+// The cap is an argument rather than a package variable a test lowers: mutating
+// shared state to reach a branch leaves the branch reachable from anywhere, and
+// this package runs its taps from goroutines.
+func TestPumpFramesFlagsTruncated(t *testing.T) {
+	const observeCap = 32
+	line := strings.Repeat("x", 48) + "\n"
+
+	var out bytes.Buffer
+	var truncated bool
+	var observed []byte
+	pumpFrames(strings.NewReader(line), &out, observeCap, func(l []byte, tr bool) {
+		observed = append([]byte(nil), l...)
+		truncated = tr
+	})
+
+	// Forwarding first: the observer's cap must never reach the data path.
+	if out.String() != line {
+		t.Fatalf("passthrough mismatch: got %q want %q", out.String(), line)
+	}
+	if !truncated {
+		t.Fatal("expected truncated=true for an oversized stdio line")
+	}
+	if len(observed) != observeCap {
+		t.Fatalf("observed len = %d, want %d", len(observed), observeCap)
+	}
+	// The copy stops short of the terminator, so nothing may be stripped as one.
+	// Every byte here is content, and a line that lost one to terminator handling
+	// would come back shorter than the cap.
+	if strings.Trim(string(observed), "x") != "" {
+		t.Fatalf("a truncated copy lost content to terminator stripping: %q", observed)
+	}
+}
+
+// TestPumpFramesLeavesAWholeLineUnflagged pins the other side. A cap that always
+// trips would satisfy the test above while flagging every frame of a real
+// session, and the terminator must still be stripped when it is actually there.
+func TestPumpFramesLeavesAWholeLineUnflagged(t *testing.T) {
+	const frame = `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+
+	var out bytes.Buffer
+	var truncated bool
+	var observed []byte
+	pumpFrames(strings.NewReader(frame+"\r\n"), &out, maxFrameBytes, func(l []byte, tr bool) {
+		observed = append([]byte(nil), l...)
+		truncated = tr
+	})
+
+	if truncated {
+		t.Fatal("a line well inside the cap must not be flagged")
+	}
+	if string(observed) != frame {
+		t.Fatalf("observed %q, want the frame without its CRLF: %q", observed, frame)
+	}
+}
+
+// TestTruncatedFrameSurvivesTheSink is the regression the truncation flag turns
+// on. Envelope.Raw is a json.RawMessage, and both sinks encode the envelope with
+// encoding/json, which validates it. A truncated frame is a fragment and so is
+// never valid JSON, so putting one in Raw makes the whole envelope fail to
+// marshal. The two sinks answer that differently and both badly: AsyncSink
+// discards the write, so the frame never reaches the trace file, and SocketSink
+// reads the error as the hub having gone away and drops the connection.
+//
+// splitObserved is what keeps that from happening: a fragment goes to Text,
+// which encodes fine, and the flag is what says the copy is short.
+func TestTruncatedFrameSurvivesTheSink(t *testing.T) {
+	// Valid JSON in full, a fragment once capped, which is the shape of every
+	// frame this path exists for.
+	full := `{"jsonrpc":"2.0","id":1,"result":{"content":"` + strings.Repeat("y", 64) + `"}}`
+	fragment := full[:40]
+	if json.Valid([]byte(fragment)) {
+		t.Fatal("this test needs a prefix that is not valid JSON on its own")
+	}
+
+	var buf bytes.Buffer
+	sink := NewAsyncSink(&buf, 16)
+	raw, text := splitObserved([]byte(fragment))
+	sink.Emit(Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+		Direction: ServerToClient, Transport: TransportStdio,
+		Raw: raw, Text: text, Truncated: true,
+	})
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("the truncated frame never reached the sink: %v (wrote %q)", err, buf.String())
+	}
+	if !env.Truncated {
+		t.Fatal("the frame should arrive flagged truncated")
+	}
+	if len(env.Raw) != 0 {
+		t.Fatalf("a fragment must not travel in Raw, it is not valid JSON: %s", env.Raw)
+	}
+	if env.Text != fragment {
+		t.Fatalf("the fragment should survive in Text, got %q", env.Text)
+	}
+}

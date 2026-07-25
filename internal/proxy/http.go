@@ -229,8 +229,19 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			}
 			if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 				// Streaming case, tap SSE data frames as bytes flow to the client.
-				resp.Body = newSSETap(resp.Body, func(data []byte) {
-					emitFrames(emit, ServerToClient, data, rt)
+				resp.Body = newSSETap(resp.Body, maxFrameBytes, func(data []byte, truncated bool) {
+					r := rt
+					if truncated {
+						// A cut event is a fragment, so it is emitted whole and flagged
+						// rather than split and parsed as if complete. emit routes it
+						// through splitObserved, which puts a fragment in Text: Raw is a
+						// json.RawMessage and an invalid one makes the envelope fail to
+						// marshal in the sinks.
+						r.truncated = true
+						emit(ServerToClient, data, r)
+						return
+					}
+					emitFrames(emit, ServerToClient, data, r)
 				})
 				return nil
 			}
@@ -308,15 +319,23 @@ func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte,
 
 // sseTap passes SSE bytes through unchanged while extracting each event's
 // `data:` payload (one JSON-RPC message per event) for observation.
+//
+// cap bounds what is kept, never what is forwarded, and it bounds two distinct
+// pathologies with one number: a server that never sends a newline, which would
+// grow lineBuf, and a stream that never sends its terminating blank line, which
+// would grow dataBuf. Either cut sets truncated, so a fragment is reported as
+// short rather than read as a corrupted frame.
 type sseTap struct {
-	rc      io.ReadCloser
-	onData  func([]byte)
-	lineBuf bytes.Buffer
-	dataBuf bytes.Buffer
+	rc        io.ReadCloser
+	cap       int
+	onData    func([]byte, bool)
+	lineBuf   bytes.Buffer
+	dataBuf   bytes.Buffer
+	truncated bool
 }
 
-func newSSETap(rc io.ReadCloser, onData func([]byte)) *sseTap {
-	return &sseTap{rc: rc, onData: onData}
+func newSSETap(rc io.ReadCloser, cap int, onData func([]byte, bool)) *sseTap {
+	return &sseTap{rc: rc, cap: cap, onData: onData}
 }
 
 func (t *sseTap) Read(p []byte) (int, error) {
@@ -338,8 +357,10 @@ func (t *sseTap) feed(b []byte) {
 		default:
 			// Cap the observed line so a server that never sends a newline cannot
 			// grow this buffer without bound. Forwarding is unaffected.
-			if t.lineBuf.Len() < maxFrameBytes {
+			if t.lineBuf.Len() < t.cap {
 				t.lineBuf.WriteByte(c)
+			} else {
+				t.truncated = true
 			}
 		}
 	}
@@ -348,21 +369,33 @@ func (t *sseTap) feed(b []byte) {
 func (t *sseTap) line(l []byte) {
 	if len(l) == 0 { // blank line ends an event
 		if t.dataBuf.Len() > 0 {
-			t.onData(append([]byte(nil), t.dataBuf.Bytes()...))
+			t.onData(append([]byte(nil), t.dataBuf.Bytes()...), t.truncated)
 			t.dataBuf.Reset()
+			t.truncated = false
 		}
 		return
 	}
 	if rest, ok := bytes.CutPrefix(l, []byte("data:")); ok {
-		// Cap the observed event so a stream that never sends its terminating
-		// blank line cannot grow this buffer without bound.
-		if t.dataBuf.Len() >= maxFrameBytes {
+		// Trim the optional single space before measuring, so the cap bounds the
+		// payload rather than the payload plus SSE framing.
+		rest = bytes.TrimPrefix(rest, []byte(" "))
+		room := t.cap - t.dataBuf.Len()
+		if room <= 0 {
+			t.truncated = true
 			return
 		}
 		if t.dataBuf.Len() > 0 {
+			// A multi-line event joins its data fields with a newline, and that
+			// newline counts against the cap like any other kept byte.
 			t.dataBuf.WriteByte('\n')
+			room--
 		}
-		t.dataBuf.Write(bytes.TrimPrefix(rest, []byte(" ")))
+		if len(rest) > room {
+			t.dataBuf.Write(rest[:room])
+			t.truncated = true
+			return
+		}
+		t.dataBuf.Write(rest)
 	}
 	// other SSE fields (event:, id:, retry:) are ignored
 }
@@ -374,8 +407,9 @@ func (t *sseTap) Close() error {
 		t.lineBuf.Reset()
 	}
 	if t.dataBuf.Len() > 0 {
-		t.onData(append([]byte(nil), t.dataBuf.Bytes()...))
+		t.onData(append([]byte(nil), t.dataBuf.Bytes()...), t.truncated)
 		t.dataBuf.Reset()
+		t.truncated = false
 	}
 	return t.rc.Close()
 }

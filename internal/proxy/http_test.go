@@ -423,7 +423,7 @@ func TestHTTPProxySSE(t *testing.T) {
 
 func TestSSETapMultiChunk(t *testing.T) {
 	var got []string
-	tap := newSSETap(io.NopCloser(strings.NewReader("")), func(d []byte) { got = append(got, string(d)) })
+	tap := newSSETap(io.NopCloser(strings.NewReader("")), maxFrameBytes, func(d []byte, _ bool) { got = append(got, string(d)) })
 	// Feed split across arbitrary chunk boundaries.
 	for _, chunk := range []string{"data: {\"a\":", "1}\n", "\nda", "ta: {\"b\":2}\n\n"} {
 		tap.feed([]byte(chunk))
@@ -435,12 +435,60 @@ func TestSSETapMultiChunk(t *testing.T) {
 
 func TestSSETapMultilineData(t *testing.T) {
 	var got []string
-	tap := newSSETap(io.NopCloser(strings.NewReader("")), func(d []byte) { got = append(got, string(d)) })
+	tap := newSSETap(io.NopCloser(strings.NewReader("")), maxFrameBytes, func(d []byte, _ bool) { got = append(got, string(d)) })
 
 	tap.feed([]byte("data: first line\ndata: second line\n\n"))
 
 	if len(got) != 1 || got[0] != "first line\nsecond line" {
 		t.Fatalf("sseTap parsed %v", got)
+	}
+}
+
+// TestSSETapFlagsTruncated checks that an SSE event whose observed copy exceeds
+// the cap is reported as truncated rather than parsed as a whole frame.
+//
+// The assertion is the invariant, not an exact length. One cap now bounds two
+// distinct pathologies, a line that never ends and an event that never ends, so
+// where the cut lands depends on which one is hit first; pinning a number would
+// test that arithmetic rather than the contract.
+func TestSSETapFlagsTruncated(t *testing.T) {
+	const observeCap = 16
+
+	var observed []byte
+	var truncated bool
+	tap := newSSETap(io.NopCloser(strings.NewReader("")), observeCap, func(d []byte, tr bool) {
+		observed = append([]byte(nil), d...)
+		truncated = tr
+	})
+	tap.feed([]byte("data: " + strings.Repeat("x", 32) + "\n\n"))
+
+	if !truncated {
+		t.Fatal("expected truncated=true for an oversized SSE event")
+	}
+	if len(observed) == 0 || len(observed) > observeCap {
+		t.Fatalf("observed len = %d, want between 1 and %d", len(observed), observeCap)
+	}
+}
+
+// TestSSETapKeepsAWholeEventUnflagged pins the other side, since a cap that is
+// always tripped would satisfy the test above while flagging every frame of a
+// real session.
+func TestSSETapKeepsAWholeEventUnflagged(t *testing.T) {
+	const msg = `{"jsonrpc":"2.0","id":1,"result":{}}`
+
+	var observed []byte
+	var truncated bool
+	tap := newSSETap(io.NopCloser(strings.NewReader("")), maxFrameBytes, func(d []byte, tr bool) {
+		observed = append([]byte(nil), d...)
+		truncated = tr
+	})
+	tap.feed([]byte("data: " + msg + "\n\n"))
+
+	if truncated {
+		t.Fatal("an event well inside the cap must not be flagged")
+	}
+	if string(observed) != msg {
+		t.Fatalf("observed %q, want the whole event %q", observed, msg)
 	}
 }
 
