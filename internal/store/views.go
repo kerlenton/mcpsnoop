@@ -115,6 +115,48 @@ type ToolDefinition struct {
 	Description string
 	InputSchema json.RawMessage
 	Findings    []SchemaFinding
+	// Cost is what advertising this tool weighs, measured once at ingest.
+	Cost ToolCost
+}
+
+// ToolCost is the measured weight of one advertised tool definition, in bytes.
+// Bytes and not tokens: a token count is model specific, so measuring one would
+// mean shipping a tokeniser and choosing whose. Bytes are exact, stable across
+// captures, and let a reader apply whatever ratio their own model implies. Every
+// figure is measured on one basis, the JSON with insignificant whitespace
+// removed, so two servers stay comparable regardless of how either formats its
+// tools/list.
+type ToolCost struct {
+	// Name duplicates ToolDefinition.Name so a cost can travel on its own, into
+	// a sorted breakdown or an export, without carrying the whole definition.
+	Name string
+	// Bytes is the definition object with insignificant whitespace removed, so it
+	// covers the name, description, schema, any annotations, and the JSON around
+	// them, and stays comparable between servers. This is the number that sums to
+	// the fixed cost of the tool list.
+	Bytes int
+	// DescriptionBytes is the description JSON encoded, quotes and escaping
+	// included, and SchemaBytes is the inputSchema with whitespace removed. Both
+	// are measured on the same basis as Bytes and point at where it went, but
+	// deliberately do not sum to it: the remainder is the name, the annotations
+	// and the structural punctuation, and pretending otherwise would invite
+	// reading the gap as a bug.
+	DescriptionBytes int
+	SchemaBytes      int
+}
+
+// ToolListCost is the fixed context cost of a session's advertised tool list,
+// the price paid on every conversation with that server before a single call is
+// made. PerTool is sorted heaviest first, since the question a reader has is
+// which two or three tools account for most of it.
+type ToolListCost struct {
+	Tools   int
+	Bytes   int
+	PerTool []ToolCost
+	// Complete is false while tools/list is still paginating, or never finished.
+	// Bytes then covers only the pages seen, which makes it a floor rather than
+	// the total, and it must not be presented as one.
+	Complete bool
 }
 
 // ToolDrift is the difference between the current complete tool list and the
@@ -170,6 +212,19 @@ type ToolStats struct {
 	P50     time.Duration
 	P95     time.Duration
 	P99     time.Duration
+	// ResultBytes totals this tool's results and MaxResultBytes is the largest
+	// single one, both as observed on the wire. Unlike the definition cost this
+	// half is paid per call, so a tool that is cheap to advertise can still be
+	// the expensive one. A call answered with a JSON-RPC error carries no result
+	// and so contributes nothing; a tool-level failure (result.isError) does.
+	//
+	// These are the bytes as they arrived, not normalised the way ToolCost is.
+	// A definition is a stable contract worth measuring canonically so two
+	// captures compare; a result is a one-off payload, and compacting every one
+	// of them to count it would allocate a second copy of a megabyte answer on
+	// a path that already holds the write lock.
+	ResultBytes    int64
+	MaxResultBytes int
 }
 
 // SlowToolCall identifies one of a session's slowest completed tool calls.
@@ -283,6 +338,42 @@ func (s *Store) ToolDefinitions(sessionID string) ([]ToolDefinition, bool) {
 		definitions = append(definitions, definition)
 	}
 	return definitions, true
+}
+
+// ToolCosts reports the fixed context cost of a session's advertised tool list.
+//
+// Unlike ToolDefinitions this does not require a complete list. A baseline may
+// only be trusted once the whole list has been seen, but a partial list still
+// has a real per-tool cost worth showing, and the caller is told through
+// Complete that the total is a floor. ok is false only when the session never
+// carried a tools/list response at all, which is a different thing from a
+// server that advertises no tools.
+func (s *Store) ToolCosts(sessionID string) (ToolListCost, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok || !sess.toolListSeen {
+		return ToolListCost{}, false
+	}
+	cost := ToolListCost{
+		Tools:    len(sess.advertisedTools),
+		Complete: sess.toolListComplete,
+		PerTool:  make([]ToolCost, 0, len(sess.advertisedTools)),
+	}
+	for _, name := range sess.advertisedTools {
+		definition := sess.toolDefinitions[name]
+		cost.Bytes += definition.Cost.Bytes
+		cost.PerTool = append(cost.PerTool, definition.Cost)
+	}
+	// Heaviest first, then by name for a stable order among equals. Alphabetical
+	// would bury the answer, which is which tools the cost is actually in.
+	slices.SortFunc(cost.PerTool, func(a, b ToolCost) int {
+		if c := cmp.Compare(b.Bytes, a.Bytes); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Name, b.Name)
+	})
+	return cost, true
 }
 
 // SetToolDrift attaches the current baseline comparison to a session.
@@ -503,6 +594,10 @@ func (s *Store) ToolSummary(sessionID string) (SessionToolSummary, bool) {
 		}
 		if c.errored {
 			agg.stats.Errors++
+		}
+		if n := len(c.result); n > 0 {
+			agg.stats.ResultBytes += int64(n)
+			agg.stats.MaxResultBytes = max(agg.stats.MaxResultBytes, n)
 		}
 		duration := c.end.Sub(c.start)
 		agg.durations = append(agg.durations, duration)

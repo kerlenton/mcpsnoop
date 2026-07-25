@@ -42,8 +42,28 @@ type SessionExport struct {
 }
 
 type ToolSummaryExport struct {
-	Tools        []ToolStatsExport `json:"tools"`
-	SlowestCalls []SlowCallExport  `json:"slowest_calls"`
+	Definitions  *ToolListCostExport `json:"definitions,omitempty"`
+	Tools        []ToolStatsExport   `json:"tools"`
+	SlowestCalls []SlowCallExport    `json:"slowest_calls"`
+}
+
+// ToolListCostExport is the fixed context cost of the advertised tool list. All
+// figures are byte counts; mcpsnoop does not tokenise, so nothing here is or
+// implies a token count.
+type ToolListCostExport struct {
+	Tools int `json:"tools"`
+	Bytes int `json:"bytes"`
+	// Complete is false when tools/list never finished paginating, which makes
+	// Bytes a floor rather than the total.
+	Complete bool             `json:"complete"`
+	PerTool  []ToolCostExport `json:"per_tool"`
+}
+
+type ToolCostExport struct {
+	Name             string `json:"name"`
+	Bytes            int    `json:"bytes"`
+	DescriptionBytes int    `json:"description_bytes"`
+	SchemaBytes      int    `json:"schema_bytes"`
 }
 
 type ToolStatsExport struct {
@@ -54,6 +74,9 @@ type ToolStatsExport struct {
 	P50MS   float64 `json:"p50_ms"`
 	P95MS   float64 `json:"p95_ms"`
 	P99MS   float64 `json:"p99_ms"`
+	// ResultBytes and MaxResultBytes are the per-call half of the context cost.
+	ResultBytes    int64 `json:"result_bytes"`
+	MaxResultBytes int   `json:"max_result_bytes"`
 }
 
 type SlowCallExport struct {
@@ -267,6 +290,12 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 	if summary, ok := st.ToolSummary(sessionID); ok {
 		out.Summary = exportToolSummary(summary)
 	}
+	// Definition cost is keyed to the advertised list rather than to the calls,
+	// so it is fetched separately: a server whose expensive tools were never
+	// called still charged for them, and that is exactly the case worth seeing.
+	if costs, ok := st.ToolCosts(sessionID); ok {
+		out.Summary.Definitions = exportToolListCost(costs)
+	}
 	if caps, ok := st.Capabilities(sessionID); ok {
 		out.Capabilities = &CapabilitiesExport{
 			ProtocolVersion: caps.ProtocolVersion,
@@ -289,12 +318,31 @@ func exportToolSummary(summary store.SessionToolSummary) ToolSummaryExport {
 		out.Tools = append(out.Tools, ToolStatsExport{
 			Name: tool.Name, Calls: tool.Calls, Errors: tool.Errors, Pending: tool.Pending,
 			P50MS: durationMS(tool.P50), P95MS: durationMS(tool.P95), P99MS: durationMS(tool.P99),
+			ResultBytes: tool.ResultBytes, MaxResultBytes: tool.MaxResultBytes,
 		})
 	}
 	for _, call := range summary.Slowest {
 		out.SlowestCalls = append(out.SlowestCalls, SlowCallExport{
 			CallIndex: call.CallIndex,
 			ID:        call.ID, ToolName: call.ToolName, DurationMS: durationMS(call.Duration), IsError: call.Failed,
+		})
+	}
+	return out
+}
+
+func exportToolListCost(cost store.ToolListCost) *ToolListCostExport {
+	out := &ToolListCostExport{
+		Tools:    cost.Tools,
+		Bytes:    cost.Bytes,
+		Complete: cost.Complete,
+		PerTool:  make([]ToolCostExport, 0, len(cost.PerTool)),
+	}
+	for _, tool := range cost.PerTool {
+		out.PerTool = append(out.PerTool, ToolCostExport{
+			Name:             tool.Name,
+			Bytes:            tool.Bytes,
+			DescriptionBytes: tool.DescriptionBytes,
+			SchemaBytes:      tool.SchemaBytes,
 		})
 	}
 	return out
