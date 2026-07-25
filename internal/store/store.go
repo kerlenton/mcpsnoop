@@ -418,9 +418,19 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			// Mcp-Name names the target operation (params.name for tools/call and
 			// prompts/get, params.uri for resources/read). A lie here is the
 			// tool-shadowing case, so it matters more than a bare method mismatch.
-			if name := operationName(msg); ev.mcpName != "" && name != "" && ev.mcpName != name {
-				ev.warning = appendWarning(ev.warning, "routing header Mcp-Name "+ev.mcpName+" disagrees with body name "+name)
-				ev.mismatch = true
+			//
+			// The header is decoded first. A name or URI that will not fit in an
+			// HTTP field value travels Base64 in a sentinel, and the spec requires
+			// it decoded before the comparison. Comparing the encoded form accused
+			// every compliant client with a non-ASCII name or path, and since that
+			// rides the warning signal it failed a default check run on correct
+			// traffic. The message reports the decoded value, because base64 in a
+			// warning tells a reader nothing.
+			if name := operationName(msg); ev.mcpName != "" && name != "" {
+				if header := decodeHeaderValue(ev.mcpName); header != name {
+					ev.warning = appendWarning(ev.warning, "routing header Mcp-Name "+header+" disagrees with body name "+name)
+					ev.mismatch = true
+				}
 			}
 		}
 	}

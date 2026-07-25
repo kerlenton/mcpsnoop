@@ -320,6 +320,9 @@ on tool definitions changing after approval, or `deprecated` to gate on features
 the spec has deprecated. Pass a comma-separated subset to select only the
 conditions relevant to a job. Omit the session to check the newest capture, or use
 `-` to read JSONL from stdin.
+A name or resource URI that will not fit in an HTTP field value travels Base64 in
+a `=?base64?…?=` sentinel; it is decoded before the comparison, so a client that
+encodes correctly is never flagged.
 Use `--format junit` to write one JUnit `<testcase>` per signal and session;
 failures follow the same `--fail-on` selection as the text output.
 
