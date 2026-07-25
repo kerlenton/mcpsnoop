@@ -41,7 +41,7 @@ If you omit the session, `open` uses the newest saved log, matching `export`.
 
 ```bash
 mcpsnoop open
-mcpsnoop open server.py-48213-7f3a1c
+mcpsnoop open server.py-48213-7f3a1c9e2b04
 mcpsnoop open ./session.jsonl
 ```
 
