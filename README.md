@@ -250,11 +250,11 @@ MCP is not HTTP, so a HAR entry's URL, status code, and timings are a deliberate
 mapping of each call rather than a wire transcript.
 
 ```bash
-mcpsnoop export -T html -o out.html       # an HTML file to open in a browser
-mcpsnoop export -T text server.py-48213   # a specific session, as text
-mcpsnoop export -T json | jq              # the newest session, piped to jq
-mcpsnoop export -T har -o session.har     # a HAR file to open in browser devtools
-mcpsnoop export -T otlp -o trace.json     # import into an OTLP-compatible tracing backend
+mcpsnoop export -T html -o out.html              # an HTML file to open in a browser
+mcpsnoop export -T text server.py-48213-7f3a1c   # a specific session, as text
+mcpsnoop export -T json | jq                     # the newest session, piped to jq
+mcpsnoop export -T har -o session.har            # a HAR file to open in browser devtools
+mcpsnoop export -T otlp -o trace.json            # import into an OTLP-compatible tracing backend
 ```
 
 Omit `-o` to write to stdout, and omit the session to take the newest, or pass

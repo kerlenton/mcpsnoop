@@ -39,6 +39,53 @@ func TestLabelFor(t *testing.T) {
 	}
 }
 
+// TestNewSessionIDIsUniquePerRun is the regression for a reused PID silently
+// discarding a whole session. The hub deduplicates on a per-session high-water
+// mark of Seq, so two runs sharing an id lose the second one entirely, with no
+// gap reported and nothing on screen. Uniqueness therefore has to hold per run,
+// which the PID cannot give, since it repeats.
+func TestNewSessionIDIsUniquePerRun(t *testing.T) {
+	const runs = 1000
+	seen := make(map[string]bool, runs)
+	for range runs {
+		id := newSessionID("server.py")
+		if seen[id] {
+			t.Fatalf("two runs produced the same session id %q; a repeat here is the bug", id)
+		}
+		seen[id] = true
+	}
+}
+
+// TestNewSessionIDGivesEachRunItsOwnLog covers the other half of the collision:
+// the id is also the log file name, so two runs sharing one would append into a
+// single file and leave one capture holding two sessions whose Seq both start
+// at 1.
+func TestNewSessionIDGivesEachRunItsOwnLog(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	first, second := newSessionID("server.py"), newSessionID("server.py")
+	if paths.SessionLogPath(first) == paths.SessionLogPath(second) {
+		t.Fatalf("two runs must not share a log file: %s", paths.SessionLogPath(first))
+	}
+}
+
+// TestNewSessionIDStaysReadable keeps the id greppable and matchable to a
+// process. It is what a person types into `mcpsnoop open` and what the shim
+// prints on startup, so the label has to lead and the PID has to survive.
+func TestNewSessionIDStaysReadable(t *testing.T) {
+	id := newSessionID("server.py")
+	if !strings.HasPrefix(id, "server.py-") {
+		t.Fatalf("session id %q should start with the label", id)
+	}
+	if !strings.Contains(id, fmt.Sprintf("-%d-", os.Getpid())) {
+		t.Fatalf("session id %q should still carry the pid", id)
+	}
+	// The id becomes a file name under the sessions directory, so the suffix
+	// must not introduce a separator. (A label that does is issue #155.)
+	if strings.ContainsAny(id, `/\`) {
+		t.Fatalf("session id %q must be usable as a file name", id)
+	}
+}
+
 // stubShim replaces the shim runner so routing tests can capture the wrapped
 // command without spawning a process, and returns a restore func.
 func stubShim(capture *[]string) func() {
