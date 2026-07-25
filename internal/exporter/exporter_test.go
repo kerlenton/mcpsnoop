@@ -3,6 +3,7 @@ package exporter
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -510,5 +511,36 @@ func TestExportCarriesTheTransportEvent(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "transport") {
 		t.Fatalf("the text export should name the kind, got %q", buf.String())
+	}
+}
+
+// TestExportNamesASpecDefinedErrorCode. The export is what a script reads, so
+// the name rides alongside the wire error rather than inside it, and a code the
+// spec leaves to implementations carries no name at all.
+func TestExportNamesASpecDefinedErrorCode(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		want string
+	}{
+		{-32020, "header mismatch"},
+		{-32001, ""},
+	} {
+		st := store.New()
+		ingest(t, st,
+			`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`,
+			fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"error":{"code":%d,"message":"nope"}}`, tc.code))
+		out, err := Build(st, "s1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Calls) != 1 {
+			t.Fatalf("expected one call, got %d", len(out.Calls))
+		}
+		if out.Calls[0].ErrorName != tc.want {
+			t.Fatalf("code %d exported name %q, want %q", tc.code, out.Calls[0].ErrorName, tc.want)
+		}
+		if out.Calls[0].Error == nil || out.Calls[0].Error.Code != tc.code {
+			t.Fatalf("the wire error object must stay intact, got %+v", out.Calls[0].Error)
+		}
 	}
 }

@@ -41,7 +41,7 @@ func (m Model) replayContent(msg replayDoneMsg) string {
 	dur := msg.res.Duration.Round(time.Millisecond)
 	switch {
 	case msg.res.Err != nil:
-		b.WriteString(m.styles.respErr.Render(fmt.Sprintf("ERROR %d: %s  (%s)", msg.res.Err.Code, msg.res.Err.Message, dur)) + "\n\n")
+		b.WriteString(m.styles.respErr.Render(fmt.Sprintf("ERROR %s  (%s)", rpcErrorText(*msg.res.Err), dur)) + "\n\n")
 	default:
 		b.WriteString(m.styles.resp.Render(fmt.Sprintf("ok  (%s)", dur)) + "\n\n")
 	}

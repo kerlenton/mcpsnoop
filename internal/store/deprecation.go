@@ -56,3 +56,17 @@ func deprecatedNestedNote(methods []string) string {
 	}
 	return strings.Join(notes, "; ")
 }
+
+// deprecatedErrorCodeNote reports a code an earlier revision defined and this
+// one retired. Both are reserved and will never be reused, so seeing one is
+// unambiguous evidence that the server is speaking an older revision, the same
+// class of heads-up as a deprecated method, and like those it never fails check.
+func deprecatedErrorCodeNote(code int) string {
+	switch code {
+	case -32002:
+		return "error code -32002 (resource not found) is retired (2026-07-28); use -32602 invalid params instead"
+	case -32042:
+		return "error code -32042 (URL elicitation required) was defined only in 2025-11-25 and is retired"
+	}
+	return ""
+}

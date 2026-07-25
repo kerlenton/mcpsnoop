@@ -127,6 +127,10 @@ type CallExport struct {
 	Params     json.RawMessage `json:"params,omitempty"`
 	Result     json.RawMessage `json:"result,omitempty"`
 	Error      *proxy.RPCError `json:"error,omitempty"`
+	// ErrorName is the specification's name for Error.Code, absent when the code
+	// is one the spec leaves to implementations. A sibling rather than a field
+	// inside Error, so the error object stays the wire shape.
+	ErrorName string `json:"error_name,omitempty"`
 }
 
 type EventExport struct {
@@ -565,6 +569,7 @@ func exportCall(index int, c store.CallView) CallExport {
 		Params:     c.Params,
 		Result:     c.Result,
 		Error:      c.Err,
+		ErrorName:  errorName(c.Err),
 	}
 	// A superseded call was never answered; its stored end is the moment the id was
 	// reused, not a latency, so omit the duration the way a pending call does.
@@ -672,6 +677,15 @@ func writeHTML(w io.Writer, data SessionExport) error {
 		Title: "mcpsnoop " + data.Session.Label,
 		Data:  template.JS(payload),
 	})
+}
+
+// errorName is ErrorCodeName over a possibly absent error, kept next to the
+// call export so the nil case is answered once rather than at each caller.
+func errorName(err *proxy.RPCError) string {
+	if err == nil {
+		return ""
+	}
+	return store.ErrorCodeName(err.Code)
 }
 
 func eventKind(k store.EventKind) string {
