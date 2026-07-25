@@ -79,7 +79,11 @@ func playDemo(ctx context.Context, socket string) {
 	sink := proxy.NewSocketSink(socket, 0)
 	defer sink.Close()
 
-	session := fmt.Sprintf("demo-%d", os.Getpid())
+	// Unique per run for the same reason the shim's id is: two demos sharing a
+	// PID would have the second one's frames dropped by the hub's dedup, and an
+	// empty demo is a bad first impression of a tool whose whole pitch is that
+	// it shows you the traffic.
+	session := newSessionID("demo")
 	var seq uint64
 
 	// Give the hub a moment to bind. The socket sink also retries on its own.

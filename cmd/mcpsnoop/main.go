@@ -11,6 +11,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -364,6 +366,36 @@ func labelFor(command []string) string {
 	return pick
 }
 
+// newSessionID names one proxy run: its log file, and the session the TUI and
+// the export commands address.
+//
+// The PID is not enough on its own. A PID is unique only among live processes,
+// and the kernel is free to reuse it the moment the old one is reaped, which
+// happens fast wherever the PID space is small: containers, CI runners, and
+// anything that starts a fresh server per job. Two runs that land on the same
+// id then collide twice over. They append into one log file, and the hub, which
+// deduplicates on a per-session high-water mark of Seq, sees the second run
+// restart at Seq 1 and discards every frame of it as already seen. The live
+// view stays empty for a server that is plainly running, and nothing reports
+// the loss: the gap detector only notices Seq jumping forward, never back.
+//
+// The suffix is random rather than a start timestamp because the guarantee must
+// not rest on the clock. Container clocks are coarse and can jump, and two
+// shims can start inside the same tick. The PID stays in the id because it is
+// the part a person uses to match a session to a process they can see.
+func newSessionID(label string) string {
+	return fmt.Sprintf("%s-%d-%s", label, os.Getpid(), sessionNonce())
+}
+
+// sessionNonce is the short random tag that tells apart two runs sharing a PID.
+// crypto/rand.Read has no error path worth handling here: on every supported
+// platform it either succeeds or panics, so there is nothing to degrade into.
+func sessionNonce() string {
+	var b [3]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
 // newExportCmd reads a persisted JSONL session and writes a portable export.
 func newExportCmd() *cobra.Command {
 	var formatFlag, outFlag string
@@ -433,7 +465,7 @@ func runShim(command []string, label, traceFile string, noTrace bool, redaction 
 	if label == "" {
 		label = labelFor(command)
 	}
-	sessionID := fmt.Sprintf("%s-%d", label, os.Getpid())
+	sessionID := newSessionID(label)
 
 	sink := traceSink(sessionID, traceFile, noTrace, redaction, trace)
 	defer func() {
@@ -542,7 +574,7 @@ func newHTTPCmd() *cobra.Command {
 					lbl = "http"
 				}
 			}
-			sessionID := fmt.Sprintf("%s-%d", lbl, os.Getpid())
+			sessionID := newSessionID(lbl)
 
 			sink := traceSink(sessionID, "", noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths), trace)
 			defer sink.Close()

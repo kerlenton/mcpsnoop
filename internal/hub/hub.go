@@ -226,6 +226,12 @@ func (h *Hub) replayFile(path string) {
 }
 
 // emit deduplicates by per-session high-water-mark on Seq, then forwards.
+//
+// This rests on a session id naming exactly one run. Given that, a Seq at or
+// below the mark can only be a frame already seen, from a log replayed on top of
+// the live stream, and dropping it is right. If two runs ever shared an id the
+// second would restart at Seq 1 and be discarded whole, which is why the shim
+// mints a unique id per run rather than trusting the PID to be unique.
 func (h *Hub) emit(env proxy.Envelope) {
 	h.mu.Lock()
 	if env.Seq <= h.seen[env.SessionID].seq {
