@@ -1278,14 +1278,17 @@ func (m Model) capsTitle(label, version string, w int) string {
 // summary table column widths, all padded with lipgloss.Width so styled cells
 // stay aligned.
 const (
-	sumToolW    = 18
-	sumSchemaW  = 7
-	sumCallsW   = 7
-	sumErrW     = 6
-	sumLatW     = 10
-	sumDefW     = 9
-	sumResW     = 10
-	covLabelW   = 11
+	sumToolW   = 18
+	sumSchemaW = 7
+	sumCallsW  = 7
+	sumErrW    = 6
+	sumLatW    = 10
+	sumDefW    = 9
+	sumResW    = 10
+	// covLabelW fits the longest gutter label plus a space. "definitions" is
+	// eleven cells wide, so eleven would leave no gap at all and run the label
+	// into its value.
+	covLabelW   = 12
 	driftLabelW = 20
 )
 
@@ -1325,7 +1328,11 @@ func (m Model) summaryContent() string {
 	gap := max(w-lipgloss.Width(left)-lipgloss.Width(right), 1)
 	header := left + strings.Repeat(" ", gap) + right
 
-	if len(summary.Tools) == 0 && !hasTools && !hasDrift {
+	// hasCost joins the guard because a seen tools/list is worth showing on its
+	// own, even an empty one: a server that advertised no tools still answers the
+	// fixed-cost question, with a 0 B definitions line, and that is a different
+	// screen from a session that never listed at all.
+	if len(summary.Tools) == 0 && !hasTools && !hasDrift && !hasCost {
 		return header + "\n\n" + m.styles.dim.Render("no tool calls observed yet for this session")
 	}
 
@@ -1556,11 +1563,11 @@ func (m Model) definitionCostLine(cost store.ToolListCost) string {
 	if cost.Tools == 1 {
 		tools = "tool"
 	}
-	value := fmt.Sprintf("%d %s · %s", cost.Tools, tools, formatBytes(int64(cost.Bytes)))
+	value := fmt.Sprintf("%d %s · %s", cost.Tools, tools, formatBytesProse(int64(cost.Bytes)))
 	note := " of tool definitions, paid on every conversation"
 	style := m.styles.neutral
 	if !cost.Complete {
-		value = fmt.Sprintf("%d %s · %s so far", cost.Tools, tools, formatBytes(int64(cost.Bytes)))
+		value = fmt.Sprintf("%d %s · %s so far", cost.Tools, tools, formatBytesProse(int64(cost.Bytes)))
 		note = ", tools/list never finished paginating"
 		style = m.styles.warn
 	}
@@ -1595,6 +1602,17 @@ func formatBytes(n int64) string {
 	default:
 		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
 	}
+}
+
+// formatBytesProse is formatBytes without the table's zero dot. The dot means
+// "nothing to show" in a narrow cell, but a sentence has to say zero out loud:
+// a server advertising no tools costs 0 B, and that is worth reading as a fact
+// rather than as a blank.
+func formatBytesProse(n int64) string {
+	if n <= 0 {
+		return "0 B"
+	}
+	return formatBytes(n)
 }
 
 func infoLine(raw json.RawMessage) string {

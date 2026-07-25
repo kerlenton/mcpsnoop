@@ -85,6 +85,39 @@ func TestToolCostsBreaksDownAndSortsHeaviestFirst(t *testing.T) {
 	}
 }
 
+// TestToolCostsAreWhitespaceInsensitive is the point of measuring the compacted
+// definition: the same tool weighs the same whether a server pretty-prints its
+// tools/list or sends it compact, so two captures stay comparable and the number
+// is not inflated by formatting the client would strip before the model sees it.
+func TestToolCostsAreWhitespaceInsensitive(t *testing.T) {
+	pretty := New()
+	// The same definition as thinTool, indented the way a server might send it.
+	listExchange(pretty, 1, "", `{
+		"tools": [
+			{
+				"name": "ping",
+				"description": "Ping.",
+				"inputSchema": { "type": "object" }
+			}
+		]
+	}`)
+
+	compact := New()
+	listExchange(compact, 1, "", toolsListResult("", thinTool))
+
+	pc, ok1 := pretty.ToolCosts("s1")
+	cc, ok2 := compact.ToolCosts("s1")
+	if !ok1 || !ok2 {
+		t.Fatal("both sessions listed a tool")
+	}
+	if pc.Bytes != cc.Bytes || pc.Bytes != len(thinTool) {
+		t.Fatalf("pretty %d and compact %d should both equal the compact definition %d", pc.Bytes, cc.Bytes, len(thinTool))
+	}
+	if pc.PerTool[0].SchemaBytes != cc.PerTool[0].SchemaBytes {
+		t.Fatalf("schema bytes must be whitespace insensitive: %d vs %d", pc.PerTool[0].SchemaBytes, cc.PerTool[0].SchemaBytes)
+	}
+}
+
 // TestToolCostsPaginatedListIsNotComplete locks the one way this number could
 // mislead: a list still paginating has a floor, not a total.
 func TestToolCostsPaginatedListIsNotComplete(t *testing.T) {

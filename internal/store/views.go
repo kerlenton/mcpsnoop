@@ -122,20 +122,25 @@ type ToolDefinition struct {
 // ToolCost is the measured weight of one advertised tool definition, in bytes.
 // Bytes and not tokens: a token count is model specific, so measuring one would
 // mean shipping a tokeniser and choosing whose. Bytes are exact, stable across
-// captures, and let a reader apply whatever ratio their own model implies.
+// captures, and let a reader apply whatever ratio their own model implies. Every
+// figure is measured on one basis, the JSON with insignificant whitespace
+// removed, so two servers stay comparable regardless of how either formats its
+// tools/list.
 type ToolCost struct {
 	// Name duplicates ToolDefinition.Name so a cost can travel on its own, into
 	// a sorted breakdown or an export, without carrying the whole definition.
 	Name string
-	// Bytes is the definition object exactly as the server sent it, so it covers
-	// the name, description, schema, any annotations, and the JSON around them.
-	// This is the number that sums to the fixed cost of the tool list.
+	// Bytes is the definition object with insignificant whitespace removed, so it
+	// covers the name, description, schema, any annotations, and the JSON around
+	// them, and stays comparable between servers. This is the number that sums to
+	// the fixed cost of the tool list.
 	Bytes int
-	// DescriptionBytes is the description text decoded, since prose length is
-	// what a person actually shortens. SchemaBytes is the inputSchema JSON as
-	// sent. Both point at where Bytes went and deliberately do not sum to it:
-	// the remainder is the name, the annotations and the punctuation, and
-	// pretending otherwise would invite reading a rounding gap as a bug.
+	// DescriptionBytes is the description JSON encoded, quotes and escaping
+	// included, and SchemaBytes is the inputSchema with whitespace removed. Both
+	// are measured on the same basis as Bytes and point at where it went, but
+	// deliberately do not sum to it: the remainder is the name, the annotations
+	// and the structural punctuation, and pretending otherwise would invite
+	// reading the gap as a bug.
 	DescriptionBytes int
 	SchemaBytes      int
 }

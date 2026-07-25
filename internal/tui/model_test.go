@@ -1336,6 +1336,27 @@ func TestSummaryWithoutAToolsListOmitsTheCostLine(t *testing.T) {
 	}
 }
 
+// TestSummaryZeroToolsReadsAsZeroBytes covers a server that advertises nothing.
+// The table's · means "nothing to show" in a cell; in the fixed-cost sentence a
+// zero has to read as a zero.
+func TestSummaryZeroToolsReadsAsZeroBytes(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+
+	m := ready(t, st)
+	m = typeRunes(t, m, "s")
+	out := ansi.Strip(m.overlayRaw)
+
+	if !strings.Contains(out, "0 tools · 0 B") {
+		t.Fatalf("an empty tool list should read as zero bytes\n%s", out)
+	}
+	// The gutter label must not run into its value.
+	if strings.Contains(out, "definitions0") {
+		t.Fatalf("the definitions label needs a gap before its value\n%s", out)
+	}
+}
+
 func TestSummaryUpdatesLive(t *testing.T) {
 	st := store.New()
 	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))

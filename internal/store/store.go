@@ -10,6 +10,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -847,9 +848,9 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 			Findings:    analyzeSchema(schema),
 			Cost: ToolCost{
 				Name:             tool.Name,
-				Bytes:            len(rawTool),
-				DescriptionBytes: len(tool.Description),
-				SchemaBytes:      len(tool.InputSchema),
+				Bytes:            compactJSONLen(rawTool),
+				DescriptionBytes: jsonStringLen(tool.Description),
+				SchemaBytes:      compactJSONLen(tool.InputSchema),
 			},
 		}
 	}
@@ -864,6 +865,30 @@ func hasListCursor(params json.RawMessage) bool {
 		Cursor string `json:"cursor"`
 	}
 	return json.Unmarshal(params, &p) == nil && p.Cursor != ""
+}
+
+// compactJSONLen is the byte length of raw with insignificant whitespace
+// removed, so a definition's measured cost is canonical and comparable between
+// servers rather than inflated by whichever one pretty-prints its tools/list.
+// Whitespace inside string values is untouched, so a description keeps its own
+// spaces; only the server's indentation between tokens is normalised away.
+func compactJSONLen(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var buf bytes.Buffer
+	if json.Compact(&buf, raw) != nil {
+		return len(raw) // unparseable, fall back to the bytes as they arrived
+	}
+	return buf.Len()
+}
+
+// jsonStringLen is how many bytes a string occupies once JSON encoded, quotes
+// and escaping included, so the description is measured on the same basis as the
+// compacted definition it sits inside rather than as raw prose length.
+func jsonStringLen(s string) int {
+	b, _ := json.Marshal(s) // marshalling a string cannot fail
+	return len(b)
 }
 
 func toolName(params json.RawMessage) string {
