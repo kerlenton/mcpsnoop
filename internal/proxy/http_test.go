@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -553,5 +554,54 @@ func TestHTTPStatusRidesEveryBatchElement(t *testing.T) {
 		if env.Status != http.StatusInternalServerError {
 			t.Fatalf("batch element %d lost the status: %d", i, env.Status)
 		}
+	}
+}
+
+// TestHTTPDoesNotInventAFailureOnClientCancellation. ReverseProxy routes a
+// cancelled request context through ErrorHandler exactly like an unreachable
+// target, because a cancelled context surfaces as a RoundTrip error. A 502
+// counts as an error, so a client that simply hung up, or a shutdown that
+// cancelled what was still in flight, would fail a check run on an otherwise
+// clean session.
+func TestHTTPDoesNotInventAFailureOnClientCancellation(t *testing.T) {
+	arrived, release := make(chan struct{}), make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		<-release // never answers before the client gives up
+	}))
+	// LIFO: the handler is released before Close waits on it.
+	defer backend.Close()
+	defer close(release)
+
+	target, _ := url.Parse(backend.URL)
+	sink := &captureSink{}
+	// Wrapped so the test can wait for the proxy handler to unwind instead of
+	// sleeping: once ServeHTTP has returned, ErrorHandler has run if it ran at all.
+	proxied := httpProxyHandler(target, emitterTo(sink))
+	done := make(chan struct{})
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		proxied.ServeHTTP(w, r)
+	}))
+	defer front.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, front.URL,
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		<-arrived
+		cancel()
+	}()
+	if _, err := http.DefaultClient.Do(req); err == nil {
+		t.Fatal("the cancelled request should not have completed")
+	}
+	<-done
+
+	for _, env := range sink.byDir(ServerToClient) {
+		t.Fatalf("a client hanging up is not a target failure, got status %d", env.Status)
 	}
 }

@@ -1663,7 +1663,9 @@ func TestStreamFilterFindsAnHTTPStatus(t *testing.T) {
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
 	total := len(m.timeline)
 
-	for _, q := range []string{"status:401", "status:err"} {
+	// kind is a documented axis too, so a reader who sees "http 401" in the row
+	// and tries the obvious query must not get an empty list.
+	for _, q := range []string{"status:401", "status:err", "kind:transport", "kind:http"} {
 		mm := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
 		mm = typeRunes(t, mm, q)
 		f := drive(t, mm, tea.KeyMsg{Type: tea.KeyEnter})

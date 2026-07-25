@@ -1097,6 +1097,8 @@ func matchKind(k store.EventKind, v string) bool {
 		return k == store.EventStderr
 	case "invalid", "corrupt", "bad":
 		return k == store.EventInvalid
+	case "transport", "http":
+		return k == store.EventTransport
 	}
 	return false
 }

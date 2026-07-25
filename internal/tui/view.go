@@ -804,7 +804,6 @@ func toolErrorText(result json.RawMessage) string {
 	return compactJSON(result)
 }
 
-// compactJSON renders raw JSON on a single line for the DETAIL preview column.
 // transportBody flattens the observed body of a transport frame into one line a
 // row can hold. A JSON body arrives in Raw, while a non-JSON one arrives in Text
 // (splitObserved routes it there), and non-JSON is the common case here since
@@ -835,6 +834,7 @@ func transportBody(e store.EventView) string {
 	return b.String()
 }
 
+// compactJSON renders raw JSON on a single line for the DETAIL preview column.
 func compactJSON(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""

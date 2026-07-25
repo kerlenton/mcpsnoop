@@ -246,8 +246,17 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 		// reaches ModifyResponse: the reverse proxy synthesises a 502 and writes it
 		// straight to the client. Pointing mcpsnoop at the wrong port is a common
 		// first mistake, and an empty screen is the worst possible answer to it.
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
-			emit(ServerToClient, nil, route{status: http.StatusBadGateway})
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			// A cancelled context means the client went away or mcpsnoop is shutting
+			// down, not that the target failed. ReverseProxy routes both through here
+			// because a cancelled request context surfaces as a RoundTrip error, and
+			// srv.Shutdown cancels whatever is still in flight. Inventing a 502 out of
+			// a normal disconnect would count an error and fail a check run on a clean
+			// session, which is the failure mode this whole change exists to avoid.
+			// A deadline is not excluded: a target that timed out did fail.
+			if !errors.Is(err, context.Canceled) {
+				emit(ServerToClient, nil, route{status: http.StatusBadGateway})
+			}
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
