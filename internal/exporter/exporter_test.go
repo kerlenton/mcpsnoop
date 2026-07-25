@@ -391,6 +391,7 @@ func TestWriteOTLP(t *testing.T) {
 				Spans []struct {
 					TraceID           string `json:"traceId"`
 					SpanID            string `json:"spanId"`
+					ParentSpanID      string `json:"parentSpanId"`
 					Name              string `json:"name"`
 					StartTimeUnixNano string `json:"startTimeUnixNano"`
 					EndTimeUnixNano   string `json:"endTimeUnixNano"`
@@ -418,6 +419,22 @@ func TestWriteOTLP(t *testing.T) {
 	if span.Name != "tools/call" || len(span.TraceID) != 32 || len(span.SpanID) != 16 || span.StartTimeUnixNano == "" || span.EndTimeUnixNano == "" || span.Status.Code != "STATUS_CODE_OK" {
 		t.Fatalf("bad OTLP span: %+v", span)
 	}
+	if span.ParentSpanID != "" {
+		t.Fatalf("span without trace context has parentSpanId %q", span.ParentSpanID)
+	}
+	var rawPayload struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []map[string]json.RawMessage `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &rawPayload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rawPayload.ResourceSpans[0].ScopeSpans[0].Spans[0]["parentSpanId"]; ok {
+		t.Fatalf("span without trace context must omit parentSpanId: %s", buf.String())
+	}
 	keys := make(map[string]bool, len(span.Attributes))
 	for _, attr := range span.Attributes {
 		keys[attr.Key] = true
@@ -427,6 +444,153 @@ func TestWriteOTLP(t *testing.T) {
 			t.Errorf("OTLP span missing %q", key)
 		}
 	}
+}
+
+func TestWriteOTLPAcceptsFutureTraceparentVersions(t *testing.T) {
+	const (
+		traceID      = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parentSpanID = "00f067aa0ba902b7"
+	)
+	cases := map[string]string{
+		"fixed fields": "01-" + traceID + "-" + parentSpanID + "-01",
+		"extension":    "01-" + traceID + "-" + parentSpanID + "-01-vendor-data",
+	}
+	for name, traceparent := range cases {
+		t.Run(name, func(t *testing.T) {
+			data := SessionExport{
+				Session: SessionSummary{ID: "s1"},
+				Calls: []CallExport{{
+					ID:        "call-1",
+					Method:    "tools/call",
+					StartedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+					Params:    json.RawMessage(`{"_meta":{"traceparent":"` + traceparent + `"}}`),
+				}},
+			}
+			spans := writeOTLPTraceFields(t, data)
+			if len(spans) != 1 {
+				t.Fatalf("spans = %d, want 1", len(spans))
+			}
+			if spans[0].TraceID != traceID || spans[0].ParentSpanID != parentSpanID {
+				t.Fatalf("future-version trace context = %q/%q, want %q/%q", spans[0].TraceID, spans[0].ParentSpanID, traceID, parentSpanID)
+			}
+		})
+	}
+}
+
+func TestWriteOTLPUsesPerCallTraceparent(t *testing.T) {
+	const (
+		traceID      = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parentSpanID = "00f067aa0ba902b7"
+		traceparent  = "00-" + traceID + "-" + parentSpanID + "-01"
+	)
+	started := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	data := SessionExport{
+		Session: SessionSummary{ID: "s1"},
+		Calls: []CallExport{
+			{
+				ID:        "with-context",
+				Method:    "tools/call",
+				StartedAt: started,
+				Params:    json.RawMessage(`{"_meta":{"traceparent":"` + traceparent + `"}}`),
+			},
+			{
+				ID:        "without-context",
+				Method:    "tools/call",
+				StartedAt: started,
+				Params:    json.RawMessage(`{"name":"lookup"}`),
+			},
+		},
+	}
+
+	spans := writeOTLPTraceFields(t, data)
+	if len(spans) != 2 {
+		t.Fatalf("spans = %d, want 2", len(spans))
+	}
+	if spans[0].TraceID != traceID || spans[0].ParentSpanID != parentSpanID {
+		t.Fatalf("propagated span context = %q/%q, want %q/%q", spans[0].TraceID, spans[0].ParentSpanID, traceID, parentSpanID)
+	}
+	syntheticTraceID := otlpID(16, "trace", data.Session.ID)
+	if spans[1].TraceID != syntheticTraceID || spans[1].ParentSpanID != "" {
+		t.Fatalf("context leaked to next span: traceId %q parentSpanId %q, want %q/empty", spans[1].TraceID, spans[1].ParentSpanID, syntheticTraceID)
+	}
+}
+
+func TestWriteOTLPRejectsInvalidTraceparent(t *testing.T) {
+	const (
+		traceID      = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parentSpanID = "00f067aa0ba902b7"
+		traceparent  = "00-" + traceID + "-" + parentSpanID + "-01"
+	)
+	cases := map[string]json.RawMessage{
+		"malformed value":     json.RawMessage(`{"_meta":{"traceparent":"not-a-traceparent"}}`),
+		"malformed params":    json.RawMessage(`{"_meta":`),
+		"meta is not object":  json.RawMessage(`{"_meta":"nope"}`),
+		"value is not string": json.RawMessage(`{"_meta":{"traceparent":42}}`),
+		"uppercase meta key":  json.RawMessage(`{"_META":{"traceparent":"` + traceparent + `"}}`),
+		"uppercase value key": json.RawMessage(`{"_meta":{"TraceParent":"` + traceparent + `"}}`),
+		"zero trace id":       json.RawMessage(`{"_meta":{"traceparent":"00-00000000000000000000000000000000-` + parentSpanID + `-01"}}`),
+		"zero parent span id": json.RawMessage(`{"_meta":{"traceparent":"00-` + traceID + `-0000000000000000-01"}}`),
+		"uppercase trace id":  json.RawMessage(`{"_meta":{"traceparent":"00-4BF92F3577B34DA6A3CE929D0E0E4736-` + parentSpanID + `-01"}}`),
+		"uppercase version":   json.RawMessage(`{"_meta":{"traceparent":"0A-` + traceID + `-` + parentSpanID + `-01"}}`),
+		"uppercase parent id": json.RawMessage(`{"_meta":{"traceparent":"00-` + traceID + `-00F067AA0BA902B7-01"}}`),
+		"uppercase flags":     json.RawMessage(`{"_meta":{"traceparent":"00-` + traceID + `-` + parentSpanID + `-0A"}}`),
+		"forbidden version":   json.RawMessage(`{"_meta":{"traceparent":"ff-` + traceID + `-` + parentSpanID + `-01"}}`),
+		"invalid flags":       json.RawMessage(`{"_meta":{"traceparent":"00-` + traceID + `-` + parentSpanID + `-0g"}}`),
+		"version 00 suffix":   json.RawMessage(`{"_meta":{"traceparent":"00-` + traceID + `-` + parentSpanID + `-01-extra"}}`),
+		"version separator":   json.RawMessage(`{"_meta":{"traceparent":"00_` + traceID + `-` + parentSpanID + `-01"}}`),
+		"trace id separator":  json.RawMessage(`{"_meta":{"traceparent":"00-` + traceID + `_` + parentSpanID + `-01"}}`),
+		"parent id separator": json.RawMessage(`{"_meta":{"traceparent":"00-` + traceID + `-` + parentSpanID + `_01"}}`),
+		"extension separator": json.RawMessage(`{"_meta":{"traceparent":"01-` + traceID + `-` + parentSpanID + `-01extra"}}`),
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			data := SessionExport{
+				Session: SessionSummary{ID: "s1"},
+				Calls: []CallExport{{
+					ID:        "call-1",
+					Method:    "tools/call",
+					StartedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+					Params:    params,
+				}},
+			}
+			spans := writeOTLPTraceFields(t, data)
+			if len(spans) != 1 {
+				t.Fatalf("spans = %d, want 1", len(spans))
+			}
+			wantTraceID := otlpID(16, "trace", data.Session.ID)
+			if spans[0].TraceID != wantTraceID || spans[0].ParentSpanID != "" {
+				t.Fatalf("invalid traceparent produced context %q/%q, want %q/empty", spans[0].TraceID, spans[0].ParentSpanID, wantTraceID)
+			}
+		})
+	}
+}
+
+type otlpTraceFields struct {
+	TraceID      string `json:"traceId"`
+	ParentSpanID string `json:"parentSpanId"`
+	TraceState   string `json:"traceState"`
+}
+
+func writeOTLPTraceFields(t *testing.T, data SessionExport) []otlpTraceFields {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := WriteOTLP(&buf, data); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []otlpTraceFields `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid OTLP JSON: %v\n%s", err, buf.String())
+	}
+	if len(payload.ResourceSpans) != 1 || len(payload.ResourceSpans[0].ScopeSpans) != 1 {
+		t.Fatalf("unexpected OTLP hierarchy: %s", buf.String())
+	}
+	return payload.ResourceSpans[0].ScopeSpans[0].Spans
 }
 
 func TestDefaultOutputPathExtensions(t *testing.T) {
@@ -542,5 +706,148 @@ func TestExportNamesASpecDefinedErrorCode(t *testing.T) {
 		if out.Calls[0].Error == nil || out.Calls[0].Error.Code != tc.code {
 			t.Fatalf("the wire error object must stay intact, got %+v", out.Calls[0].Error)
 		}
+	}
+}
+
+// TestWriteOTLPCarriesTraceState covers the second half of the carrier. W3C
+// expects a participant continuing a trace to pass tracestate along, and an OTLP
+// span has a field for it, so dropping it strands whatever vendor state the
+// caller was routing or sampling on.
+func TestWriteOTLPCarriesTraceState(t *testing.T) {
+	const (
+		traceID      = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parentSpanID = "00f067aa0ba902b7"
+		traceparent  = "00-" + traceID + "-" + parentSpanID + "-01"
+		tracestate   = "vendorname1=opaqueValue1,vendorname2=opaqueValue2"
+	)
+	data := SessionExport{
+		Session: SessionSummary{ID: "s1"},
+		Calls: []CallExport{{
+			ID:        "call-1",
+			Method:    "tools/call",
+			StartedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+			Params: json.RawMessage(`{"_meta":{"traceparent":"` + traceparent +
+				`","tracestate":"` + tracestate + `"}}`),
+		}},
+	}
+
+	spans := writeOTLPTraceFields(t, data)
+	if len(spans) != 1 {
+		t.Fatalf("spans = %d, want 1", len(spans))
+	}
+	if spans[0].TraceState != tracestate {
+		t.Fatalf("traceState = %q, want the caller's %q", spans[0].TraceState, tracestate)
+	}
+	// mcpsnoop observes rather than participates, so it adds no member of its own
+	// and the value must arrive byte for byte as the caller sent it.
+	if spans[0].TraceID != traceID || spans[0].ParentSpanID != parentSpanID {
+		t.Fatalf("trace context = %q/%q, want %q/%q", spans[0].TraceID, spans[0].ParentSpanID, traceID, parentSpanID)
+	}
+}
+
+// TestWriteOTLPOmitsUnusableTraceState checks the cases where carrying the value
+// on would be worse than dropping it, including the one W3C is explicit about:
+// tracestate belonging to a traceparent that did not parse describes a trace we
+// cannot name, so it goes with it.
+func TestWriteOTLPOmitsUnusableTraceState(t *testing.T) {
+	const (
+		traceID      = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parentSpanID = "00f067aa0ba902b7"
+		traceparent  = "00-" + traceID + "-" + parentSpanID + "-01"
+	)
+	tooMany := make([]string, 33)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("vendor%d=value", i)
+	}
+
+	cases := map[string]json.RawMessage{
+		"absent":            json.RawMessage(`{"_meta":{"traceparent":"` + traceparent + `"}}`),
+		"empty":             json.RawMessage(`{"_meta":{"traceparent":"` + traceparent + `","tracestate":""}}`),
+		"not a string":      json.RawMessage(`{"_meta":{"traceparent":"` + traceparent + `","tracestate":42}}`),
+		"member has no key": json.RawMessage(`{"_meta":{"traceparent":"` + traceparent + `","tracestate":"=value"}}`),
+		"member is not a pair": json.RawMessage(`{"_meta":{"traceparent":"` + traceparent +
+			`","tracestate":"vendorname1=value1,garbage"}}`),
+		"past the 32-member limit": json.RawMessage(`{"_meta":{"traceparent":"` + traceparent +
+			`","tracestate":"` + strings.Join(tooMany, ",") + `"}}`),
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			data := SessionExport{
+				Session: SessionSummary{ID: "s1"},
+				Calls: []CallExport{{
+					ID:        "call-1",
+					Method:    "tools/call",
+					StartedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+					Params:    params,
+				}},
+			}
+			spans := writeOTLPTraceFields(t, data)
+			if len(spans) != 1 {
+				t.Fatalf("spans = %d, want 1", len(spans))
+			}
+			if spans[0].TraceState != "" {
+				t.Fatalf("traceState = %q, want it dropped", spans[0].TraceState)
+			}
+			// Dropping the state must not cost the parenting: the traceparent is
+			// valid in every one of these cases.
+			if spans[0].TraceID != traceID || spans[0].ParentSpanID != parentSpanID {
+				t.Fatalf("an unusable tracestate cost the trace context: %q/%q", spans[0].TraceID, spans[0].ParentSpanID)
+			}
+		})
+	}
+}
+
+// TestWriteOTLPDiscardsTraceStateWithAnInvalidTraceparent is the rule W3C states
+// outright: state without a trustworthy traceparent goes nowhere.
+func TestWriteOTLPDiscardsTraceStateWithAnInvalidTraceparent(t *testing.T) {
+	data := SessionExport{
+		Session: SessionSummary{ID: "s1"},
+		Calls: []CallExport{{
+			ID:        "call-1",
+			Method:    "tools/call",
+			StartedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+			Params:    json.RawMessage(`{"_meta":{"traceparent":"nope","tracestate":"vendorname1=value1"}}`),
+		}},
+	}
+
+	spans := writeOTLPTraceFields(t, data)
+	if len(spans) != 1 {
+		t.Fatalf("spans = %d, want 1", len(spans))
+	}
+	if spans[0].TraceState != "" || spans[0].ParentSpanID != "" {
+		t.Fatalf("nothing should be carried from an invalid traceparent: %q/%q", spans[0].TraceState, spans[0].ParentSpanID)
+	}
+	if want := otlpID(16, "trace", data.Session.ID); spans[0].TraceID != want {
+		t.Fatalf("traceId = %q, want the session-derived %q", spans[0].TraceID, want)
+	}
+}
+
+// TestWriteOTLPOmitsTraceStateFieldWhenAbsent keeps the payload clean for the
+// ordinary session, where no caller propagated anything.
+func TestWriteOTLPOmitsTraceStateFieldWhenAbsent(t *testing.T) {
+	data := SessionExport{
+		Session: SessionSummary{ID: "s1"},
+		Calls: []CallExport{{
+			ID:        "call-1",
+			Method:    "tools/list",
+			StartedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+		}},
+	}
+	var buf bytes.Buffer
+	if err := WriteOTLP(&buf, data); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []map[string]json.RawMessage `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload.ResourceSpans[0].ScopeSpans[0].Spans[0]["traceState"]; ok {
+		t.Fatalf("a span with no propagated state must omit traceState: %s", buf.String())
 	}
 }

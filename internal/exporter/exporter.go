@@ -383,8 +383,14 @@ func Write(w io.Writer, data SessionExport, opts Options) error {
 	}
 }
 
-// otlpExport follows the OTLP JSON encoding. Each correlated MCP call becomes
-// a span in one trace, making a session importable into tracing backends.
+// otlpExport follows the OTLP JSON encoding. Each correlated MCP call becomes a
+// span, making a session importable into tracing backends.
+//
+// A call whose request carried a traceparent joins the caller's trace, so the
+// spans of one session can legitimately span several traces. The rest share a
+// trace derived from the session id, so a session with no propagation still
+// reads as one unit. Either way mcpsnoop.session.id is a resource attribute
+// rather than a span one, so the tie back to the capture survives the split.
 type otlpExport struct {
 	ResourceSpans []otlpResourceSpans `json:"resourceSpans"`
 }
@@ -411,6 +417,8 @@ type otlpScope struct {
 type otlpSpan struct {
 	TraceID           string          `json:"traceId"`
 	SpanID            string          `json:"spanId"`
+	ParentSpanID      string          `json:"parentSpanId,omitempty"`
+	TraceState        string          `json:"traceState,omitempty"`
 	Name              string          `json:"name"`
 	Kind              string          `json:"kind"`
 	StartTimeUnixNano string          `json:"startTimeUnixNano"`
@@ -436,9 +444,15 @@ type otlpAnyValue struct {
 
 // WriteOTLP writes data using the OTLP JSON encoding.
 func WriteOTLP(w io.Writer, data SessionExport) error {
-	traceID := otlpID(16, "trace", data.Session.ID)
+	sessionTraceID := otlpID(16, "trace", data.Session.ID)
 	spans := make([]otlpSpan, 0, len(data.Calls))
 	for _, call := range data.Calls {
+		traceID, parentSpanID, traceState := sessionTraceID, "", ""
+		if propagated, ok := traceContext(call.Params); ok {
+			traceID = propagated.TraceID
+			parentSpanID = propagated.ParentSpanID
+			traceState = propagated.TraceState
+		}
 		end := call.StartedAt
 		if call.EndedAt != nil {
 			end = *call.EndedAt
@@ -473,6 +487,8 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 		spans = append(spans, otlpSpan{
 			TraceID:           traceID,
 			SpanID:            otlpID(8, "span", data.Session.ID, call.ID, string(call.Direction)),
+			ParentSpanID:      parentSpanID,
+			TraceState:        traceState,
 			Name:              call.Method,
 			Kind:              kind,
 			StartTimeUnixNano: fmt.Sprint(call.StartedAt.UnixNano()),
@@ -492,6 +508,147 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payload)
+}
+
+// propagatedContext is the W3C trace context a request carried. TraceState is
+// empty when the caller sent none, or sent one this cannot make sense of.
+type propagatedContext struct {
+	TraceID      string
+	ParentSpanID string
+	TraceState   string
+}
+
+// traceContext reads the trace context from a request's params.
+//
+// The keys are deliberately unprefixed. Every other _meta key in MCP is
+// reverse-DNS namespaced, but the specification carves out traceparent,
+// tracestate and baggage by name so that trace context stays wire-compatible
+// with OpenTelemetry; namespacing them is called out as the thing that would
+// break traces. baggage is not read here: it is propagation state, not part of
+// a span.
+func traceContext(params json.RawMessage) (propagatedContext, bool) {
+	// Maps keep the SEP carrier keys exact; struct decoding also matches keys
+	// case-insensitively, which would accept a different carrier by accident.
+	var request map[string]json.RawMessage
+	if err := json.Unmarshal(params, &request); err != nil {
+		return propagatedContext{}, false
+	}
+	rawMeta, ok := request["_meta"]
+	if !ok {
+		return propagatedContext{}, false
+	}
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(rawMeta, &meta); err != nil {
+		return propagatedContext{}, false
+	}
+	traceID, parentSpanID, ok := parseTraceparent(metaString(meta, "traceparent"))
+	if !ok {
+		return propagatedContext{}, false
+	}
+	// Only once traceparent is valid: W3C requires tracestate to be discarded
+	// when the traceparent it belongs to cannot be trusted, since the state
+	// describes a trace we would otherwise be unable to name.
+	return propagatedContext{
+		TraceID:      traceID,
+		ParentSpanID: parentSpanID,
+		TraceState:   validTraceState(metaString(meta, "tracestate")),
+	}, true
+}
+
+// metaString returns a string-valued _meta entry, or "" when it is absent or is
+// some other JSON type. A carrier of the wrong type is treated as no carrier,
+// because a number where a traceparent belongs says nothing about the trace.
+func metaString(meta map[string]json.RawMessage, key string) string {
+	raw, ok := meta[key]
+	if !ok {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
+}
+
+// maxTraceStateMembers is the W3C limit. A list longer than this is to be
+// discarded rather than truncated, since dropping members silently would change
+// which vendor's state survives.
+const maxTraceStateMembers = 32
+
+// validTraceState returns a tracestate worth carrying, or "".
+//
+// The grammar is checked only as far as it has to be. mcpsnoop observes rather
+// than participates: it adds no member of its own and mutates nothing, so the
+// value it emits is the caller's, and a backend that rejects it would have
+// rejected the caller's request identically. Parsing each member's key and value
+// against the full grammar would mostly create ways to drop a valid header,
+// which is the failure that would be silent. What is checked is what cannot be
+// passed on meaningfully: an empty list, a member that is not a key=value pair,
+// and a list past the limit at which the spec says to discard rather than trim.
+func validTraceState(value string) string {
+	if value == "" {
+		return ""
+	}
+	members := strings.Split(value, ",")
+	if len(members) > maxTraceStateMembers {
+		return ""
+	}
+	for _, member := range members {
+		member = strings.TrimSpace(member)
+		if member == "" {
+			continue // OWS between members is allowed, and so is a trailing comma
+		}
+		key, _, ok := strings.Cut(member, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return ""
+		}
+	}
+	return value
+}
+
+func parseTraceparent(value string) (traceID, parentSpanID string, ok bool) {
+	const fixedLength = 55
+	if len(value) < fixedLength || value[2] != '-' || value[35] != '-' || value[52] != '-' {
+		return "", "", false
+	}
+
+	version := value[:2]
+	traceID = value[3:35]
+	parentSpanID = value[36:52]
+	flags := value[53:55]
+	if !lowerHex(version) || version == "ff" ||
+		!lowerHex(traceID) || allZero(traceID) ||
+		!lowerHex(parentSpanID) || allZero(parentSpanID) ||
+		!lowerHex(flags) {
+		return "", "", false
+	}
+	if version == "00" && len(value) != fixedLength {
+		return "", "", false
+	}
+	// Later versions may append fields. Their fixed prefix remains usable, but
+	// the first unknown field still has to begin at a field boundary.
+	if len(value) > fixedLength && value[fixedLength] != '-' {
+		return "", "", false
+	}
+	return traceID, parentSpanID, true
+}
+
+func lowerHex(value string) bool {
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func allZero(value string) bool {
+	for _, c := range value {
+		if c != '0' {
+			return false
+		}
+	}
+	return true
 }
 
 func otlpID(length int, parts ...string) string {

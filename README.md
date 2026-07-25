@@ -253,10 +253,16 @@ mcpsnoop export -T json|html|text|har|otlp [-o file|-] [session-id|log.jsonl|-]
 | `html` | a self-contained browser file with search and collapsible JSON |
 | `text` | a pretty plain-text dump |
 | `har` | one entry per correlated call, openable in browser devtools and anything else that reads HAR |
-| `otlp` | OTLP JSON with a trace per session and a span per correlated call |
+| `otlp` | OTLP JSON with a span per correlated call; W3C trace context joins caller traces, otherwise one trace is used per session |
 
 MCP is not HTTP, so a HAR entry's URL, status code, and timings are a deliberate
 mapping of each call rather than a wire transcript.
+
+For OTLP, a request's `_meta.traceparent` supplies that call's trace and parent
+span IDs, and `_meta.tracestate` rides along on the span. When the traceparent is
+absent or invalid, mcpsnoop keeps the session-derived trace and carries no state.
+mcpsnoop observes rather than participates, so it adds no vendor entry of its own
+and passes the caller's state through unchanged.
 
 ```bash
 mcpsnoop export -T html -o out.html                    # an HTML file to open in a browser
