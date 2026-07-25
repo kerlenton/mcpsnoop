@@ -568,6 +568,7 @@ func TestWriteOTLPRejectsInvalidTraceparent(t *testing.T) {
 type otlpTraceFields struct {
 	TraceID      string `json:"traceId"`
 	ParentSpanID string `json:"parentSpanId"`
+	TraceState   string `json:"traceState"`
 }
 
 func writeOTLPTraceFields(t *testing.T, data SessionExport) []otlpTraceFields {
@@ -705,5 +706,148 @@ func TestExportNamesASpecDefinedErrorCode(t *testing.T) {
 		if out.Calls[0].Error == nil || out.Calls[0].Error.Code != tc.code {
 			t.Fatalf("the wire error object must stay intact, got %+v", out.Calls[0].Error)
 		}
+	}
+}
+
+// TestWriteOTLPCarriesTraceState covers the second half of the carrier. W3C
+// expects a participant continuing a trace to pass tracestate along, and an OTLP
+// span has a field for it, so dropping it strands whatever vendor state the
+// caller was routing or sampling on.
+func TestWriteOTLPCarriesTraceState(t *testing.T) {
+	const (
+		traceID      = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parentSpanID = "00f067aa0ba902b7"
+		traceparent  = "00-" + traceID + "-" + parentSpanID + "-01"
+		tracestate   = "vendorname1=opaqueValue1,vendorname2=opaqueValue2"
+	)
+	data := SessionExport{
+		Session: SessionSummary{ID: "s1"},
+		Calls: []CallExport{{
+			ID:        "call-1",
+			Method:    "tools/call",
+			StartedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+			Params: json.RawMessage(`{"_meta":{"traceparent":"` + traceparent +
+				`","tracestate":"` + tracestate + `"}}`),
+		}},
+	}
+
+	spans := writeOTLPTraceFields(t, data)
+	if len(spans) != 1 {
+		t.Fatalf("spans = %d, want 1", len(spans))
+	}
+	if spans[0].TraceState != tracestate {
+		t.Fatalf("traceState = %q, want the caller's %q", spans[0].TraceState, tracestate)
+	}
+	// mcpsnoop observes rather than participates, so it adds no member of its own
+	// and the value must arrive byte for byte as the caller sent it.
+	if spans[0].TraceID != traceID || spans[0].ParentSpanID != parentSpanID {
+		t.Fatalf("trace context = %q/%q, want %q/%q", spans[0].TraceID, spans[0].ParentSpanID, traceID, parentSpanID)
+	}
+}
+
+// TestWriteOTLPOmitsUnusableTraceState checks the cases where carrying the value
+// on would be worse than dropping it, including the one W3C is explicit about:
+// tracestate belonging to a traceparent that did not parse describes a trace we
+// cannot name, so it goes with it.
+func TestWriteOTLPOmitsUnusableTraceState(t *testing.T) {
+	const (
+		traceID      = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parentSpanID = "00f067aa0ba902b7"
+		traceparent  = "00-" + traceID + "-" + parentSpanID + "-01"
+	)
+	tooMany := make([]string, 33)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("vendor%d=value", i)
+	}
+
+	cases := map[string]json.RawMessage{
+		"absent":            json.RawMessage(`{"_meta":{"traceparent":"` + traceparent + `"}}`),
+		"empty":             json.RawMessage(`{"_meta":{"traceparent":"` + traceparent + `","tracestate":""}}`),
+		"not a string":      json.RawMessage(`{"_meta":{"traceparent":"` + traceparent + `","tracestate":42}}`),
+		"member has no key": json.RawMessage(`{"_meta":{"traceparent":"` + traceparent + `","tracestate":"=value"}}`),
+		"member is not a pair": json.RawMessage(`{"_meta":{"traceparent":"` + traceparent +
+			`","tracestate":"vendorname1=value1,garbage"}}`),
+		"past the 32-member limit": json.RawMessage(`{"_meta":{"traceparent":"` + traceparent +
+			`","tracestate":"` + strings.Join(tooMany, ",") + `"}}`),
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			data := SessionExport{
+				Session: SessionSummary{ID: "s1"},
+				Calls: []CallExport{{
+					ID:        "call-1",
+					Method:    "tools/call",
+					StartedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+					Params:    params,
+				}},
+			}
+			spans := writeOTLPTraceFields(t, data)
+			if len(spans) != 1 {
+				t.Fatalf("spans = %d, want 1", len(spans))
+			}
+			if spans[0].TraceState != "" {
+				t.Fatalf("traceState = %q, want it dropped", spans[0].TraceState)
+			}
+			// Dropping the state must not cost the parenting: the traceparent is
+			// valid in every one of these cases.
+			if spans[0].TraceID != traceID || spans[0].ParentSpanID != parentSpanID {
+				t.Fatalf("an unusable tracestate cost the trace context: %q/%q", spans[0].TraceID, spans[0].ParentSpanID)
+			}
+		})
+	}
+}
+
+// TestWriteOTLPDiscardsTraceStateWithAnInvalidTraceparent is the rule W3C states
+// outright: state without a trustworthy traceparent goes nowhere.
+func TestWriteOTLPDiscardsTraceStateWithAnInvalidTraceparent(t *testing.T) {
+	data := SessionExport{
+		Session: SessionSummary{ID: "s1"},
+		Calls: []CallExport{{
+			ID:        "call-1",
+			Method:    "tools/call",
+			StartedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+			Params:    json.RawMessage(`{"_meta":{"traceparent":"nope","tracestate":"vendorname1=value1"}}`),
+		}},
+	}
+
+	spans := writeOTLPTraceFields(t, data)
+	if len(spans) != 1 {
+		t.Fatalf("spans = %d, want 1", len(spans))
+	}
+	if spans[0].TraceState != "" || spans[0].ParentSpanID != "" {
+		t.Fatalf("nothing should be carried from an invalid traceparent: %q/%q", spans[0].TraceState, spans[0].ParentSpanID)
+	}
+	if want := otlpID(16, "trace", data.Session.ID); spans[0].TraceID != want {
+		t.Fatalf("traceId = %q, want the session-derived %q", spans[0].TraceID, want)
+	}
+}
+
+// TestWriteOTLPOmitsTraceStateFieldWhenAbsent keeps the payload clean for the
+// ordinary session, where no caller propagated anything.
+func TestWriteOTLPOmitsTraceStateFieldWhenAbsent(t *testing.T) {
+	data := SessionExport{
+		Session: SessionSummary{ID: "s1"},
+		Calls: []CallExport{{
+			ID:        "call-1",
+			Method:    "tools/list",
+			StartedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+		}},
+	}
+	var buf bytes.Buffer
+	if err := WriteOTLP(&buf, data); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []map[string]json.RawMessage `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload.ResourceSpans[0].ScopeSpans[0].Spans[0]["traceState"]; ok {
+		t.Fatalf("a span with no propagated state must omit traceState: %s", buf.String())
 	}
 }
