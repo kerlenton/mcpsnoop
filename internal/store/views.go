@@ -141,7 +141,25 @@ type CapsView struct {
 	Client          json.RawMessage
 	Server          json.RawMessage
 	Instructions    string
+	// Extensions is the union of the extension ids each side advertised in its
+	// capabilities `extensions` map (SEP-2133), sorted by id and carrying which
+	// sides advertised each. Nil when neither side advertised any, so a session
+	// without extensions is indistinguishable from one before the field existed.
+	Extensions []ExtensionView
 }
+
+// ExtensionView is one extension id and which sides advertised it. Extensions
+// are negotiated through a map on both ClientCapabilities and
+// ServerCapabilities, so presence on one side alone means nothing is in play.
+type ExtensionView struct {
+	ID     string
+	Client bool
+	Server bool
+}
+
+// Agreed reports whether both sides advertised the extension, which is the only
+// case in which it is actually in play.
+func (e ExtensionView) Agreed() bool { return e.Client && e.Server }
 
 // ToolStats summarizes calls to one MCP tool within a session.
 type ToolStats struct {
@@ -329,6 +347,10 @@ func (s *Store) Capabilities(sessionID string) (CapsView, bool) {
 		Client:          sess.caps.client,
 		Server:          sess.caps.server,
 		Instructions:    sess.caps.instructions,
+		Extensions: mergeExtensions(
+			extensionIDs(sess.caps.client),
+			extensionIDs(sess.caps.server),
+		),
 	}, true
 }
 
