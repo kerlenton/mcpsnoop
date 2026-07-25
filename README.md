@@ -439,9 +439,14 @@ you actually captured.
 
 The `definitions` line is the fixed cost: what this server's `tools/list`
 weighs before a single call is made. The `DEF` column breaks that down per
-tool, sorted so the two or three tools carrying most of it lead, and `RESULT`
-is what each tool's answers have cost so far. A line under the table names the
-single heaviest result, which a total hides.
+tool and `RESULT` is what each tool's answers have cost so far. The table stays
+sorted by errors and latency, so scan `DEF` to find the expensive definitions;
+the export lists them heaviest first. A line under the table names the single
+heaviest result, which a total hides.
+
+Figures are the JSON with insignificant whitespace removed, so a server that
+pretty-prints its `tools/list` is not counted as more expensive than one that
+does not, and the same server measures the same across captures.
 
 ```bash
 mcpsnoop export -T json | jq '.summary.definitions'

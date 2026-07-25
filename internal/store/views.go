@@ -217,6 +217,12 @@ type ToolStats struct {
 	// half is paid per call, so a tool that is cheap to advertise can still be
 	// the expensive one. A call answered with a JSON-RPC error carries no result
 	// and so contributes nothing; a tool-level failure (result.isError) does.
+	//
+	// These are the bytes as they arrived, not normalised the way ToolCost is.
+	// A definition is a stable contract worth measuring canonically so two
+	// captures compare; a result is a one-off payload, and compacting every one
+	// of them to count it would allocate a second copy of a megabyte answer on
+	// a path that already holds the write lock.
 	ResultBytes    int64
 	MaxResultBytes int
 }

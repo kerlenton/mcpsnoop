@@ -170,6 +170,27 @@ func TestToolCostsAbsentWithoutAToolsList(t *testing.T) {
 	}
 }
 
+// TestToolCostsAbsentDescriptionIsZero locks jsonStringLen's empty case: a tool
+// with no description field weighs zero description bytes, not the two an empty
+// JSON string encodes to, so an export never implies a description that is not
+// there. The rest of the definition is still measured.
+func TestToolCostsAbsentDescriptionIsZero(t *testing.T) {
+	s := New()
+	listExchange(s, 1, "", `{"tools":[{"name":"ping","inputSchema":{"type":"object"}}]}`)
+
+	cost, ok := s.ToolCosts("s1")
+	if !ok || len(cost.PerTool) != 1 {
+		t.Fatalf("one tool expected, got ok=%v %+v", ok, cost)
+	}
+	tool := cost.PerTool[0]
+	if tool.DescriptionBytes != 0 {
+		t.Fatalf("a tool with no description should weigh 0 description bytes, got %d", tool.DescriptionBytes)
+	}
+	if tool.Bytes == 0 || tool.SchemaBytes == 0 {
+		t.Fatalf("the rest of the definition is still measured: %+v", tool)
+	}
+}
+
 // TestApplyToolsListSkipsOnlyTheMalformedEntry locks the decoding change. The
 // old typed decode discarded every tool when any element was not an object.
 func TestApplyToolsListSkipsOnlyTheMalformedEntry(t *testing.T) {

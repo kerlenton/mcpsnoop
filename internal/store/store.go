@@ -887,6 +887,9 @@ func compactJSONLen(raw json.RawMessage) int {
 // and escaping included, so the description is measured on the same basis as the
 // compacted definition it sits inside rather than as raw prose length.
 func jsonStringLen(s string) int {
+	if s == "" {
+		return 0 // an absent description is not a two-byte empty one
+	}
 	b, _ := json.Marshal(s) // marshalling a string cannot fail
 	return len(b)
 }
