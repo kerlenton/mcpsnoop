@@ -58,6 +58,14 @@ type Envelope struct {
 	// Truncated marks a frame whose observed copy was cut at the frame-size cap.
 	// The bytes still forwarded to the other side in full; only this copy is short.
 	Truncated bool `json:"truncated,omitempty"`
+
+	// Status is the HTTP status of the response this frame arrived on. Zero on
+	// stdio and on client frames, since only a response has one.
+	Status int `json:"status,omitempty"`
+	// AuthChallenge is that response's WWW-Authenticate header. It is the one
+	// response header worth keeping verbatim: a 401 without it is a dead end,
+	// and with it names the scheme and the resource metadata to go to next.
+	AuthChallenge string `json:"auth_challenge,omitempty"`
 }
 
 // RPCError is the JSON-RPC error object.

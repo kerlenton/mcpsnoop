@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -523,7 +524,7 @@ func (m *Model) filterPlaceholder() string {
 	if m.view == viewSessions {
 		return "filter sessions by name…"
 	}
-	return "text · or tool:echo status:err dir:s2c kind:resp id:7 task:01J…"
+	return "text · or tool:echo status:err status:401 dir:s2c kind:resp id:7 task:01J…"
 }
 
 // drillIn. In the sessions table, enter a session's stream. In the stream, open
@@ -1096,12 +1097,20 @@ func matchKind(k store.EventKind, v string) bool {
 		return k == store.EventStderr
 	case "invalid", "corrupt", "bad":
 		return k == store.EventInvalid
+	case "transport", "http":
+		return k == store.EventTransport
 	}
 	return false
 }
 
 func (m *Model) matchStatus(e store.EventView, v string) bool {
 	v = strings.ToLower(v)
+	// A bare number is an HTTP status, so status:401 finds the challenge and
+	// status:429 finds the throttling. Checked first: none of the words below
+	// parse as an integer, so there is no ambiguity to resolve.
+	if n, err := strconv.Atoi(v); err == nil {
+		return e.HTTPStatus == n
+	}
 	if v == "bad" || v == "invalid" {
 		// Invalid frames are not calls, so match them before the Call check.
 		return e.Kind == store.EventInvalid
@@ -1115,6 +1124,13 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 		// A routing header disagreeing with the body (Mcp-Method/Mcp-Name, SEP-2243).
 		// It is a structured subset of warnings, so it stays discoverable on its own.
 		return e.RoutingMismatch
+	}
+	if v == "err" || v == "error" || v == "fail" || v == "failed" {
+		// A transport failure has no call to carry the flag, so it is matched here,
+		// before the Call check below drops it.
+		if e.HTTPStatus >= 400 {
+			return true
+		}
 	}
 	if e.Call == nil {
 		return false

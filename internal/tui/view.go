@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
@@ -684,6 +686,22 @@ func (m Model) streamCells(e store.EventView) streamCell {
 		} else {
 			c.detail = e.Text
 		}
+	case store.EventTransport:
+		// Reading the status out loud is the whole point of this row: it exists
+		// because a 401 challenge and a 202 acknowledging a notification carry no
+		// body, so before this they produced nothing at all.
+		c.dir, c.method = arrow(e.Dir), fmt.Sprintf("http %d", e.HTTPStatus)
+		c.detail = http.StatusText(e.HTTPStatus)
+		if e.AuthChallenge != "" {
+			c.detail += " · " + e.AuthChallenge
+		}
+		if body := transportBody(e); body != "" {
+			c.detail += " · " + body
+		}
+		c.status = "ok"
+		if e.HTTPStatus >= 400 {
+			c.status = "err"
+		}
 	default:
 		c.dir, c.method = "?", "frame"
 		c.detail = string(e.Raw)
@@ -784,6 +802,36 @@ func toolErrorText(result json.RawMessage) string {
 		return r.Content[0].Text
 	}
 	return compactJSON(result)
+}
+
+// transportBody flattens the observed body of a transport frame into one line a
+// row can hold. A JSON body arrives in Raw, while a non-JSON one arrives in Text
+// (splitObserved routes it there), and non-JSON is the common case here since
+// this is typically a gateway's HTML error page. That page spans many lines and
+// is written by whatever is on the other end: truncate measures width, so a
+// short but multi-line detail passes it untouched and breaks the row, and a raw
+// escape sequence would drive the terminal rather than be shown in it.
+func transportBody(e store.EventView) string {
+	if len(e.Raw) > 0 {
+		return compactJSON(e.Raw)
+	}
+	var b strings.Builder
+	pending := false
+	for _, r := range e.Text {
+		switch {
+		case unicode.IsSpace(r):
+			pending = b.Len() > 0 // collapse a run, and never lead with one
+		case unicode.IsControl(r):
+			// Dropped rather than escaped. There is nothing here worth reading.
+		default:
+			if pending {
+				b.WriteRune(' ')
+				pending = false
+			}
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // compactJSON renders raw JSON on a single line for the DETAIL preview column.
@@ -1010,7 +1058,7 @@ func (m Model) inspectorHeader(w int) string {
 	// routing plus MCP-Protocol-Version) verbatim when the request had them, so the
 	// busy meta line stays readable and older transports show nothing. overlayHeaderH
 	// tracks the extra line.
-	if e.MCPMethod != "" || e.MCPName != "" || e.MCPProtocolVersion != "" {
+	if hasTransportMeta(e) {
 		var rp []string
 		if e.MCPMethod != "" {
 			rp = append(rp, m.styles.dim.Render("Mcp-Method ")+m.styles.neutral.Render(e.MCPMethod))
@@ -1021,6 +1069,12 @@ func (m Model) inspectorHeader(w int) string {
 		if e.MCPProtocolVersion != "" {
 			rp = append(rp, m.styles.dim.Render("MCP-Protocol-Version ")+m.styles.neutral.Render(e.MCPProtocolVersion))
 		}
+		if e.HTTPStatus != 0 {
+			rp = append(rp, m.styles.dim.Render("HTTP ")+m.styles.neutral.Render(fmt.Sprintf("%d %s", e.HTTPStatus, http.StatusText(e.HTTPStatus))))
+		}
+		if e.AuthChallenge != "" {
+			rp = append(rp, m.styles.dim.Render("WWW-Authenticate ")+m.styles.neutral.Render(e.AuthChallenge))
+		}
 		head += "\n" + bar(w, strings.Join(rp, sep), "")
 	}
 	return head
@@ -1030,11 +1084,18 @@ func (m Model) inspectorHeader(w int) string {
 // the meta line, plus a routing-headers line when the inspected frame has them.
 func (m Model) inspectorHeaderH() int {
 	if m.inspect >= 0 && m.inspect < len(m.full) {
-		if e := m.full[m.inspect]; e.MCPMethod != "" || e.MCPName != "" || e.MCPProtocolVersion != "" {
+		if hasTransportMeta(m.full[m.inspect]) {
 			return 2
 		}
 	}
 	return 1
+}
+
+// hasTransportMeta reports whether a frame carries a second chrome line. The
+// renderer and the height calculation both ask, and they must never disagree:
+// one saying yes while the other says no leaves the inspector body off by a row.
+func hasTransportMeta(e store.EventView) bool {
+	return e.MCPMethod != "" || e.MCPName != "" || e.MCPProtocolVersion != "" || e.HTTPStatus != 0
 }
 
 // pairWidget is the right side of the inspector header, req N ⇄ resp N with the

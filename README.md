@@ -63,6 +63,15 @@ For a streamable-HTTP server, run mcpsnoop as a reverse proxy.
 mcpsnoop http --target http://localhost:3000/mcp --listen :7000
 ```
 
+The HTTP status of every response shows in the stream, so a response that carries
+no JSON-RPC message of its own is still a visible frame rather than nothing: the
+401 challenge, the 403 on a rejected Origin, the 202 that acknowledges a
+notification, and the 502 when the target cannot be reached at all. A 401's
+`WWW-Authenticate` header is kept verbatim and shown in the inspector, since it
+names the auth scheme and the resource metadata to go to next. Filter by status
+with `status:401` in the TUI, or by any failure with `status:err`. A 4xx or 5xx
+counts as an error, so a default `mcpsnoop check` run fails on it.
+
 No server of your own? [Try it for real](docs/TRY_IT.md) against a published
 test server, driven by your own client. To inspect a session after it happened,
 see [review past sessions from logs](docs/POST_MORTEM.md).

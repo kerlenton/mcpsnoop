@@ -89,7 +89,19 @@ const (
 	EventInvalid
 	// EventOther is a frame we could not classify.
 	EventOther
+	// EventTransport is an HTTP-level event with no JSON-RPC message of its own:
+	// a response the target answered with a status and no body, a non-2xx whose
+	// body is not JSON-RPC, or a request the proxy could not forward at all. It
+	// exists because those are otherwise invisible, and because calling them
+	// invalid frames blames the wrong layer.
+	EventTransport
 )
+
+// httpFailed reports whether a status is a failure worth counting. 4xx and 5xx
+// only: a 3xx is a redirect the proxy forwards untouched, and a 2xx is fine
+// even when it carries no body, which is exactly what a 202 acknowledging a
+// notification looks like.
+func httpFailed(status int) bool { return status >= 400 }
 
 // callKey identifies a request awaiting its response. The response travels in
 // the opposite direction with the same id.
@@ -147,6 +159,8 @@ type event struct {
 	mcpName            string // Mcp-Name routing header
 	mcpProtocolVersion string // MCP-Protocol-Version request header
 	batch              bool   // one element of a JSON-RPC batch (routing headers cannot address it)
+	status             int    // HTTP status of the response this frame arrived on (zero on stdio)
+	authChallenge      string // WWW-Authenticate on that response
 	mismatch           bool   // a routing header disagrees with the body (structured flag for warning)
 	truncated          bool   // the observed copy was capped at the frame-size limit
 	deprecated         string // a deprecated MCP feature was used (structured, not a protocol warning)
@@ -268,7 +282,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		return EventView{Kind: EventOther} // control frame, not shown in the stream
 	}
 
-	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName, mcpProtocolVersion: e.MCPProtocolVersion, batch: e.Batch}
+	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName, mcpProtocolVersion: e.MCPProtocolVersion, batch: e.Batch, status: e.Status, authChallenge: e.AuthChallenge}
 
 	if e.Direction == proxy.ServerStderr {
 		ev.kind = EventStderr
@@ -287,10 +301,32 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		return ev.view(sess)
 	}
 
+	// A response with a status and no JSON-RPC message of its own. Counting a
+	// failure here toward the session's errors is what lets a default check run
+	// gate on a 401 or a 500; there is no double count, because a failure that
+	// does carry a JSON-RPC error body takes the branch below instead.
+	if e.Status != 0 && len(e.Raw) == 0 && e.Text == "" {
+		ev.kind = EventTransport
+		if httpFailed(e.Status) {
+			sess.errors++
+		}
+		sess.events = append(sess.events, ev)
+		return ev.view(sess)
+	}
+
 	msg, ok := proxy.ParseRPC(e.Raw)
 	switch {
 	case !ok:
-		ev.kind = EventInvalid
+		if httpFailed(e.Status) {
+			// Not stream corruption. The target answered with an HTTP error and a
+			// body that is not JSON-RPC, typically a gateway's HTML page. Reporting
+			// that as a corrupted stream sends the reader after the wrong problem,
+			// and on stdio, where there is no status, nothing changes.
+			ev.kind = EventTransport
+			sess.errors++
+		} else {
+			ev.kind = EventInvalid
+		}
 	case msg.Method == "" && msg.IsResponse():
 		ev.kind = EventResponse
 		ev.id = string(msg.ID)
