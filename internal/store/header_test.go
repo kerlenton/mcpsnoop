@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -63,8 +64,8 @@ func TestIngestAcceptsAnEncodedMcpNameThatMatches(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := New()
-			raw := `{"jsonrpc":"2.0","id":1,"method":"` + tc.method + `","params":` +
-				strings.Replace(tc.params, "%q", `"`+tc.target+`"`, 1) + `}`
+			raw := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":%q,"params":%s}`,
+				tc.method, fmt.Sprintf(tc.params, tc.target))
 			ev := s.Ingest(proxy.Envelope{
 				SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
 				Direction: proxy.ClientToServer, Transport: "http",
@@ -100,5 +101,24 @@ func TestIngestReportsTheDecodedNameOnMismatch(t *testing.T) {
 	}
 	if strings.Contains(ev.Warning, "base64") {
 		t.Fatalf("the warning should not leak the encoded form, got %q", ev.Warning)
+	}
+}
+
+// A decoded value can carry what an HTTP header cannot. The spec's own example
+// is a newline, and a raw one would split the text export's one-line-per-frame
+// output and break the TUI row it is rendered in.
+func TestIngestQuotesAControlCharacterInADecodedName(t *testing.T) {
+	s := New()
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer, Transport: "http",
+		MCPMethod: "tools/call", MCPName: encodeHeader("line1\nline2"),
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search"}}`),
+	})
+	if strings.ContainsAny(ev.Warning, "\n\r\x00") {
+		t.Fatalf("a warning must stay on one line, got %q", ev.Warning)
+	}
+	if !strings.Contains(ev.Warning, `line1\nline2`) {
+		t.Fatalf("the newline should be escaped, not dropped, got %q", ev.Warning)
 	}
 }

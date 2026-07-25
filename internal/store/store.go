@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -428,7 +429,15 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			// warning tells a reader nothing.
 			if name := operationName(msg); ev.mcpName != "" && name != "" {
 				if header := decodeHeaderValue(ev.mcpName); header != name {
-					ev.warning = appendWarning(ev.warning, "routing header Mcp-Name "+header+" disagrees with body name "+name)
+					// Quoted, because a decoded value has none of the guarantees the
+					// raw header had: the sentinel exists to carry what an HTTP field
+					// value cannot, so this can hold newlines, control characters, or
+					// an escape sequence. Warnings are rendered as a terminal cell and
+					// written one per line by the text export, and either would break
+					// on a raw one. Quoting the body name too keeps the pair readable
+					// when a name contains a space.
+					ev.warning = appendWarning(ev.warning,
+						"routing header Mcp-Name "+strconv.Quote(header)+" disagrees with body name "+strconv.Quote(name))
 					ev.mismatch = true
 				}
 			}
