@@ -423,7 +423,7 @@ func TestHTTPProxySSE(t *testing.T) {
 
 func TestSSETapMultiChunk(t *testing.T) {
 	var got []string
-	tap := newSSETap(io.NopCloser(strings.NewReader("")), func(d []byte) { got = append(got, string(d)) })
+	tap := newSSETap(io.NopCloser(strings.NewReader("")), func(d []byte, _ bool) { got = append(got, string(d)) })
 	// Feed split across arbitrary chunk boundaries.
 	for _, chunk := range []string{"data: {\"a\":", "1}\n", "\nda", "ta: {\"b\":2}\n\n"} {
 		tap.feed([]byte(chunk))
@@ -435,12 +435,35 @@ func TestSSETapMultiChunk(t *testing.T) {
 
 func TestSSETapMultilineData(t *testing.T) {
 	var got []string
-	tap := newSSETap(io.NopCloser(strings.NewReader("")), func(d []byte) { got = append(got, string(d)) })
+	tap := newSSETap(io.NopCloser(strings.NewReader("")), func(d []byte, _ bool) { got = append(got, string(d)) })
 
 	tap.feed([]byte("data: first line\ndata: second line\n\n"))
 
 	if len(got) != 1 || got[0] != "first line\nsecond line" {
 		t.Fatalf("sseTap parsed %v", got)
+	}
+}
+
+// TestSSETapFlagsTruncated checks that an SSE event whose observed copy exceeds
+// the frame cap is reported as truncated rather than parsed as a whole frame.
+func TestSSETapFlagsTruncated(t *testing.T) {
+	old := sseDataObserveCap
+	sseDataObserveCap = 16
+	t.Cleanup(func() { sseDataObserveCap = old })
+
+	var observed []byte
+	var truncated bool
+	tap := newSSETap(io.NopCloser(strings.NewReader("")), func(d []byte, tr bool) {
+		observed = append([]byte(nil), d...)
+		truncated = tr
+	})
+	tap.feed([]byte("data: " + strings.Repeat("x", 32) + "\n\n"))
+
+	if !truncated {
+		t.Fatal("expected truncated=true for an oversized SSE event")
+	}
+	if len(observed) != 16 {
+		t.Fatalf("observed len = %d, want 16", len(observed))
 	}
 }
 

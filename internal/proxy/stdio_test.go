@@ -193,3 +193,29 @@ func TestStdioNonJSONLine(t *testing.T) {
 		}
 	}
 }
+
+// TestPumpFramesFlagsTruncated checks that stdio observation marks oversized lines
+// as truncated so the store does not classify them as stream corruption.
+func TestPumpFramesFlagsTruncated(t *testing.T) {
+	old := frameObserveCap
+	frameObserveCap = 32
+	t.Cleanup(func() { frameObserveCap = old })
+
+	line := strings.Repeat("x", 48) + "\n"
+	var out bytes.Buffer
+	var truncated bool
+	var observed []byte
+	pumpFrames(strings.NewReader(line), &out, func(l []byte, tr bool) {
+		observed = append([]byte(nil), l...)
+		truncated = tr
+	})
+	if out.String() != line {
+		t.Fatalf("passthrough mismatch: got %q want %q", out.String(), line)
+	}
+	if !truncated {
+		t.Fatal("expected truncated=true for an oversized stdio line")
+	}
+	if len(observed) != 32 {
+		t.Fatalf("observed len = %d, want 32", len(observed))
+	}
+}

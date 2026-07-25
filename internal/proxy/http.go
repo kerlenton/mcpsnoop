@@ -229,8 +229,14 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			}
 			if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 				// Streaming case, tap SSE data frames as bytes flow to the client.
-				resp.Body = newSSETap(resp.Body, func(data []byte) {
-					emitFrames(emit, ServerToClient, data, rt)
+				resp.Body = newSSETap(resp.Body, func(data []byte, truncated bool) {
+					r := rt
+					if truncated {
+						r.truncated = true
+						emit(ServerToClient, data, r)
+						return
+					}
+					emitFrames(emit, ServerToClient, data, r)
 				})
 				return nil
 			}
@@ -309,13 +315,14 @@ func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte,
 // sseTap passes SSE bytes through unchanged while extracting each event's
 // `data:` payload (one JSON-RPC message per event) for observation.
 type sseTap struct {
-	rc      io.ReadCloser
-	onData  func([]byte)
-	lineBuf bytes.Buffer
-	dataBuf bytes.Buffer
+	rc        io.ReadCloser
+	onData    func([]byte, bool)
+	lineBuf   bytes.Buffer
+	dataBuf   bytes.Buffer
+	truncated bool
 }
 
-func newSSETap(rc io.ReadCloser, onData func([]byte)) *sseTap {
+func newSSETap(rc io.ReadCloser, onData func([]byte, bool)) *sseTap {
 	return &sseTap{rc: rc, onData: onData}
 }
 
@@ -348,21 +355,33 @@ func (t *sseTap) feed(b []byte) {
 func (t *sseTap) line(l []byte) {
 	if len(l) == 0 { // blank line ends an event
 		if t.dataBuf.Len() > 0 {
-			t.onData(append([]byte(nil), t.dataBuf.Bytes()...))
+			t.onData(append([]byte(nil), t.dataBuf.Bytes()...), t.truncated)
 			t.dataBuf.Reset()
+			t.truncated = false
 		}
 		return
 	}
 	if rest, ok := bytes.CutPrefix(l, []byte("data:")); ok {
-		// Cap the observed event so a stream that never sends its terminating
-		// blank line cannot grow this buffer without bound.
-		if t.dataBuf.Len() >= maxFrameBytes {
+		rest = bytes.TrimPrefix(rest, []byte(" "))
+		room := sseDataObserveCap - t.dataBuf.Len()
+		if room <= 0 {
+			t.truncated = true
 			return
 		}
 		if t.dataBuf.Len() > 0 {
+			if room == 0 {
+				t.truncated = true
+				return
+			}
 			t.dataBuf.WriteByte('\n')
+			room--
 		}
-		t.dataBuf.Write(bytes.TrimPrefix(rest, []byte(" ")))
+		if len(rest) > room {
+			t.dataBuf.Write(rest[:room])
+			t.truncated = true
+			return
+		}
+		t.dataBuf.Write(rest)
 	}
 	// other SSE fields (event:, id:, retry:) are ignored
 }
@@ -374,8 +393,9 @@ func (t *sseTap) Close() error {
 		t.lineBuf.Reset()
 	}
 	if t.dataBuf.Len() > 0 {
-		t.onData(append([]byte(nil), t.dataBuf.Bytes()...))
+		t.onData(append([]byte(nil), t.dataBuf.Bytes()...), t.truncated)
 		t.dataBuf.Reset()
+		t.truncated = false
 	}
 	return t.rc.Close()
 }

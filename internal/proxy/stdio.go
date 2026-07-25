@@ -42,6 +42,12 @@ type StdioConfig struct {
 // copy we hand to the Sink so a pathological line can't blow up memory.
 const maxFrameBytes = 16 << 20 // 16 MiB
 
+// frameObserveCap is the observation cap used by pumpFrames. Tests may lower it.
+var frameObserveCap = maxFrameBytes
+
+// sseDataObserveCap bounds the observed SSE event payload. Tests may lower it.
+var sseDataObserveCap = maxFrameBytes
+
 // RunStdio spawns the wrapped server and proxies stdio transparently between the
 // client (our stdin/stdout) and the server, observing every newline-delimited
 // JSON-RPC frame. It returns the server's exit code and any startup error.
@@ -102,7 +108,20 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 	// Text otherwise, so a stray non-JSON line still reaches the hub instead of
 	// failing to encode. Forwarding is unaffected, the bytes are already written
 	// downstream before observe runs.
-	observe := func(dir Direction, line []byte) {
+	observe := func(dir Direction, line []byte, truncated bool) {
+		if truncated {
+			sink.Emit(Envelope{
+				SessionID:   cfg.SessionID,
+				ServerLabel: cfg.Label,
+				Seq:         seq.Add(1),
+				TS:          time.Now(),
+				Direction:   dir,
+				Transport:   TransportStdio,
+				Raw:         append([]byte(nil), line...),
+				Truncated:   true,
+			})
+			return
+		}
 		raw, text := splitObserved(line)
 		emit(dir, raw, text)
 	}
@@ -123,7 +142,7 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 	go func() {
 		// Closing the server's stdin signals EOF so it can shut down cleanly.
 		defer srvStdin.Close()
-		pumpFrames(in, srvStdin, func(line []byte) { observe(ClientToServer, line) })
+		pumpFrames(in, srvStdin, func(line []byte, truncated bool) { observe(ClientToServer, line, truncated) })
 	}()
 
 	var wg sync.WaitGroup
@@ -132,7 +151,7 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 	// server -> client
 	go func() {
 		defer wg.Done()
-		pumpFrames(srvStdout, out, func(line []byte) { observe(ServerToClient, line) })
+		pumpFrames(srvStdout, out, func(line []byte, truncated bool) { observe(ServerToClient, line, truncated) })
 	}()
 
 	// server stderr -> our stderr (forwarded) + observed line-by-line
@@ -158,10 +177,11 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 // observation. Each complete line (without the trailing newline) is passed to
 // observe. The exact bytes read are always written to dst first, so a slow or
 // failing observer can never affect the forwarded stream. Lines longer than
-// maxFrameBytes are still forwarded, only the observed copy is truncated.
-func pumpFrames(src io.Reader, dst io.Writer, observe func(line []byte)) {
+// frameObserveCap are still forwarded, only the observed copy is truncated.
+func pumpFrames(src io.Reader, dst io.Writer, observe func(line []byte, truncated bool)) {
 	r := bufio.NewReaderSize(src, 64<<10)
 	var pending []byte // accumulated bytes of the current (unterminated) line
+	var truncated bool
 	for {
 		chunk, err := r.ReadSlice('\n')
 		if len(chunk) > 0 {
@@ -172,20 +192,30 @@ func pumpFrames(src io.Reader, dst io.Writer, observe func(line []byte)) {
 			if f, ok := dst.(interface{ Flush() error }); ok {
 				_ = f.Flush()
 			}
-			if len(pending) < maxFrameBytes {
+			room := frameObserveCap - len(pending)
+			if room <= 0 {
+				truncated = true
+			} else if len(chunk) > room {
+				pending = append(pending, chunk[:room]...)
+				truncated = true
+			} else {
 				pending = append(pending, chunk...)
 			}
 			if chunk[len(chunk)-1] == '\n' {
 				line := pending
-				// Strip trailing \n and optional \r.
-				line = line[:len(line)-1]
-				if len(line) > 0 && line[len(line)-1] == '\r' {
+				if len(line) > 0 && line[len(line)-1] == '\n' {
+					line = line[:len(line)-1]
+					if len(line) > 0 && line[len(line)-1] == '\r' {
+						line = line[:len(line)-1]
+					}
+				} else if len(line) > 0 && line[len(line)-1] == '\r' {
 					line = line[:len(line)-1]
 				}
 				if len(line) > 0 {
-					observe(line)
+					observe(line, truncated)
 				}
 				pending = nil
+				truncated = false
 			}
 		}
 		if err == bufio.ErrBufferFull {
@@ -193,7 +223,7 @@ func pumpFrames(src io.Reader, dst io.Writer, observe func(line []byte)) {
 		}
 		if err != nil {
 			if len(pending) > 0 {
-				observe(pending)
+				observe(pending, truncated)
 			}
 			return
 		}
