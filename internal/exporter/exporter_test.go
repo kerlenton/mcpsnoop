@@ -90,6 +90,45 @@ func TestBuildCorrelatedExport(t *testing.T) {
 	}
 }
 
+func TestBuildExportsMissingFrames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gap.jsonl")
+	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 4, TS: t0.Add(time.Millisecond),
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`),
+	})
+
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Session.MissingFrames != 2 {
+		t.Fatalf("missing_frames = %d, want 2", out.Session.MissingFrames)
+	}
+
+	var buf bytes.Buffer
+	if err := Write(&buf, out, Options{Format: FormatJSON}); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Session SessionSummary `json:"session"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Session.MissingFrames != 2 {
+		t.Fatalf("json export missing_frames = %d, want 2", payload.Session.MissingFrames)
+	}
+}
+
 func TestBuildExportsSupersededCallNotAsOk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "reuse.jsonl")
 	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)

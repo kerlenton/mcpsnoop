@@ -106,6 +106,8 @@ const harHTTPVersion = "JSON-RPC/2.0"
 
 // WriteHAR renders a session as HAR 1.2, one entry per correlated call, so a
 // capture can be opened in the browser devtools and other tools that read HAR.
+// When Session.MissingFrames is non-zero the capture is incomplete and the
+// entry count understates what actually happened on the wire.
 func WriteHAR(w io.Writer, data SessionExport) error {
 	label := data.Session.Label
 	if label == "" {

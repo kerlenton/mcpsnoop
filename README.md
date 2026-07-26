@@ -321,18 +321,20 @@ regression too. Improvements (added tools, fixed calls, speedups) still exit zer
 ## Checking sessions in CI
 
 Gate a recorded agent run on errors, stream corruption, protocol warnings,
-routing-header mismatches, calls that never got a response, tool-definition
-drift, or use of deprecated protocol features.
+routing-header mismatches, calls that never got a response, dropped frames that
+leave the capture incomplete, tool-definition drift, or use of deprecated
+protocol features.
 
 ```bash
-mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,drift,deprecated] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,drift,deprecated,incomplete] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
 to gate on calls that never got a response, `mismatch` to gate specifically on a
 routing header (Mcp-Method or Mcp-Name) disagreeing with the body, `drift` to gate
-on tool definitions changing after approval, or `deprecated` to gate on features
-the spec has deprecated. Pass a comma-separated subset to select only the
+on tool definitions changing after approval, `deprecated` to gate on features
+the spec has deprecated, or `incomplete` to gate on captures with dropped frames.
+Pass a comma-separated subset to select only the
 conditions relevant to a job. Omit the session to check the newest capture, or use
 `-` to read JSONL from stdin.
 A name or resource URI that will not fit in an HTTP field value travels Base64 in

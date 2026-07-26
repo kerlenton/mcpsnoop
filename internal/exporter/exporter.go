@@ -97,6 +97,9 @@ type SessionSummary struct {
 	Notifications int       `json:"notifications"`
 	Errors        int       `json:"errors"`
 	Pending       int       `json:"pending"`
+	// MissingFrames counts envelopes dropped upstream, inferred from Seq gaps.
+	// A non-zero value means the capture is incomplete.
+	MissingFrames uint64 `json:"missing_frames"`
 }
 
 type CapabilitiesExport struct {
@@ -291,6 +294,7 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 			Notifications: header.Notifications,
 			Errors:        header.Errors,
 			Pending:       header.Pending,
+			MissingFrames: header.MissingFrames,
 		},
 		Calls:  outCalls,
 		Events: outEvents,
@@ -391,6 +395,8 @@ func Write(w io.Writer, data SessionExport, opts Options) error {
 // trace derived from the session id, so a session with no propagation still
 // reads as one unit. Either way mcpsnoop.session.id is a resource attribute
 // rather than a span one, so the tie back to the capture survives the split.
+// When Session.MissingFrames is non-zero the capture is incomplete and the span
+// count understates what actually happened on the wire.
 type otlpExport struct {
 	ResourceSpans []otlpResourceSpans `json:"resourceSpans"`
 }
