@@ -337,6 +337,10 @@ the spec has deprecated, or `incomplete` to gate on captures with dropped frames
 Pass a comma-separated subset to select only the
 conditions relevant to a job. Omit the session to check the newest capture, or use
 `-` to read JSONL from stdin.
+The dropped-frame count travels with the artifacts too, so a capture that
+understates itself says so wherever it is opened: `missing_frames` in the JSON
+export, `log.comment` in HAR, and the `mcpsnoop.session.missing_frames` resource
+attribute in OTLP.
 A name or resource URI that will not fit in an HTTP field value travels Base64 in
 a `=?base64?…?=` sentinel; it is decoded before the comparison, so a client that
 encodes correctly is never flagged.
