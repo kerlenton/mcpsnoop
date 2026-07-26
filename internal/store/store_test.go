@@ -762,6 +762,51 @@ func TestCapabilitiesFromStatelessMeta(t *testing.T) {
 	}
 }
 
+func TestMissingResultTypeWarning(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+
+	// 2026-07-28 sessions require resultType on every result object.
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "server/discover",
+		`{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}`))
+	ev := s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
+		`"result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}}}`))
+	if !strings.Contains(ev.Warning, "missing required resultType") {
+		t.Fatalf("expected resultType conformance warning on 2026-07-28, got %q", ev.Warning)
+	}
+
+	// Earlier revisions treat an absent resultType as complete, so stay quiet.
+	s2 := New()
+	s2.Ingest(req(1, t0, proxy.ClientToServer, "1", "initialize",
+		`{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cli"}}`))
+	ev = s2.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
+		`"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"srv"}}`))
+	if strings.Contains(ev.Warning, "resultType") {
+		t.Fatalf("pre-2026-07-28 response should not warn about resultType, got %q", ev.Warning)
+	}
+
+	// A conforming 2026-07-28 result is clean.
+	s3 := New()
+	s3.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list",
+		`{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}`))
+	ev = s3.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
+		`"result":{"resultType":"complete","tools":[]}`))
+	if strings.Contains(ev.Warning, "resultType") {
+		t.Fatalf("conforming result should not warn, got %q", ev.Warning)
+	}
+
+	// The MCP-Protocol-Version header alone is enough to gate the check.
+	s4 := New()
+	ev = s4.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: t0, Direction: proxy.ServerToClient,
+		Transport: "http", MCPProtocolVersion: "2026-07-28",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`),
+	})
+	if !strings.Contains(ev.Warning, "missing required resultType") {
+		t.Fatalf("expected header-gated resultType warning, got %q", ev.Warning)
+	}
+}
+
 func TestCapabilitiesDiscoverOnlyFallsBackToSupportedVersion(t *testing.T) {
 	s := New()
 	t0 := time.Now()

@@ -332,6 +332,9 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.kind = EventResponse
 		ev.id = string(msg.ID)
 		ev.warning = validationWarning(msg)
+		if note := missingResultTypeWarning(msg.Result, sess.caps.protocolVersion, ev.mcpProtocolVersion); note != "" {
+			ev.warning = appendWarning(ev.warning, note)
+		}
 		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.TS, msg)
 		ev.call = c
@@ -1272,6 +1275,26 @@ func validationWarning(msg proxy.RPCMessage) string {
 		}
 	}
 	return warning
+}
+
+// missingResultTypeWarning reports when a 2026-07-28-or-later session receives a
+// result object without the required resultType field. Earlier revisions treat an
+// absent field as "complete", so the check is version-gated.
+func missingResultTypeWarning(result json.RawMessage, sessionVersion, headerVersion string) string {
+	if len(result) == 0 {
+		return ""
+	}
+	if !requiresRoutingHeaders(sessionVersion) && !requiresRoutingHeaders(headerVersion) {
+		return ""
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(result, &fields) != nil {
+		return ""
+	}
+	if _, ok := fields["resultType"]; !ok {
+		return "result is missing required resultType"
+	}
+	return ""
 }
 
 func appendWarning(existing, next string) string {
