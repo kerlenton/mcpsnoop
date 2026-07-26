@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
@@ -372,7 +373,7 @@ func Write(w io.Writer, data SessionExport, opts Options) error {
 	}
 	switch format {
 	case FormatJSON:
-		enc := json.NewEncoder(w)
+		enc := jsonwire.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(data)
 	case FormatHTML:
@@ -523,7 +524,7 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 		}},
 		ScopeSpans: []otlpScopeSpans{{Scope: otlpScope{Name: "mcpsnoop"}, Spans: spans}},
 	}}}
-	enc := json.NewEncoder(w)
+	enc := jsonwire.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payload)
 }
@@ -846,6 +847,12 @@ func writeText(w io.Writer, data SessionExport) error {
 }
 
 func writeHTML(w io.Writer, data SessionExport) error {
+	// json.Marshal deliberately, not jsonwire.Marshal. This payload goes into
+	// template.JS inside a script block, and template.JS switches off the
+	// contextual escaping html/template would otherwise apply. Escaping < is then
+	// the only thing keeping a tool result that contains </script> from ending the
+	// script element and running as markup. Preserving wire bytes is not worth a
+	// stored XSS in a file people open in a browser.
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return err

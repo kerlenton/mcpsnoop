@@ -2,11 +2,12 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 )
 
 // MultiSink fans an envelope out to several sinks. The shim uses it to write the
@@ -102,7 +103,7 @@ func (s *SocketSink) run(ctx context.Context) {
 // pump encodes envelopes to conn until a write fails or ctx is cancelled.
 func (s *SocketSink) pump(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	enc := json.NewEncoder(conn)
+	enc := jsonwire.NewEncoder(conn)
 	for {
 		select {
 		case <-ctx.Done():

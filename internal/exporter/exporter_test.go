@@ -1030,3 +1030,29 @@ func TestWriteOTLPStatesZeroMissingFrames(t *testing.T) {
 		t.Fatalf("intValue = %+v, want \"0\"", value)
 	}
 }
+
+// TestJSONExportPreservesMarkup. The JSON export re-encodes every captured
+// payload, so it rewrote markup the same way the trace file did.
+func TestJSONExportPreservesMarkup(t *testing.T) {
+	st := store.New()
+	ingest(t, st,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"render"}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"<b>hi</b> & bye"}]}}`)
+	out, err := Build(st, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, format := range []Format{FormatJSON, FormatHAR} {
+		var buf bytes.Buffer
+		if err := Write(&buf, out, Options{Format: format}); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(buf.String(), `\u003c`) {
+			t.Fatalf("the %s export must not rewrite markup:\n%s", format, buf.String())
+		}
+		if !strings.Contains(buf.String(), "<b>hi</b> & bye") {
+			t.Fatalf("the %s export should carry the payload verbatim:\n%s", format, buf.String())
+		}
+	}
+}

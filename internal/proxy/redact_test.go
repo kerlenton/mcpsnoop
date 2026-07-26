@@ -338,3 +338,27 @@ func TestRedactingSinkLeavesInvalidJSONUnchanged(t *testing.T) {
 		t.Fatalf("Raw = %s, want unchanged %s", got.Raw, raw)
 	}
 }
+
+// TestRedactRawPreservesMarkupInUntouchedFields. Redaction re-encodes the whole
+// payload to replace one value, so every other field is re-encoded with it. It
+// used to come back HTML-escaped, which rewrote parts of the message that
+// redaction was never asked to touch.
+func TestRedactRawPreservesMarkupInUntouchedFields(t *testing.T) {
+	sink := &captureSink{}
+	redacted := NewRedactingSink(sink, RedactConfig{Keys: []string{"token"}})
+
+	redacted.Emit(Envelope{
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"params":{"token":"abc123","html":"<b>hi</b> & bye"}}`),
+	})
+
+	got := string(sink.byDir("")[0].Raw)
+	if strings.Contains(got, `\u003c`) {
+		t.Fatalf("redaction must not rewrite the fields it leaves alone: %s", got)
+	}
+	if !strings.Contains(got, `<b>hi</b> & bye`) {
+		t.Fatalf("the untouched value should survive verbatim: %s", got)
+	}
+	if !strings.Contains(got, redactedValue) {
+		t.Fatalf("the secret should still be redacted: %s", got)
+	}
+}

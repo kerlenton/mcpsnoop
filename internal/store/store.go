@@ -919,13 +919,22 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 
 	for _, rawTool := range r.Tools {
 		var tool struct {
-			Name        string          `json:"name"`
-			Description string          `json:"description"`
+			Name string `json:"name"`
+			// Kept raw, not decoded to a string, because the cost below has to
+			// measure the bytes the server actually spelled. Re-encoding a decoded
+			// string cannot reproduce them in either direction: it would escape a
+			// literal < that the server sent plain, and flatten a \u003c or a
+			// \u00e9 that the server sent escaped.
+			Description json.RawMessage `json:"description"`
 			InputSchema json.RawMessage `json:"inputSchema"`
 		}
 		if json.Unmarshal(rawTool, &tool) != nil || tool.Name == "" {
 			continue
 		}
+		var description string
+		// Absent, null, or not a string all leave this empty, which is what the
+		// old decode into a string field did too.
+		_ = json.Unmarshal(tool.Description, &description)
 		if _, ok := sess.advertisedSet[tool.Name]; ok {
 			continue
 		}
@@ -934,15 +943,22 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		sess.advertisedTools = append(sess.advertisedTools, tool.Name)
 		schema := append(json.RawMessage(nil), tool.InputSchema...)
 
+		// An absent description stays 0 rather than the two bytes of an empty
+		// string, which is the rule the old measurement kept too.
+		descriptionBytes := 0
+		if description != "" {
+			descriptionBytes = compactJSONLen(tool.Description)
+		}
+
 		sess.toolDefinitions[tool.Name] = ToolDefinition{
 			Name:        tool.Name,
-			Description: tool.Description,
+			Description: description,
 			InputSchema: schema,
 			Findings:    analyzeSchema(schema),
 			Cost: ToolCost{
 				Name:             tool.Name,
 				Bytes:            compactJSONLen(rawTool),
-				DescriptionBytes: jsonStringLen(tool.Description),
+				DescriptionBytes: descriptionBytes,
 				SchemaBytes:      compactJSONLen(tool.InputSchema),
 			},
 		}
@@ -974,17 +990,6 @@ func compactJSONLen(raw json.RawMessage) int {
 		return len(raw) // unparseable, fall back to the bytes as they arrived
 	}
 	return buf.Len()
-}
-
-// jsonStringLen is how many bytes a string occupies once JSON encoded, quotes
-// and escaping included, so the description is measured on the same basis as the
-// compacted definition it sits inside rather than as raw prose length.
-func jsonStringLen(s string) int {
-	if s == "" {
-		return 0 // an absent description is not a two-byte empty one
-	}
-	b, _ := json.Marshal(s) // marshalling a string cannot fail
-	return len(b)
 }
 
 func toolName(params json.RawMessage) string {

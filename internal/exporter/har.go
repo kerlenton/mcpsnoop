@@ -1,10 +1,11 @@
 package exporter
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 )
 
 // Version is recorded as the HAR creator version. It mirrors tui.Version and can
@@ -175,7 +176,7 @@ func WriteHAR(w io.Writer, data SessionExport) error {
 		Entries: entries,
 		Comment: harIncompleteComment(data.Session.MissingFrames),
 	}}
-	enc := json.NewEncoder(w)
+	enc := jsonwire.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payload)
 }
@@ -217,7 +218,11 @@ func harResponseBody(call CallExport) string {
 		return string(call.Result)
 	}
 	if call.Error != nil {
-		if encoded, err := json.Marshal(call.Error); err == nil {
+		// jsonwire, like the encoder above. This branch flattens the error object
+		// into a string field, so escaping here would leave one HAR file carrying
+		// two encodings of content.text depending on whether the call failed, and
+		// RPCError.Data is verbatim wire bytes.
+		if encoded, err := jsonwire.Marshal(call.Error); err == nil {
 			return string(encoded)
 		}
 	}
