@@ -723,6 +723,8 @@ func exportCall(index int, c store.CallView) CallExport {
 	switch {
 	case c.State == store.Pending:
 		status = "pending"
+	case c.State == store.Streaming:
+		status = "streaming"
 	case c.State == store.Superseded:
 		status = "superseded"
 	case c.TaskStatus == "cancelled":

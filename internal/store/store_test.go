@@ -1680,3 +1680,47 @@ func TestIngestCountsAnHTTPFailureOnce(t *testing.T) {
 		t.Fatalf("one failure must be counted once, got %d", got)
 	}
 }
+
+func TestSubscriptionsListenDoesNotCountAsPending(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	ev := s.Ingest(req(1, t0, proxy.ClientToServer, "5", "subscriptions/listen", `{}`))
+	if ev.Call == nil || ev.Call.State != Streaming {
+		t.Fatalf("listen call state = %v, want streaming", ev.Call.State)
+	}
+	if h := s.Sessions()[0]; h.Pending != 0 {
+		t.Fatalf("pending = %d, want 0 for an open listen stream", h.Pending)
+	}
+}
+
+func TestSubscriptionsListenCompletesWithoutPendingLeak(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "5", "subscriptions/listen", `{}`))
+	done := s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "5", `"result":{}`))
+	if done.Call == nil || done.Call.State != Completed {
+		t.Fatalf("completed listen state = %v, want completed", done.Call.State)
+	}
+	if h := s.Sessions()[0]; h.Pending != 0 {
+		t.Fatalf("pending = %d, want 0 after the stream ends", h.Pending)
+	}
+}
+
+func TestSubscriptionsListenClosesOnCancelledNotification(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "5", "subscriptions/listen", `{}`))
+	cancel := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0.Add(500 * time.Millisecond),
+		Direction: proxy.ServerToClient,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5}}`),
+	}
+	s.Ingest(cancel)
+	if h := s.Sessions()[0]; h.Pending != 0 {
+		t.Fatalf("pending = %d, want 0 after the server closes the stream", h.Pending)
+	}
+	events := s.Timeline("s1")
+	if events[0].Call == nil || events[0].Call.State != Completed {
+		t.Fatalf("listen call should be completed after notifications/cancelled, got %v", events[0].Call.State)
+	}
+}

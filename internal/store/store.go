@@ -34,6 +34,9 @@ const (
 	// Superseded means the request's id was reused by a later in-flight request, so
 	// this one can never be matched to a response. It is no longer pending.
 	Superseded
+	// Streaming means a long-lived stream request (subscriptions/listen) whose
+	// response arrives only when the stream ends. It is open but not pending.
+	Streaming
 )
 
 func (s CallState) String() string {
@@ -44,6 +47,8 @@ func (s CallState) String() string {
 		return "failed"
 	case Superseded:
 		return "superseded"
+	case Streaming:
+		return "streaming"
 	default:
 		return "pending"
 	}
@@ -402,7 +407,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.requests++
 		if reused {
 			ev.warning = appendWarning(ev.warning, "request reuses an id already in flight")
-		} else {
+		} else if ev.call.state != Streaming {
 			sess.pending++
 		}
 		if msg.Method == "initialize" {
@@ -413,6 +418,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.method = msg.Method
 		ev.warning = validationWarning(msg)
 		sess.notifications++
+		if msg.Method == "notifications/cancelled" {
+			if id := cancelledRequestID(msg.Params); id != "" {
+				sess.closeStreamingCall(id, e.TS)
+			}
+		}
 		if msg.Method == "notifications/tasks" {
 			if state, ok := parseTaskState(msg.Params); ok {
 				ev.taskID = state.TaskID
@@ -578,7 +588,7 @@ func (s *Store) sessionFor(e proxy.Envelope) *session {
 func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope) (*call, bool) {
 	key := callKey{dir: e.Direction, id: id}
 	prev, ok := sess.calls[key]
-	reused := ok && prev.state == Pending
+	reused := ok && (prev.state == Pending || prev.state == Streaming)
 	if reused {
 		// The earlier in-flight call keeps this id, so it will never be matched now.
 		// Mark it superseded (not pending) so the timeline stops rendering it as a
@@ -595,6 +605,9 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 		params: msg.Params,
 		start:  e.TS,
 		state:  Pending,
+	}
+	if isStreamOpeningMethod(msg.Method) {
+		c.state = Streaming
 	}
 	if msg.Method == "tools/call" {
 		c.isTool = true
@@ -616,7 +629,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	if c == nil {
 		return nil, false // unmatched response (request missed or before backfill)
 	}
-	if c.state != Pending {
+	if c.state != Pending && c.state != Streaming {
 		return c, false // already answered, a duplicate or late response must not recount
 	}
 	if c.method == "tools/call" && c.taskID != "" {
@@ -645,6 +658,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	c.end = ts
 	c.result = msg.Result
 	c.err = msg.Error
+	wasPending := c.state == Pending
 	switch {
 	case msg.Error != nil:
 		c.state = Failed // JSON-RPC / protocol error
@@ -656,7 +670,9 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	default:
 		c.state = Completed
 	}
-	sess.pending--
+	if wasPending {
+		sess.pending--
+	}
 	switch c.method {
 	case "initialize":
 		sess.caps.applyResponse(msg.Result)
@@ -1174,6 +1190,39 @@ func classifyMRTRState(c *call, retryState string, retryHasState bool) MRTRState
 		return MRTRStateChanged
 	default:
 		return ""
+	}
+}
+
+func isStreamOpeningMethod(method string) bool {
+	return method == "subscriptions/listen"
+}
+
+func cancelledRequestID(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var p struct {
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if json.Unmarshal(params, &p) != nil || len(p.RequestID) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(p.RequestID, &s) == nil {
+		return s
+	}
+	return strings.Trim(string(p.RequestID), `"`)
+}
+
+func (sess *session) closeStreamingCall(id string, ts time.Time) {
+	for _, dir := range []proxy.Direction{proxy.ClientToServer, proxy.ServerToClient} {
+		key := callKey{dir: dir, id: id}
+		c := sess.calls[key]
+		if c != nil && c.state == Streaming {
+			c.end = ts
+			c.state = Completed
+			return
+		}
 	}
 }
 
