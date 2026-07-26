@@ -22,9 +22,10 @@ const (
 	checkPending    checkSignal = "pending"
 	checkDrift      checkSignal = "drift"
 	checkDeprecated checkSignal = "deprecated"
+	checkIncomplete checkSignal = "incomplete"
 )
 
-var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated}
+var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated, checkIncomplete}
 
 type checkOutputFormat string
 
@@ -41,6 +42,7 @@ type checkSummary struct {
 	mismatches      int
 	pending         int
 	deprecated      int
+	missingFrames   uint64
 	drift           store.ToolDrift
 	baselineCreated bool
 }
@@ -52,7 +54,7 @@ func newCheckCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "check [session-id|log.jsonl|-]",
 		Short: "Fail when a captured session violates a signal or an assertion",
-		Long:  "Check a captured session against signals (errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, tool-definition drift) and assertions (a tool-call latency budget, and tools that must or must not have been called). With no session, the newest session log is checked. Use - to read from stdin.",
+		Long:  "Check a captured session against signals (errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, dropped frames that leave the capture incomplete, tool-definition drift) and assertions (a tool-call latency budget, and tools that must or must not have been called). With no session, the newest session log is checked. Use - to read from stdin.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			signals, err := parseCheckSignals(failOn)
@@ -100,8 +102,8 @@ func newCheckCmd() *cobra.Command {
 				}
 			} else {
 				for i, summary := range summaries {
-					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d deprecated=%d\n",
-						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.deprecated)
+					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d deprecated=%d missing_frames=%d\n",
+						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.deprecated, summary.missingFrames)
 					if summary.baselineCreated {
 						// No baseline existed, so this run trusted the current definitions
 						// rather than verifying them. Say so, or an ephemeral CI reads green
@@ -135,7 +137,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().SortFlags = false
-	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, drift, deprecated")
+	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, drift, deprecated, incomplete")
 	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text or junit")
 	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
 	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this duration (e.g. 500ms), disabled when zero")
@@ -216,10 +218,10 @@ func parseCheckSignals(value string) (map[checkSignal]bool, error) {
 	for _, part := range strings.Split(value, ",") {
 		signal := checkSignal(strings.TrimSpace(part))
 		switch signal {
-		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated:
+		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated, checkIncomplete:
 			signals[signal] = true
 		default:
-			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, drift, or deprecated, got %q", part)
+			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, drift, deprecated, or incomplete, got %q", part)
 		}
 	}
 	return signals, nil
@@ -253,7 +255,7 @@ func loadCheckSession(cmd *cobra.Command, arg string) (*store.Store, string, err
 func summarizeCheck(st *store.Store, baselines *toolbaseline.Manager) []checkSummary {
 	var summaries []checkSummary
 	for _, header := range st.Sessions() {
-		summary := checkSummary{sessionID: header.ID, errors: header.Errors, pending: header.Pending}
+		summary := checkSummary{sessionID: header.ID, errors: header.Errors, pending: header.Pending, missingFrames: header.MissingFrames}
 		if _, ok := st.ToolDefinitions(header.ID); ok {
 			report, created, err := toolbaseline.ObserveSession(baselines, st, header.ID)
 			if err != nil {
@@ -316,6 +318,8 @@ func (s checkSummary) count(signal checkSignal) int {
 		return n
 	case checkDeprecated:
 		return s.deprecated
+	case checkIncomplete:
+		return int(s.missingFrames)
 	default:
 		return 0
 	}

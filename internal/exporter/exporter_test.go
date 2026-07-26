@@ -90,6 +90,45 @@ func TestBuildCorrelatedExport(t *testing.T) {
 	}
 }
 
+func TestBuildExportsMissingFrames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gap.jsonl")
+	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 4, TS: t0.Add(time.Millisecond),
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`),
+	})
+
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Session.MissingFrames != 2 {
+		t.Fatalf("missing_frames = %d, want 2", out.Session.MissingFrames)
+	}
+
+	var buf bytes.Buffer
+	if err := Write(&buf, out, Options{Format: FormatJSON}); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Session SessionSummary `json:"session"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Session.MissingFrames != 2 {
+		t.Fatalf("json export missing_frames = %d, want 2", payload.Session.MissingFrames)
+	}
+}
+
 func TestBuildExportsSupersededCallNotAsOk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "reuse.jsonl")
 	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
@@ -849,5 +888,145 @@ func TestWriteOTLPOmitsTraceStateFieldWhenAbsent(t *testing.T) {
 	}
 	if _, ok := payload.ResourceSpans[0].ScopeSpans[0].Spans[0]["traceState"]; ok {
 		t.Fatalf("a span with no propagated state must omit traceState: %s", buf.String())
+	}
+}
+
+// incompleteSession is a one-call export with a stated number of dropped frames,
+// so the artifact tests differ only in the thing under test.
+func incompleteSession(missing uint64) SessionExport {
+	return SessionExport{
+		Session: SessionSummary{ID: "s1", Label: "demo", MissingFrames: missing},
+		Calls: []CallExport{{
+			ID:        "call-1",
+			Method:    "tools/list",
+			Direction: proxy.ClientToServer,
+			StartedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+		}},
+	}
+}
+
+// TestWriteHARFlagsAnIncompleteCapture. The count already reaches the JSON
+// export and the check gate, but a HAR is opened somewhere else entirely, and a
+// call whose frames never reached the log is simply absent from it. Absence
+// reads as "it never happened", so the file has to say otherwise itself.
+func TestWriteHARFlagsAnIncompleteCapture(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteHAR(&buf, incompleteSession(3)); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Log struct {
+			Comment string `json:"comment"`
+			Entries []struct {
+				Time float64 `json:"time"`
+			} `json:"entries"`
+		} `json:"log"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid HAR JSON: %v\n%s", err, buf.String())
+	}
+	if payload.Log.Comment == "" {
+		t.Fatalf("an incomplete capture must say so in log.comment:\n%s", buf.String())
+	}
+	if !strings.Contains(payload.Log.Comment, "3 frames") {
+		t.Fatalf("the comment should name the count, got %q", payload.Log.Comment)
+	}
+	// The warning must not come at the cost of the entries themselves.
+	if len(payload.Log.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(payload.Log.Entries))
+	}
+}
+
+// TestWriteHARCommentIsSingularForOneFrame keeps the prose readable, since this
+// field is rendered to a person rather than parsed.
+func TestWriteHARCommentIsSingularForOneFrame(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteHAR(&buf, incompleteSession(1)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "1 frame were") && !strings.Contains(buf.String(), "1 frame was") {
+		t.Fatalf("expected singular wording for a single dropped frame:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "1 frames") {
+		t.Fatalf("plural used for a single frame:\n%s", buf.String())
+	}
+}
+
+// TestWriteHAROmitsCommentWhenComplete. log.comment is prose for a reader, and a
+// remark on every export saying nothing was dropped is noise in a field devtools
+// surface as a note.
+func TestWriteHAROmitsCommentWhenComplete(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteHAR(&buf, incompleteSession(0)); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Log map[string]json.RawMessage `json:"log"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload.Log["comment"]; ok {
+		t.Fatalf("a complete capture should carry no comment:\n%s", buf.String())
+	}
+}
+
+// otlpResourceAttrs pulls the resource attributes out of an OTLP payload.
+func otlpResourceAttrs(t *testing.T, data SessionExport) map[string]otlpAnyValue {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := WriteOTLP(&buf, data); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		ResourceSpans []struct {
+			Resource struct {
+				Attributes []otlpAttribute `json:"attributes"`
+			} `json:"resource"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid OTLP JSON: %v\n%s", err, buf.String())
+	}
+	if len(payload.ResourceSpans) != 1 {
+		t.Fatalf("unexpected OTLP hierarchy: %s", buf.String())
+	}
+	attrs := map[string]otlpAnyValue{}
+	for _, attr := range payload.ResourceSpans[0].Resource.Attributes {
+		attrs[attr.Key] = attr.Value
+	}
+	return attrs
+}
+
+// TestWriteOTLPCarriesMissingFrames. A resource attribute rather than a span one,
+// because incompleteness is a property of the capture, and resource attributes
+// survive the spans of one session landing in several traces.
+func TestWriteOTLPCarriesMissingFrames(t *testing.T) {
+	attrs := otlpResourceAttrs(t, incompleteSession(3))
+	value, ok := attrs["mcpsnoop.session.missing_frames"]
+	if !ok {
+		t.Fatalf("the dropped-frame count must reach the payload, got keys %v", attrs)
+	}
+	if value.IntValue == nil {
+		t.Fatalf("a count belongs in intValue so a backend can filter on it, got %+v", value)
+	}
+	// proto3 JSON encodes int64 as a string; a bare number is what a collector
+	// rejects after the payload has looked right all the way to the wire.
+	if *value.IntValue != "3" {
+		t.Fatalf("intValue = %q, want \"3\"", *value.IntValue)
+	}
+}
+
+// TestWriteOTLPStatesZeroMissingFrames. Absence would be ambiguous between a
+// capture that dropped nothing and one exported before the attribute existed,
+// and the point of the count is that the span total can be trusted.
+func TestWriteOTLPStatesZeroMissingFrames(t *testing.T) {
+	attrs := otlpResourceAttrs(t, incompleteSession(0))
+	value, ok := attrs["mcpsnoop.session.missing_frames"]
+	if !ok {
+		t.Fatal("a complete capture should claim zero rather than say nothing")
+	}
+	if value.IntValue == nil || *value.IntValue != "0" {
+		t.Fatalf("intValue = %+v, want \"0\"", value)
 	}
 }

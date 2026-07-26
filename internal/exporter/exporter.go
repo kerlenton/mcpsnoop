@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,6 +98,9 @@ type SessionSummary struct {
 	Notifications int       `json:"notifications"`
 	Errors        int       `json:"errors"`
 	Pending       int       `json:"pending"`
+	// MissingFrames counts envelopes dropped upstream, inferred from Seq gaps.
+	// A non-zero value means the capture is incomplete.
+	MissingFrames uint64 `json:"missing_frames"`
 }
 
 type CapabilitiesExport struct {
@@ -291,6 +295,7 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 			Notifications: header.Notifications,
 			Errors:        header.Errors,
 			Pending:       header.Pending,
+			MissingFrames: header.MissingFrames,
 		},
 		Calls:  outCalls,
 		Events: outEvents,
@@ -391,6 +396,10 @@ func Write(w io.Writer, data SessionExport, opts Options) error {
 // trace derived from the session id, so a session with no propagation still
 // reads as one unit. Either way mcpsnoop.session.id is a resource attribute
 // rather than a span one, so the tie back to the capture survives the split.
+// When a capture is incomplete the span count understates what happened on the
+// wire, so the dropped-frame count rides the payload as the resource attribute
+// mcpsnoop.session.missing_frames. It belongs there rather than in this comment:
+// the person who needs it is importing the trace, not reading this file.
 type otlpExport struct {
 	ResourceSpans []otlpResourceSpans `json:"resourceSpans"`
 }
@@ -440,6 +449,10 @@ type otlpAnyValue struct {
 	StringValue *string  `json:"stringValue,omitempty"`
 	BoolValue   *bool    `json:"boolValue,omitempty"`
 	DoubleValue *float64 `json:"doubleValue,omitempty"`
+	// IntValue is a string because proto3 JSON encodes int64 that way, and OTLP
+	// receivers parse it back. Writing a bare number here is the mistake that
+	// makes a payload look right and get rejected at the collector.
+	IntValue *string `json:"intValue,omitempty"`
 }
 
 // WriteOTLP writes data using the OTLP JSON encoding.
@@ -502,6 +515,11 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 			otlpString("service.name", "mcpsnoop"),
 			otlpString("mcpsnoop.session.id", data.Session.ID),
 			otlpString("mcpsnoop.session.label", data.Session.Label),
+			// Emitted even when zero. Absence would be ambiguous between a capture
+			// that dropped nothing and one exported before this attribute existed,
+			// and the whole point of the count is that the span total can be
+			// trusted, which only an explicit claim supports.
+			otlpInt("mcpsnoop.session.missing_frames", int64(data.Session.MissingFrames)),
 		}},
 		ScopeSpans: []otlpScopeSpans{{Scope: otlpScope{Name: "mcpsnoop"}, Spans: spans}},
 	}}}
@@ -669,6 +687,11 @@ func otlpBool(key string, value bool) otlpAttribute {
 
 func otlpDouble(key string, value float64) otlpAttribute {
 	return otlpAttribute{Key: key, Value: otlpAnyValue{DoubleValue: &value}}
+}
+
+func otlpInt(key string, value int64) otlpAttribute {
+	encoded := strconv.FormatInt(value, 10)
+	return otlpAttribute{Key: key, Value: otlpAnyValue{IntValue: &encoded}}
 }
 
 func ExportFile(inputPath string, w io.Writer, opts Options) error {

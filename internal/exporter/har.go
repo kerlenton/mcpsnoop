@@ -2,6 +2,7 @@ package exporter
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"time"
 )
@@ -24,6 +25,12 @@ type harLog struct {
 	Version string     `json:"version"`
 	Creator harCreator `json:"creator"`
 	Entries []harEntry `json:"entries"`
+	// Comment is optional on log in HAR 1.2 and is where an incomplete capture
+	// says so. Unlike the OTLP attribute this is prose for a person reading the
+	// file, so it appears only when there is something to say; a note reading
+	// "nothing was dropped" on every export would be noise in a field that
+	// devtools render as a remark.
+	Comment string `json:"comment,omitempty"`
 }
 
 type harCreator struct {
@@ -106,6 +113,10 @@ const harHTTPVersion = "JSON-RPC/2.0"
 
 // WriteHAR renders a session as HAR 1.2, one entry per correlated call, so a
 // capture can be opened in the browser devtools and other tools that read HAR.
+//
+// When a capture is incomplete the entry count understates what happened on the
+// wire, so the file says so in log.comment. It belongs there rather than in this
+// doc comment: the person who needs it opened the HAR, not this file.
 func WriteHAR(w io.Writer, data SessionExport) error {
 	label := data.Session.Label
 	if label == "" {
@@ -162,6 +173,7 @@ func WriteHAR(w io.Writer, data SessionExport) error {
 		Version: "1.2",
 		Creator: harCreator{Name: "mcpsnoop", Version: Version},
 		Entries: entries,
+		Comment: harIncompleteComment(data.Session.MissingFrames),
 	}}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -210,4 +222,25 @@ func harResponseBody(call CallExport) string {
 		}
 	}
 	return ""
+}
+
+// harIncompleteComment describes a lossy capture for whoever opens the file, or
+// returns "" when nothing was dropped.
+//
+// The wording says what the reader can and cannot conclude, because the risk
+// here is not that entries look wrong but that they look complete: a call whose
+// frames never reached the log is simply absent, and absence reads as "it never
+// happened" rather than "we did not see it".
+func harIncompleteComment(missing uint64) string {
+	if missing == 0 {
+		return ""
+	}
+	frames := "frames"
+	if missing == 1 {
+		frames = "frame"
+	}
+	return fmt.Sprintf(
+		"mcpsnoop: capture incomplete, %d %s were dropped before being recorded. "+
+			"The entry count is a lower bound, and a call missing from this file may "+
+			"have happened on the wire.", missing, frames)
 }
