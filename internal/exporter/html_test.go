@@ -11,9 +11,6 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
 
-// TestHTMLSurfacesSupersededStatus checks that a request whose id was reused
-// carries the superseded status in the exported HTML (data, renderer, and CSS),
-// while a normal answered request keeps an empty status cell.
 // TestHTMLFilterFindsTruncatedUnderWarn checks the HTML status filter agrees with
 // the TUI: a truncated frame matches status:warn there too. The filter runs in the
 // browser, so assert the data carries the flag and matchStatus keys on it.
@@ -80,6 +77,9 @@ func TestHTMLMarksTruncatedEvent(t *testing.T) {
 	}
 }
 
+// TestHTMLSurfacesSupersededStatus checks that a request whose id was reused
+// carries the superseded status in the exported HTML (data, renderer, and CSS),
+// while a normal answered request keeps an empty status cell.
 func TestHTMLSurfacesSupersededStatus(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "reuse.jsonl")
 	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
@@ -132,5 +132,30 @@ func TestHTMLSurfacesSupersededStatus(t *testing.T) {
 	// The CSS rule that colors it (as warn) must exist.
 	if !strings.Contains(html, ".status.superseded { color:var(--warn); }") {
 		t.Fatal("HTML is missing the .status.superseded CSS rule")
+	}
+}
+
+// TestWriteHTMLStillEscapesMarkup. The HTML export is the one writer that must
+// keep escaping: its payload lands in template.JS inside a script block, where
+// template.JS disables the contextual escaping html/template would apply, and a
+// tool result containing </script> would otherwise close the element and run as
+// markup. Wire fidelity loses to stored XSS in a file opened in a browser.
+func TestWriteHTMLStillEscapesMarkup(t *testing.T) {
+	data := SessionExport{
+		Session: SessionSummary{ID: "s1"},
+		Events: []EventExport{{
+			Seq: 1, Kind: "response",
+			Raw: json.RawMessage(`{"result":{"text":"</script><img src=x onerror=alert(1)>"}}`),
+		}},
+	}
+	var buf bytes.Buffer
+	if err := writeHTML(&buf, data); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "</script><img") {
+		t.Fatalf("a payload must not be able to close the script element:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `\u003c/script\u003e`) {
+		t.Fatal("expected the markup to stay escaped in the HTML export")
 	}
 }

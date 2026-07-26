@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/ohler55/ojg/jp"
+
+	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 )
 
 const redactedValue = "[REDACTED]"
@@ -157,7 +159,10 @@ func (r Redactor) redactRaw(raw json.RawMessage) (json.RawMessage, bool) {
 	if !changed {
 		return nil, false
 	}
-	b, err := json.Marshal(v)
+	// Not json.Marshal: it would escape <, > and & and hand back a payload the
+	// server never sent. The sink no longer re-escapes either, so this survives
+	// all the way to the file.
+	b, err := jsonwire.Marshal(v)
 	if err != nil {
 		return nil, false
 	}

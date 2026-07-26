@@ -170,10 +170,10 @@ func TestToolCostsAbsentWithoutAToolsList(t *testing.T) {
 	}
 }
 
-// TestToolCostsAbsentDescriptionIsZero locks jsonStringLen's empty case: a tool
-// with no description field weighs zero description bytes, not the two an empty
-// JSON string encodes to, so an export never implies a description that is not
-// there. The rest of the definition is still measured.
+// TestToolCostsAbsentDescriptionIsZero locks the empty case: a tool with no
+// description field weighs zero description bytes, not the two an empty JSON
+// string occupies, so an export never implies a description that is not there.
+// The rest of the definition is still measured.
 func TestToolCostsAbsentDescriptionIsZero(t *testing.T) {
 	s := New()
 	listExchange(s, 1, "", `{"tools":[{"name":"ping","inputSchema":{"type":"object"}}]}`)

@@ -3,7 +3,6 @@ package proxy
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -11,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 )
 
 func cwd() string {
@@ -122,7 +123,10 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 	}
 
 	// Emit the session meta first (seq 1) so the hub can replay this server.
-	if meta, mErr := json.Marshal(SessionMeta{Command: cfg.Command, CWD: cwd()}); mErr == nil {
+	// jsonwire: this is the one Envelope.Raw the proxy builds rather than copies,
+	// and a command or cwd containing & would otherwise be the only escaped frame
+	// in an otherwise verbatim log.
+	if meta, mErr := jsonwire.Marshal(SessionMeta{Command: cfg.Command, CWD: cwd()}); mErr == nil {
 		emit(DirectionMeta, meta, "", false)
 	}
 

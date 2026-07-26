@@ -919,13 +919,27 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 
 	for _, rawTool := range r.Tools {
 		var tool struct {
-			Name        string          `json:"name"`
-			Description string          `json:"description"`
+			Name string `json:"name"`
+			// Kept raw, not decoded to a string, because the cost below has to
+			// measure the bytes the server actually spelled. Re-encoding a decoded
+			// string cannot reproduce them in either direction: it would escape a
+			// literal < that the server sent plain, and flatten a \u003c or a
+			// \u00e9 that the server sent escaped.
+			Description json.RawMessage `json:"description"`
 			InputSchema json.RawMessage `json:"inputSchema"`
 		}
 		if json.Unmarshal(rawTool, &tool) != nil || tool.Name == "" {
 			continue
 		}
+		var description string
+		// Absent, null, and not-a-string all leave this empty. The last of those is
+		// a deliberate change: decoding into a string field failed the whole
+		// tool-level Unmarshal above, so a server that sent an object or a number
+		// as its description dropped the tool out of the inventory entirely, name
+		// and schema included. Losing a tool from the list is a worse answer than
+		// listing it with no description, and the raw bytes are still measured, so
+		// the cost figure still says the description was there.
+		_ = json.Unmarshal(tool.Description, &description)
 		if _, ok := sess.advertisedSet[tool.Name]; ok {
 			continue
 		}
@@ -934,15 +948,21 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		sess.advertisedTools = append(sess.advertisedTools, tool.Name)
 		schema := append(json.RawMessage(nil), tool.InputSchema...)
 
+		// Measured from the raw bytes, not gated on the decoded string being
+		// non-empty: whatever the description field holds, those bytes were spent
+		// inside the definition Bytes counts, and this number exists to say where
+		// they went. compactJSONLen already answers 0 for an absent field, which
+		// keeps the rule that no description weighs nothing rather than the two
+		// bytes of an empty one.
 		sess.toolDefinitions[tool.Name] = ToolDefinition{
 			Name:        tool.Name,
-			Description: tool.Description,
+			Description: description,
 			InputSchema: schema,
 			Findings:    analyzeSchema(schema),
 			Cost: ToolCost{
 				Name:             tool.Name,
 				Bytes:            compactJSONLen(rawTool),
-				DescriptionBytes: jsonStringLen(tool.Description),
+				DescriptionBytes: compactJSONLen(tool.Description),
 				SchemaBytes:      compactJSONLen(tool.InputSchema),
 			},
 		}
@@ -974,17 +994,6 @@ func compactJSONLen(raw json.RawMessage) int {
 		return len(raw) // unparseable, fall back to the bytes as they arrived
 	}
 	return buf.Len()
-}
-
-// jsonStringLen is how many bytes a string occupies once JSON encoded, quotes
-// and escaping included, so the description is measured on the same basis as the
-// compacted definition it sits inside rather than as raw prose length.
-func jsonStringLen(s string) int {
-	if s == "" {
-		return 0 // an absent description is not a two-byte empty one
-	}
-	b, _ := json.Marshal(s) // marshalling a string cannot fail
-	return len(b)
 }
 
 func toolName(params json.RawMessage) string {

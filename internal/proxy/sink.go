@@ -1,10 +1,11 @@
 package proxy
 
 import (
-	"encoding/json"
 	"io"
 	"sync"
 	"sync/atomic"
+
+	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 )
 
 // Sink receives observed envelopes. Implementations MUST be non-blocking and
@@ -64,7 +65,7 @@ func NewAsyncSink(w io.Writer, buffer int) *AsyncSink {
 
 func (s *AsyncSink) loop() {
 	defer close(s.done)
-	enc := json.NewEncoder(s.w)
+	enc := jsonwire.NewEncoder(s.w)
 	for {
 		select {
 		case env := <-s.ch:

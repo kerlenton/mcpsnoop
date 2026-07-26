@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 	"github.com/kerlenton/mcpsnoop/internal/sessiondiff"
 	"github.com/kerlenton/mcpsnoop/internal/store"
 )
@@ -206,7 +207,7 @@ func (m *Manager) write(baseline snapshot) error {
 		tmp.Close()
 		return err
 	}
-	encoder := json.NewEncoder(tmp)
+	encoder := jsonwire.NewEncoder(tmp)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(baseline); err != nil {
 		tmp.Close()
@@ -245,7 +246,7 @@ func (m *Manager) writeNew(baseline snapshot) error {
 		tmp.Close()
 		return err
 	}
-	encoder := json.NewEncoder(tmp)
+	encoder := jsonwire.NewEncoder(tmp)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(baseline); err != nil {
 		tmp.Close()
@@ -323,7 +324,13 @@ func canonicalJSON(raw json.RawMessage) string {
 	if decoder.Decode(&value) != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return strings.TrimSpace(string(raw))
 	}
-	canonical, err := json.Marshal(value)
+	// jsonwire here as well as on the two encoders. normalize bakes this result
+	// into the stored RawMessage before the outer encoder ever runs, and turning
+	// escaping off does not unescape what is already escaped, so converting only
+	// the encoders would leave input_schema rewritten in the durable record of
+	// what --accept trusted. Safe in both directions: load re-runs
+	// normalizeStored, so a baseline written before this still compares equal.
+	canonical, err := jsonwire.Marshal(value)
 	if err != nil {
 		return strings.TrimSpace(string(raw))
 	}

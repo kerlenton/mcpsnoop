@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
+	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 )
 
 const (
@@ -363,7 +364,12 @@ func canonicalJSON(raw json.RawMessage) string {
 	if decoder.Decode(&value) != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return strings.TrimSpace(string(raw))
 	}
-	canonical, err := json.Marshal(value)
+	// jsonwire, because this is not only a comparison key. callArguments feeds the
+	// same string into CallChange.Arguments, which WriteText prints to a terminal,
+	// and a person reading a diff should see the arguments the tool was called
+	// with rather than their escaped spelling. Key sorting, which is what makes
+	// this canonical, is unaffected.
+	canonical, err := jsonwire.Marshal(value)
 	if err != nil {
 		return strings.TrimSpace(string(raw))
 	}

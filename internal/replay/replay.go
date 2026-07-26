@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
 
@@ -157,12 +158,14 @@ func withClientMeta(params json.RawMessage) json.RawMessage {
 	meta["io.modelcontextprotocol/clientInfo"] = json.RawMessage(
 		fmt.Sprintf(`{"name":%q,"version":"dev"}`, clientName))
 
-	encodedMeta, err := json.Marshal(meta)
+	// jsonwire on all three marshals in this file: these carry captured params
+	// back to a live server, and the replay overlay renders what is built here.
+	encodedMeta, err := jsonwire.Marshal(meta)
 	if err != nil {
 		return params
 	}
 	obj["_meta"] = encodedMeta
-	encoded, err := json.Marshal(obj)
+	encoded, err := jsonwire.Marshal(obj)
 	if err != nil {
 		return params
 	}
@@ -182,7 +185,7 @@ func writeNotification(w io.Writer, method string, params json.RawMessage) error
 }
 
 func writeFrame(w io.Writer, frame map[string]any) error {
-	b, err := json.Marshal(frame)
+	b, err := jsonwire.Marshal(frame)
 	if err != nil {
 		return err
 	}
