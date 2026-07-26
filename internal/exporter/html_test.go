@@ -11,9 +11,6 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
 
-// TestHTMLSurfacesSupersededStatus checks that a request whose id was reused
-// carries the superseded status in the exported HTML (data, renderer, and CSS),
-// while a normal answered request keeps an empty status cell.
 // TestHTMLFilterFindsTruncatedUnderWarn checks the HTML status filter agrees with
 // the TUI: a truncated frame matches status:warn there too. The filter runs in the
 // browser, so assert the data carries the flag and matchStatus keys on it.
@@ -80,6 +77,9 @@ func TestHTMLMarksTruncatedEvent(t *testing.T) {
 	}
 }
 
+// TestHTMLSurfacesSupersededStatus checks that a request whose id was reused
+// carries the superseded status in the exported HTML (data, renderer, and CSS),
+// while a normal answered request keeps an empty status cell.
 func TestHTMLSurfacesSupersededStatus(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "reuse.jsonl")
 	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)

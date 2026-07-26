@@ -932,8 +932,13 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 			continue
 		}
 		var description string
-		// Absent, null, or not a string all leave this empty, which is what the
-		// old decode into a string field did too.
+		// Absent, null, and not-a-string all leave this empty. The last of those is
+		// a deliberate change: decoding into a string field failed the whole
+		// tool-level Unmarshal above, so a server that sent an object or a number
+		// as its description dropped the tool out of the inventory entirely, name
+		// and schema included. Losing a tool from the list is a worse answer than
+		// listing it with no description, and the raw bytes are still measured, so
+		// the cost figure still says the description was there.
 		_ = json.Unmarshal(tool.Description, &description)
 		if _, ok := sess.advertisedSet[tool.Name]; ok {
 			continue
@@ -943,13 +948,12 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		sess.advertisedTools = append(sess.advertisedTools, tool.Name)
 		schema := append(json.RawMessage(nil), tool.InputSchema...)
 
-		// An absent description stays 0 rather than the two bytes of an empty
-		// string, which is the rule the old measurement kept too.
-		descriptionBytes := 0
-		if description != "" {
-			descriptionBytes = compactJSONLen(tool.Description)
-		}
-
+		// Measured from the raw bytes, not gated on the decoded string being
+		// non-empty: whatever the description field holds, those bytes were spent
+		// inside the definition Bytes counts, and this number exists to say where
+		// they went. compactJSONLen already answers 0 for an absent field, which
+		// keeps the rule that no description weighs nothing rather than the two
+		// bytes of an empty one.
 		sess.toolDefinitions[tool.Name] = ToolDefinition{
 			Name:        tool.Name,
 			Description: description,
@@ -958,7 +962,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 			Cost: ToolCost{
 				Name:             tool.Name,
 				Bytes:            compactJSONLen(rawTool),
-				DescriptionBytes: descriptionBytes,
+				DescriptionBytes: compactJSONLen(tool.Description),
 				SchemaBytes:      compactJSONLen(tool.InputSchema),
 			},
 		}
