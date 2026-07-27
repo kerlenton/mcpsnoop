@@ -1878,13 +1878,30 @@ func TestResultTypeChecksADiscoverResult(t *testing.T) {
 	}
 }
 
-// TestResultTypePresenceOnly documents what this check deliberately does not do.
-// The spec also requires an unrecognised resultType to be treated as invalid, but
-// the valid set grows with whatever extensions the pair negotiated, so it is its
-// own problem with its own false positives and is tracked separately. Pinned so
-// the gap reads as a decision rather than an oversight.
-func TestResultTypePresenceOnly(t *testing.T) {
-	for _, value := range []string{`null`, `42`, `""`, `"nonsense"`} {
+// TestResultTypeRejectsAValueItCannotHold. A key alone is not the field: null
+// and a number read as "present, fine" to a check that only looks for the key,
+// and no extension can make either valid, so refusing them invents no false
+// alarm.
+func TestResultTypeRejectsAValueItCannotHold(t *testing.T) {
+	for _, value := range []string{`null`, `42`, `""`, `{}`, `["complete"]`} {
+		s := New()
+		s.Ingest(versionedRequest(1, "1", "tools/list", "2026-07-28"))
+		ev := s.Ingest(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(), Direction: proxy.ServerToClient,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"resultType":` + value + `}}`),
+		})
+		if !strings.Contains(ev.Warning, "invalid resultType") {
+			t.Fatalf("resultType %s is not a value the field can hold: %q", value, ev.Warning)
+		}
+	}
+}
+
+// TestResultTypeDoesNotPoliceTheValueSet is the other half, and the reason the
+// check stops at the type. Extensions may add ResultType values, and the valid
+// set is whatever the pair negotiated, so a string mcpsnoop does not recognise
+// is not evidence of anything. Pinned so the gap reads as a decision.
+func TestResultTypeDoesNotPoliceTheValueSet(t *testing.T) {
+	for _, value := range []string{`"complete"`, `"input_required"`, `"com.example/deferred"`} {
 		s := New()
 		s.Ingest(versionedRequest(1, "1", "tools/list", "2026-07-28"))
 		ev := s.Ingest(proxy.Envelope{
@@ -1892,7 +1909,30 @@ func TestResultTypePresenceOnly(t *testing.T) {
 			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"resultType":` + value + `}}`),
 		})
 		if strings.Contains(ev.Warning, "resultType") {
-			t.Fatalf("presence is all this checks today, %s should pass: %q", value, ev.Warning)
+			t.Fatalf("an unrecognised value is an extension's business, not ours: %s gave %q", value, ev.Warning)
 		}
+	}
+}
+
+// TestResultTypeSurvivesAnMRTRRetry. A retry is matched through matchRetry
+// rather than openCall, so the revision has to live on the call object to reach
+// it. Without that the second leg of every multi-round-trip call would go
+// unchecked.
+func TestResultTypeSurvivesAnMRTRRetry(t *testing.T) {
+	s := New()
+	s.Ingest(versionedRequest(1, "1", "tools/call", "2026-07-28"))
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required",` +
+			`"requestState":"st-1","requiredKeys":["token"]}}`),
+	})
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: time.Now(), Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search",` +
+			`"requestState":"st-1","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`),
+	})
+	ev := s.Ingest(plainResult(4, "2"))
+	if !strings.Contains(ev.Warning, "missing required resultType") {
+		t.Fatalf("the retry's answer is judged by the retry's own revision: %q", ev.Warning)
 	}
 }
