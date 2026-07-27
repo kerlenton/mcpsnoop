@@ -344,11 +344,8 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.TS, msg)
 		ev.call = c
-		// After completeCall, not before: it is what folds an initialize or
-		// server/discover response into the session's version, so running this
-		// first would judge a server's answer by the version the client merely
-		// proposed. It also supplies the call, which the initialize exemption
-		// needs.
+		// After completeCall, because that is what supplies the call, and the call
+		// is what carries the revision this response is judged by.
 		if note := missingResultTypeWarning(msg, c); note != "" {
 			ev.warning = appendWarning(ev.warning, note)
 		}
@@ -1310,19 +1307,15 @@ const resultTypeRequiredFrom = "2026-07-28"
 // requestProtocolVersion is the revision one request declared, from the two
 // places a request carries it, or "" when it carried neither.
 //
-// _meta first, because the specification names it as where every request supplies
-// this metadata; the MCP-Protocol-Version header second, since it is request
-// scoped too and required on every Streamable HTTP request from 2026-07-28. There
-// is deliberately no fall back to the session: that is the state the protocol
-// forbids inferring from, and reintroducing it here would undo the point.
+// The body first, because the specification names _meta as where every request
+// supplies this metadata; the MCP-Protocol-Version header second, since it is
+// request scoped too and required on every Streamable HTTP request from
+// 2026-07-28. There is deliberately no fall back to the session: that is the
+// state the protocol forbids inferring from, and reintroducing it here would
+// undo the point.
 func requestProtocolVersion(params json.RawMessage, header string) string {
-	var p struct {
-		Meta struct {
-			ProtocolVersion string `json:"io.modelcontextprotocol/protocolVersion"`
-		} `json:"_meta"`
-	}
-	if json.Unmarshal(params, &p) == nil && p.Meta.ProtocolVersion != "" {
-		return p.Meta.ProtocolVersion
+	if version := metaProtocolVersion(params); version != "" {
+		return version
 	}
 	return header
 }
@@ -1362,8 +1355,20 @@ func missingResultTypeWarning(msg proxy.RPCMessage, c *call) string {
 	if json.Unmarshal(msg.Result, &fields) != nil {
 		return "" // not an object: validationWarning already has something to say
 	}
-	if _, ok := fields["resultType"]; !ok {
+	raw, ok := fields["resultType"]
+	if !ok {
 		return "result is missing required resultType"
+	}
+	// A key alone is not the field. resultType is a string, so null, a number and
+	// an empty string are not values it can hold, and the first two are the worst
+	// kind of wrong: they read as "present, fine" to a check that only looks for
+	// the key. Rejecting them costs nothing, because no extension can make a
+	// number valid. What is deliberately not checked is whether a non-empty
+	// string is one the pair recognises, since that set grows with whatever
+	// extensions they negotiated and guessing at it would invent false alarms.
+	var value string
+	if json.Unmarshal(raw, &value) != nil || value == "" {
+		return "result has an invalid resultType"
 	}
 	return ""
 }
