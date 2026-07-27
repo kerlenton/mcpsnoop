@@ -762,7 +762,6 @@ func TestCapabilitiesFromStatelessMeta(t *testing.T) {
 	}
 }
 
-
 func TestCapabilitiesDiscoverOnlyFallsBackToSupportedVersion(t *testing.T) {
 	s := New()
 	t0 := time.Now()
