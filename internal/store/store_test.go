@@ -795,15 +795,17 @@ func TestMissingResultTypeWarning(t *testing.T) {
 		t.Fatalf("conforming result should not warn, got %q", ev.Warning)
 	}
 
-	// The MCP-Protocol-Version header alone is enough to gate the check.
+	// A response the backfill never saw the request for is still checked. The
+	// exemptions are keyed on the matched call, and an absent one must not read
+	// as an exemption: a server that omits the field omits it whether or not we
+	// caught the request that provoked it.
 	s4 := New()
-	ev = s4.Ingest(proxy.Envelope{
-		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: t0, Direction: proxy.ServerToClient,
-		Transport: "http", MCPProtocolVersion: "2026-07-28",
-		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`),
-	})
+	s4.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list",
+		`{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}`))
+	ev = s4.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "9",
+		`"result":{"tools":[]}`))
 	if !strings.Contains(ev.Warning, "missing required resultType") {
-		t.Fatalf("expected header-gated resultType warning, got %q", ev.Warning)
+		t.Fatalf("an unmatched response is still a server result, got %q", ev.Warning)
 	}
 }
 
