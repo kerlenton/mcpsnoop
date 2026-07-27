@@ -147,7 +147,9 @@ func TestSessionsTableDriftMarkerKeepsLabel(t *testing.T) {
 		Direction: proxy.ClientToServer, Transport: "stdio",
 		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
 	})
-	st.SetToolDrift("sess", store.ToolDrift{ChangedDescriptions: []string{"search"}})
+	drift := store.ToolDrift{}
+	drift.Add(store.DriftDescription, "search")
+	st.SetToolDrift("sess", drift)
 
 	m := ready(t, st)
 	out := m.View()
@@ -1184,10 +1186,10 @@ func TestDefinitionDriftIsVisibleInSessionsAndToolSummary(t *testing.T) {
 	st := store.New()
 	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
 	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search"}]}}`))
-	st.SetToolDrift("s1", store.ToolDrift{
-		ChangedDescriptions: []string{"search"},
-		AddedTools:          []string{"write"},
-	})
+	drift := store.ToolDrift{}
+	drift.Add(store.DriftDescription, "search")
+	drift.Add(store.DriftToolAdded, "write")
+	st.SetToolDrift("s1", drift)
 
 	m := ready(t, st)
 	// The sessions row carries the compact "!" marker (drift is warn-colored); the
@@ -1197,7 +1199,7 @@ func TestDefinitionDriftIsVisibleInSessionsAndToolSummary(t *testing.T) {
 	}
 	m = typeRunes(t, m, "s")
 	out := ansi.Strip(m.overlayRaw)
-	for _, want := range []string{"tool definition drift", "description changed", "search", "added", "write"} {
+	for _, want := range []string{"tool definition drift", "description", "search", "added", "write"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("summary missing %q\n%s", want, out)
 		}

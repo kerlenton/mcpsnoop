@@ -18,7 +18,7 @@ func newDiffCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "diff <session-id|log.jsonl> <session-id|log.jsonl>",
 		Short: "Compare tools and calls across two captured sessions",
-		Long:  "Compare two captured sessions for added or removed tools, input schema changes, call status changes, and notable duration shifts.",
+		Long:  "Compare two captured sessions for added or removed tools, changed descriptions, titles, input and output schemas, annotations and icons, call status changes, and notable duration shifts.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if durationThreshold < 0 {
@@ -58,7 +58,7 @@ func newDiffCmd() *cobra.Command {
 	cmd.Flags().SortFlags = false
 	cmd.Flags().DurationVar(&durationThreshold, "duration-threshold", sessiondiff.DefaultDurationThreshold, "minimum absolute duration change to report")
 	cmd.Flags().Float64Var(&durationRatio, "duration-ratio", sessiondiff.DefaultDurationRatio, "minimum slowdown or speedup ratio to report")
-	cmd.Flags().BoolVar(&exitOnRegression, "exit-code", false, "exit non-zero when the after session regressed (removed tool, schema change, worse call status, or slowdown)")
+	cmd.Flags().BoolVar(&exitOnRegression, "exit-code", false, "exit non-zero when the after session regressed (removed tool, changed description, title, schema or annotations, worse call status, or slowdown)")
 	return cmd
 }
 
