@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/ohler55/ojg/jp"
@@ -142,7 +143,26 @@ func (r Redactor) RedactEnvelope(env Envelope) Envelope {
 	if env.Text != "" && len(r.valuePatterns) > 0 {
 		env.Text = r.redactString(env.Text)
 	}
+	if len(env.MCPParamHeaders) > 0 && (len(r.keys) > 0 || len(r.valuePatterns) > 0) {
+		env.MCPParamHeaders = r.redactMCPParamHeaders(env.MCPParamHeaders)
+	}
 	return env
+}
+
+func (r Redactor) redactMCPParamHeaders(headers []MCPParamHeader) []MCPParamHeader {
+	redacted := slices.Clone(headers)
+	for i := range redacted {
+		name := strings.ToLower(redacted[i].Name)
+		name, ok := strings.CutPrefix(name, "mcp-param-")
+		_, exactKey := r.keys[name]
+		_, normalizedKey := r.keys[strings.ReplaceAll(name, "-", "_")]
+		if ok && (exactKey || normalizedKey) {
+			redacted[i].Value = redactedValue
+			continue
+		}
+		redacted[i].Value = r.redactString(redacted[i].Value)
+	}
+	return redacted
 }
 
 func (r Redactor) redactRaw(raw json.RawMessage) (json.RawMessage, bool) {

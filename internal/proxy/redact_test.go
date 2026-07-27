@@ -161,6 +161,35 @@ func TestRedactingSinkScrubsValuePatternMatches(t *testing.T) {
 	}
 }
 
+func TestRedactingSinkScrubsMCPParamHeaders(t *testing.T) {
+	sink := &captureSink{}
+	redacted := NewRedactingSink(sink, RedactConfig{
+		CommonSecrets: true,
+		ValuePatterns: []string{`sk-[A-Za-z0-9]+`},
+	})
+	headers := []MCPParamHeader{
+		{Name: "Mcp-Param-Token", Value: "=?base64?c2VjcmV0?="},
+		{Name: "Mcp-Param-Region", Value: "route sk-abc123 here"},
+		{Name: "Mcp-Param-Safe", Value: "visible"},
+	}
+
+	redacted.Emit(Envelope{MCPParamHeaders: headers})
+
+	got := sink.byDir("")[0].MCPParamHeaders
+	if got[0].Value != redactedValue {
+		t.Fatalf("token header = %q, want redacted", got[0].Value)
+	}
+	if got[1].Value != "route [REDACTED] here" {
+		t.Fatalf("pattern header = %q, want value-pattern redaction", got[1].Value)
+	}
+	if got[2].Value != "visible" {
+		t.Fatalf("safe header = %q, want unchanged", got[2].Value)
+	}
+	if headers[0].Value == redactedValue || strings.Contains(headers[1].Value, redactedValue) {
+		t.Fatal("redaction mutated the caller's envelope slice")
+	}
+}
+
 func TestRedactingSinkScrubsOnlyMatchingJSONPath(t *testing.T) {
 	path, err := ParseRedactPath("$.params.arguments.password")
 	if err != nil {

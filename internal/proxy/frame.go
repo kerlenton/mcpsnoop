@@ -37,6 +37,14 @@ type SessionMeta struct {
 	CWD     string   `json:"cwd,omitempty"`
 }
 
+// MCPParamHeader is one custom tool-parameter header observed on an HTTP
+// request. Name is kept because field names are case-insensitive and clients do
+// not have to use Go's canonical spelling.
+type MCPParamHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 // Envelope wraps a single observed event for transport to the hub and for the
 // on-disk session log. The shim stays dumb, it never correlates or interprets,
 // it just timestamps and labels. All correlation/timing lives in the hub.
@@ -59,6 +67,9 @@ type Envelope struct {
 	// MCPProtocolVersion is the MCP-Protocol-Version request header, empty for
 	// stdio and pre-2026 HTTP servers.
 	MCPProtocolVersion string `json:"mcp_protocol_version,omitempty"`
+	// MCPParamHeaders are the Mcp-Param-* request headers generated from
+	// x-mcp-header annotations in a tool's input schema.
+	MCPParamHeaders []MCPParamHeader `json:"mcp_param_headers,omitempty"`
 	// Batch marks a frame that was one element of a JSON-RPC batch array. Routing
 	// headers address a single operation, so they cannot describe a batch.
 	Batch bool `json:"batch,omitempty"`
