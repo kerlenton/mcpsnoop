@@ -1682,3 +1682,259 @@ func TestIngestCountsAnHTTPFailureOnce(t *testing.T) {
 		t.Fatalf("one failure must be counted once, got %d", got)
 	}
 }
+
+// TestIngestDoesNotFlagADowngradedHandshake is the regression. initialize carries
+// the version the client proposes, and applyRequest folds it into the session
+// before the server has answered. A legacy client proposing 2026-07-28 to a
+// 2025-11-25 server would otherwise be told the perfectly correct downgrade
+// response was missing a required field, and warnings fail a default check run,
+// so that is a red build on a healthy handshake.
+func TestIngestDoesNotFlagADowngradedHandshake(t *testing.T) {
+	s := New()
+	now := time.Now()
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","clientInfo":{"name":"cli"},"capabilities":{}}}`),
+	})
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"srv"}}}`),
+	})
+
+	if strings.Contains(ev.Warning, "resultType") {
+		t.Fatalf("a server negotiating down is not missing a field it never had to send: %q", ev.Warning)
+	}
+	// And the downgrade must stick, so later results are judged by the server's
+	// revision rather than the client's proposal.
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: now, Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`),
+	})
+	res := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 4, TS: now, Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}`),
+	})
+	if strings.Contains(res.Warning, "resultType") {
+		t.Fatalf("the negotiated 2025-11-25 does not require resultType: %q", res.Warning)
+	}
+}
+
+// TestIngestExemptsTheInitializeResponseOutright covers the case the version
+// gate alone would miss: a server that answers initialize while agreeing to
+// 2026-07-28. The handshake was removed in that revision, so a server answering
+// one is speaking an earlier one whatever it claims, and it is the wrong frame
+// to make the point on.
+func TestIngestExemptsTheInitializeResponseOutright(t *testing.T) {
+	s := New()
+	now := time.Now()
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","clientInfo":{"name":"cli"},"capabilities":{}}}`),
+	})
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2026-07-28","capabilities":{},"serverInfo":{"name":"srv"}}}`),
+	})
+	if strings.Contains(ev.Warning, "resultType") {
+		t.Fatalf("initialize is exempt whatever version it agrees to: %q", ev.Warning)
+	}
+}
+
+// TestIngestFlagsAMissingResultTypeOnAStatelessSession is the feature itself, on
+// the path 2026-07-28 actually uses: no handshake, the version riding _meta.
+func TestIngestFlagsAMissingResultTypeOnAStatelessSession(t *testing.T) {
+	s := New()
+	now := time.Now()
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`),
+	})
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`),
+	})
+	if !strings.Contains(ev.Warning, "resultType") {
+		t.Fatalf("a 2026-07-28 server must send resultType, got %q", ev.Warning)
+	}
+
+	// Present is silent, on either allowed value.
+	for _, value := range []string{"complete", "input_required"} {
+		ok := s.Ingest(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: now, Direction: proxy.ServerToClient,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":9,"result":{"resultType":"` + value + `"}}`),
+		})
+		if strings.Contains(ok.Warning, "resultType") {
+			t.Fatalf("resultType %q is present, got %q", value, ok.Warning)
+		}
+	}
+}
+
+// TestIngestIgnoresResultTypeOnAnErrorResponse. An error response carries no
+// result, so there is no field to require and nothing to say.
+func TestIngestIgnoresResultTypeOnAnErrorResponse(t *testing.T) {
+	s := New()
+	now := time.Now()
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`),
+	})
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"boom"}}`),
+	})
+	if strings.Contains(ev.Warning, "resultType") {
+		t.Fatalf("an error response has no result to check: %q", ev.Warning)
+	}
+}
+
+// versionedRequest is a client request declaring a revision in _meta, which is
+// where the specification says every request supplies it.
+func versionedRequest(seq uint64, id, method, version string) proxy.Envelope {
+	return proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: time.Now(), Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":` + id + `,"method":"` + method +
+			`","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"` + version + `"}}}`),
+	}
+}
+
+func plainResult(seq uint64, id string) proxy.Envelope {
+	return proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: time.Now(), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":` + id + `,"result":{"tools":[]}}`),
+	}
+}
+
+// TestResultTypeJudgesEachRequestByItsOwnRevision is the regression, and it is
+// the reason the session's version cannot be the source. MCP is stateless: the
+// spec forbids a server inferring the protocol version from prior requests on
+// the same connection, and says clients may interleave unrelated requests on one
+// transport. mcpsnoop sees more of that than anyone, since one `mcpsnoop http`
+// proxies every client through a single session.
+//
+// Both directions of the mistake are here. Reading the session's version flags a
+// correct older answer, and excuses a genuinely non-conformant newer one, purely
+// on the order the requests happened to arrive in.
+func TestResultTypeJudgesEachRequestByItsOwnRevision(t *testing.T) {
+	t.Run("older answer is not flagged by a newer neighbour", func(t *testing.T) {
+		s := New()
+		s.Ingest(versionedRequest(1, "1", "tools/list", "2025-11-25"))
+		s.Ingest(versionedRequest(2, "2", "tools/list", "2026-07-28")) // still in flight
+		ev := s.Ingest(plainResult(3, "1"))
+		if strings.Contains(ev.Warning, "resultType") {
+			t.Fatalf("a 2025-11-25 request's answer needs no resultType: %q", ev.Warning)
+		}
+	})
+
+	t.Run("newer answer is still flagged behind an older neighbour", func(t *testing.T) {
+		s := New()
+		s.Ingest(versionedRequest(1, "1", "tools/list", "2026-07-28"))
+		s.Ingest(versionedRequest(2, "2", "tools/list", "2025-11-25"))
+		ev := s.Ingest(plainResult(3, "1"))
+		if !strings.Contains(ev.Warning, "missing required resultType") {
+			t.Fatalf("a 2026-07-28 request's answer must carry resultType: %q", ev.Warning)
+		}
+	})
+}
+
+// TestResultTypeReadsTheProtocolVersionHeader covers the second request-scoped
+// source. The header is required on every Streamable HTTP request from
+// 2026-07-28, so a client that sets it and omits the _meta copy is still saying
+// which revision this request is.
+func TestResultTypeReadsTheProtocolVersionHeader(t *testing.T) {
+	s := New()
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(), Direction: proxy.ClientToServer,
+		Transport: proxy.TransportHTTP, MCPProtocolVersion: "2026-07-28", MCPMethod: "tools/list",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`),
+	})
+	ev := s.Ingest(plainResult(2, "1"))
+	if !strings.Contains(ev.Warning, "missing required resultType") {
+		t.Fatalf("the header declares the revision too: %q", ev.Warning)
+	}
+}
+
+// TestResultTypeIgnoresAnUnmatchedResponse. Without its request there is nothing
+// that says which revision a response belongs to, and inventing one from session
+// state is exactly what this check stopped doing.
+func TestResultTypeIgnoresAnUnmatchedResponse(t *testing.T) {
+	s := New()
+	s.Ingest(versionedRequest(1, "1", "tools/list", "2026-07-28"))
+	ev := s.Ingest(plainResult(2, "9")) // no request ever carried id 9
+	if strings.Contains(ev.Warning, "resultType") {
+		t.Fatalf("an orphaned response cannot be judged: %q", ev.Warning)
+	}
+}
+
+// TestResultTypeChecksADiscoverResult keeps the stateless entry point covered:
+// server/discover is the first thing a 2026-07-28 client sends, and its result
+// is a result like any other.
+func TestResultTypeChecksADiscoverResult(t *testing.T) {
+	s := New()
+	s.Ingest(versionedRequest(1, "1", "server/discover", "2026-07-28"))
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}}}}`),
+	})
+	if !strings.Contains(ev.Warning, "missing required resultType") {
+		t.Fatalf("a discover result must carry resultType too: %q", ev.Warning)
+	}
+}
+
+// TestResultTypeRejectsAValueItCannotHold. A key alone is not the field: null
+// and a number read as "present, fine" to a check that only looks for the key,
+// and no extension can make either valid, so refusing them invents no false
+// alarm.
+func TestResultTypeRejectsAValueItCannotHold(t *testing.T) {
+	for _, value := range []string{`null`, `42`, `""`, `{}`, `["complete"]`} {
+		s := New()
+		s.Ingest(versionedRequest(1, "1", "tools/list", "2026-07-28"))
+		ev := s.Ingest(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(), Direction: proxy.ServerToClient,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"resultType":` + value + `}}`),
+		})
+		if !strings.Contains(ev.Warning, "invalid resultType") {
+			t.Fatalf("resultType %s is not a value the field can hold: %q", value, ev.Warning)
+		}
+	}
+}
+
+// TestResultTypeDoesNotPoliceTheValueSet is the other half, and the reason the
+// check stops at the type. Extensions may add ResultType values, and the valid
+// set is whatever the pair negotiated, so a string mcpsnoop does not recognise
+// is not evidence of anything. Pinned so the gap reads as a decision.
+func TestResultTypeDoesNotPoliceTheValueSet(t *testing.T) {
+	for _, value := range []string{`"complete"`, `"input_required"`, `"com.example/deferred"`} {
+		s := New()
+		s.Ingest(versionedRequest(1, "1", "tools/list", "2026-07-28"))
+		ev := s.Ingest(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(), Direction: proxy.ServerToClient,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"resultType":` + value + `}}`),
+		})
+		if strings.Contains(ev.Warning, "resultType") {
+			t.Fatalf("an unrecognised value is an extension's business, not ours: %s gave %q", value, ev.Warning)
+		}
+	}
+}
+
+// TestResultTypeSurvivesAnMRTRRetry. A retry is matched through matchRetry
+// rather than openCall, so the revision has to live on the call object to reach
+// it. Without that the second leg of every multi-round-trip call would go
+// unchecked.
+func TestResultTypeSurvivesAnMRTRRetry(t *testing.T) {
+	s := New()
+	s.Ingest(versionedRequest(1, "1", "tools/call", "2026-07-28"))
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required",` +
+			`"requestState":"st-1","requiredKeys":["token"]}}`),
+	})
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: time.Now(), Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search",` +
+			`"requestState":"st-1","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`),
+	})
+	ev := s.Ingest(plainResult(4, "2"))
+	if !strings.Contains(ev.Warning, "missing required resultType") {
+		t.Fatalf("the retry's answer is judged by the retry's own revision: %q", ev.Warning)
+	}
+}

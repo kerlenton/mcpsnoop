@@ -136,6 +136,15 @@ type call struct {
 	// opName is the tool, prompt or resource this call names, kept so a retry can
 	// be matched back to it without re-parsing the original params.
 	opName string
+	// protocolVersion is the revision this one request declared, which is the only
+	// version a response to it may be judged by. MCP is stateless: the spec says
+	// outright that a server must not rely on prior requests over the same
+	// connection to establish the protocol version, and that clients may interleave
+	// unrelated requests on one transport. Reading the session's version instead
+	// would judge this response by whatever the most recent unrelated request
+	// happened to declare, which flags a correct older answer and excuses a
+	// genuinely non-conformant newer one. Empty when the request declared none.
+	protocolVersion string
 	// mrtrState, its presence bit, and mrtrKeys park what an InputRequiredResult
 	// asked for. The retry uses a different JSON-RPC id, so these are also the
 	// evidence used to infer the link.
@@ -335,6 +344,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.TS, msg)
 		ev.call = c
+		// After completeCall, because that is what supplies the call, and the call
+		// is what carries the revision this response is judged by.
+		if note := missingResultTypeWarning(msg, c); note != "" {
+			ev.warning = appendWarning(ev.warning, note)
+		}
 		if c != nil && c.taskID != "" {
 			ev.taskID = c.taskID
 			if c.method != "tools/call" {
@@ -604,6 +618,7 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 		c.taskID = taskID(msg.Params)
 	}
 	c.opName = operationName(msg)
+	c.protocolVersion = requestProtocolVersion(msg.Params, e.MCPProtocolVersion)
 	sess.calls[key] = c
 	return c, reused
 }
@@ -1215,14 +1230,23 @@ func operationName(msg proxy.RPCMessage) string {
 // revision at all, so a session speaking one of those is correct to omit them.
 const routingHeadersRequiredFrom = "2026-07-28"
 
-// requiresRoutingHeaders reports whether a protocol version mandates them.
+// atLeastRevision reports whether a protocol version is at or after a revision.
+//
 // Revisions are dated YYYY-MM-DD, so string order is chronological, and a named
 // pre-release such as "draft" sorts after every date, which is the right answer:
 // it is ahead of the last release, not behind it. An empty version is false by
 // the same comparison, which is what we want, since a version we never saw is not
-// evidence and guessing would mean accusing a client on none.
+// evidence and guessing would mean accusing someone on none.
+//
+// One place for the comparison and this reasoning, so a second gate cannot copy
+// the operator and leave the reasoning behind.
+func atLeastRevision(version, from string) bool {
+	return version >= from
+}
+
+// requiresRoutingHeaders reports whether a protocol version mandates them.
 func requiresRoutingHeaders(version string) bool {
-	return version >= routingHeadersRequiredFrom
+	return atLeastRevision(version, routingHeadersRequiredFrom)
 }
 
 // requestRequiresRoutingHeaders asks whether this frame is evidence of a
@@ -1293,6 +1317,81 @@ func validationWarning(msg proxy.RPCMessage) string {
 		}
 	}
 	return warning
+}
+
+// resultTypeRequiredFrom is the revision that made resultType mandatory on every
+// result. Named separately from routingHeadersRequiredFrom even though the two
+// currently agree: that one is about HTTP headers and this one holds on every
+// transport, so a later change to either must not silently move the other.
+const resultTypeRequiredFrom = "2026-07-28"
+
+// requestProtocolVersion is the revision one request declared, from the two
+// places a request carries it, or "" when it carried neither.
+//
+// The body first, because the specification names _meta as where every request
+// supplies this metadata; the MCP-Protocol-Version header second, since it is
+// request scoped too and required on every Streamable HTTP request from
+// 2026-07-28. There is deliberately no fall back to the session: that is the
+// state the protocol forbids inferring from, and reintroducing it here would
+// undo the point.
+func requestProtocolVersion(params json.RawMessage, header string) string {
+	if version := metaProtocolVersion(params); version != "" {
+		return version
+	}
+	return header
+}
+
+// missingResultTypeWarning reports a result that omits the resultType field on a
+// request made under a revision that requires one.
+//
+// Judged by the request's own declared revision, never the session's. In the
+// stateless model there is no negotiated session version to speak of, and a
+// server that answered a 2026-07-28 request successfully accepted that revision,
+// so its result has to carry the field. An unmatched response is not judged at
+// all: without its request there is nothing that says which revision it belongs
+// to, and guessing is what this whole change removes.
+//
+// initialize stays exempt. Its version is a proposal, not an accepted revision,
+// and a client may put its preferred one in the MCP-Protocol-Version header of
+// that first request; a 2025-11-25 server answering it correctly would otherwise
+// be told it omitted a required field, and warnings fail a default check run.
+// 2026-07-28 removed the handshake outright, so a server answering one is
+// speaking an earlier revision whatever the request claimed.
+//
+// Presence, not validity. The spec also requires that an unrecognised resultType
+// be treated as invalid, which this does not check: the valid set grows with
+// whatever extensions the pair negotiated, so it is its own problem with its own
+// false positives. Tracked separately rather than half-done here.
+func missingResultTypeWarning(msg proxy.RPCMessage, c *call) string {
+	if len(msg.Result) == 0 {
+		return "" // an error response carries no result to check
+	}
+	if c == nil || c.method == "initialize" {
+		return ""
+	}
+	if !atLeastRevision(c.protocolVersion, resultTypeRequiredFrom) {
+		return ""
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(msg.Result, &fields) != nil {
+		return "" // not an object: validationWarning already has something to say
+	}
+	raw, ok := fields["resultType"]
+	if !ok {
+		return "result is missing required resultType"
+	}
+	// A key alone is not the field. resultType is a string, so null, a number and
+	// an empty string are not values it can hold, and the first two are the worst
+	// kind of wrong: they read as "present, fine" to a check that only looks for
+	// the key. Rejecting them costs nothing, because no extension can make a
+	// number valid. What is deliberately not checked is whether a non-empty
+	// string is one the pair recognises, since that set grows with whatever
+	// extensions they negotiated and guessing at it would invent false alarms.
+	var value string
+	if json.Unmarshal(raw, &value) != nil || value == "" {
+		return "result has an invalid resultType"
+	}
+	return ""
 }
 
 func appendWarning(existing, next string) string {
