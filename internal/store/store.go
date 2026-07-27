@@ -332,12 +332,17 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.kind = EventResponse
 		ev.id = string(msg.ID)
 		ev.warning = validationWarning(msg)
-		if note := missingResultTypeWarning(msg.Result, sess.caps.protocolVersion, ev.mcpProtocolVersion); note != "" {
-			ev.warning = appendWarning(ev.warning, note)
-		}
 		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.TS, msg)
 		ev.call = c
+		// After completeCall, not before: it is what folds an initialize or
+		// server/discover response into the session's version, so running this
+		// first would judge a server's answer by the version the client merely
+		// proposed. It also supplies the call, which the initialize exemption
+		// needs.
+		if note := missingResultTypeWarning(msg, c, sess.caps.protocolVersion); note != "" {
+			ev.warning = appendWarning(ev.warning, note)
+		}
 		if c != nil && c.taskID != "" {
 			ev.taskID = c.taskID
 			if c.method != "tools/call" {
@@ -1277,19 +1282,43 @@ func validationWarning(msg proxy.RPCMessage) string {
 	return warning
 }
 
-// missingResultTypeWarning reports when a 2026-07-28-or-later session receives a
-// result object without the required resultType field. Earlier revisions treat an
-// absent field as "complete", so the check is version-gated.
-func missingResultTypeWarning(result json.RawMessage, sessionVersion, headerVersion string) string {
-	if len(result) == 0 {
+// resultTypeRequiredFrom is the revision that made resultType mandatory on every
+// result. Named separately from routingHeadersRequiredFrom even though the two
+// currently agree: that one is about HTTP headers and this one holds on every
+// transport, so a later change to either must not silently move the other.
+const resultTypeRequiredFrom = "2026-07-28"
+
+// missingResultTypeWarning reports a result that omits the resultType field on a
+// session that requires it.
+//
+// The spec puts the requirement on the server's revision, not the session's, and
+// says outright that a client receiving a result from an earlier-revision server
+// must read the absent field as "complete" rather than complain. So this is
+// gated on what the server has actually told us, and initialize is exempt.
+//
+// The exemption matters more than it looks. initialize carries the version the
+// client proposes, and applyRequest folds that into the session before the
+// server has answered, while the server's own version only lands in
+// applyResponse, from inside completeCall, after this runs. A legacy client
+// proposing 2026-07-28 to a 2025-11-25 server would otherwise be told the
+// perfectly correct downgrade response was missing a required field, and since
+// warnings fail a default check run, that is a red build on a healthy handshake.
+// 2026-07-28 removed the initialize handshake outright, so a server answering
+// one is by definition speaking an earlier revision and has nothing to answer
+// for here.
+func missingResultTypeWarning(msg proxy.RPCMessage, c *call, sessionVersion string) string {
+	if len(msg.Result) == 0 {
+		return "" // an error response carries no result to check
+	}
+	if c != nil && c.method == "initialize" {
 		return ""
 	}
-	if !requiresRoutingHeaders(sessionVersion) && !requiresRoutingHeaders(headerVersion) {
+	if sessionVersion < resultTypeRequiredFrom {
 		return ""
 	}
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(result, &fields) != nil {
-		return ""
+	if json.Unmarshal(msg.Result, &fields) != nil {
+		return "" // not an object: validationWarning already has something to say
 	}
 	if _, ok := fields["resultType"]; !ok {
 		return "result is missing required resultType"
