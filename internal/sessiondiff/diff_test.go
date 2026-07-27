@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
+	"github.com/kerlenton/mcpsnoop/internal/store"
 )
 
 func TestCompareReportsToolCallAndDurationChanges(t *testing.T) {
@@ -33,17 +34,17 @@ func TestCompareReportsToolCallAndDurationChanges(t *testing.T) {
 		DurationRatio:     2,
 	})
 
-	if !slices.Equal(report.AddedTools, []string{"summarize"}) {
-		t.Fatalf("added tools = %v", report.AddedTools)
+	if !slices.Equal(report.Tools.Names(store.DriftToolAdded), []string{"summarize"}) {
+		t.Fatalf("added tools = %v", report.Tools.Names(store.DriftToolAdded))
 	}
-	if !slices.Equal(report.RemovedTools, []string{"old"}) {
-		t.Fatalf("removed tools = %v", report.RemovedTools)
+	if !slices.Equal(report.Tools.Names(store.DriftToolRemoved), []string{"old"}) {
+		t.Fatalf("removed tools = %v", report.Tools.Names(store.DriftToolRemoved))
 	}
-	if !slices.Equal(report.ChangedDescriptions, []string{"search"}) {
-		t.Fatalf("changed descriptions = %v", report.ChangedDescriptions)
+	if !slices.Equal(report.Tools.Names(store.DriftDescription), []string{"search"}) {
+		t.Fatalf("changed descriptions = %v", report.Tools.Names(store.DriftDescription))
 	}
-	if !slices.Equal(report.ChangedSchemas, []string{"search"}) {
-		t.Fatalf("changed schemas = %v", report.ChangedSchemas)
+	if !slices.Equal(report.Tools.Names(store.DriftInputSchema), []string{"search"}) {
+		t.Fatalf("changed schemas = %v", report.Tools.Names(store.DriftInputSchema))
 	}
 	if len(report.CallChanges) != 1 {
 		t.Fatalf("call changes = %+v", report.CallChanges)
@@ -70,7 +71,7 @@ func TestCompareToolDefinitionsDetectsDescriptionOnlyChanges(t *testing.T) {
 	}}
 
 	changes := CompareToolDefinitions(before, after)
-	if !slices.Equal(changes.ChangedDescriptions, []string{"search"}) || len(changes.ChangedSchemas) != 0 {
+	if !slices.Equal(changes.Names(store.DriftDescription), []string{"search"}) || len(changes.Names(store.DriftInputSchema)) != 0 {
 		t.Fatalf("tool changes = %+v", changes)
 	}
 }
@@ -96,8 +97,8 @@ func TestCompareUsesLatestCompleteToolListing(t *testing.T) {
 	}
 
 	report := Compare(before, after, Options{})
-	if len(report.AddedTools) != 0 || len(report.RemovedTools) != 0 || len(report.ChangedSchemas) != 0 {
-		t.Fatalf("tool changes = added %v, removed %v, schemas %v", report.AddedTools, report.RemovedTools, report.ChangedSchemas)
+	if len(report.Tools.Names(store.DriftToolAdded)) != 0 || len(report.Tools.Names(store.DriftToolRemoved)) != 0 || len(report.Tools.Names(store.DriftInputSchema)) != 0 {
+		t.Fatalf("tool changes = added %v, removed %v, schemas %v", report.Tools.Names(store.DriftToolAdded), report.Tools.Names(store.DriftToolRemoved), report.Tools.Names(store.DriftInputSchema))
 	}
 }
 
@@ -123,10 +124,16 @@ func TestHasRegression(t *testing.T) {
 		want   bool
 	}{
 		{"empty", Report{}, false},
-		{"added tool only", Report{AddedTools: []string{"x"}}, false},
-		{"removed tool", Report{RemovedTools: []string{"x"}}, true},
-		{"description changed", Report{ChangedDescriptions: []string{"x"}}, true},
-		{"schema changed", Report{ChangedSchemas: []string{"x"}}, true},
+		{"added tool only", Report{Tools: driftOf(store.DriftToolAdded, "x")}, false},
+		{"removed tool", Report{Tools: driftOf(store.DriftToolRemoved, "x")}, true},
+		{"description changed", Report{Tools: driftOf(store.DriftDescription, "x")}, true},
+		{"schema changed", Report{Tools: driftOf(store.DriftInputSchema, "x")}, true},
+		{"title changed", Report{Tools: driftOf(store.DriftTitle, "x")}, true},
+		{"output schema changed", Report{Tools: driftOf(store.DriftOutputSchema, "x")}, true},
+		{"annotations changed", Report{Tools: driftOf(store.DriftAnnotations, "x")}, true},
+		// Icons change how a tool looks, not what it does or promises, so they are
+		// drift but not a regression.
+		{"icons changed", Report{Tools: driftOf(store.DriftIcons, "x")}, false},
 		{"status worse", Report{CallChanges: []CallChange{{Before: "ok", After: "error"}}}, true},
 		{"status better", Report{CallChanges: []CallChange{{Before: "error", After: "ok"}}}, false},
 		{"slower", Report{DurationChanges: []DurationChange{{Before: time.Second, After: 2 * time.Second}}}, true},
@@ -168,4 +175,11 @@ func toolCall(name, params, status string, durationMS *float64) exporter.CallExp
 		Params:     json.RawMessage(params),
 		DurationMS: durationMS,
 	}
+}
+
+// driftOf builds a one-entry drift report for a table case.
+func driftOf(kind store.ToolDriftKind, name string) store.ToolDrift {
+	var d store.ToolDrift
+	d.Add(kind, name)
+	return d
 }

@@ -1568,22 +1568,54 @@ func schemaKindLabel(k store.SchemaFindingKind) string {
 
 func (m Model) definitionDriftSection(drift store.ToolDrift, width int) string {
 	var lines []string
-	for _, change := range []struct {
-		label string
-		names []string
-	}{
-		{"added", drift.AddedTools},
-		{"removed", drift.RemovedTools},
-		{"description changed", drift.ChangedDescriptions},
-		{"schema changed", drift.ChangedSchemas},
-	} {
-		if len(change.names) == 0 {
+	// Driven by store.ToolDriftKinds, not a literal table: a kind missing here
+	// while Count sees it lights the drift marker over a panel that says nothing
+	// is wrong, which is worse than not detecting it.
+	for _, kind := range store.ToolDriftKinds {
+		names := drift.Names(kind)
+		if len(names) == 0 {
 			continue
 		}
 		indent := strings.Repeat(" ", driftLabelW)
-		lines = append(lines, m.styles.dim.Render(cellL(change.label, driftLabelW))+m.styles.warn.Render(wrapWords(change.names, indent, width)))
+		lines = append(lines, m.styles.dim.Render(cellL(driftRowLabel(kind), driftLabelW))+m.styles.warn.Render(wrapWords(names, indent, width)))
+	}
+	if len(drift.Unverified) > 0 {
+		// Not drift and not an error. The baseline predates these fields, so we
+		// have nothing to compare against and say so rather than implying either
+		// that they are unchanged or that something is wrong.
+		var kinds []string
+		for _, kind := range drift.Unverified {
+			kinds = append(kinds, driftRowLabel(kind))
+		}
+		indent := strings.Repeat(" ", driftLabelW)
+		lines = append(lines, m.styles.dim.Render(cellL("not covered", driftLabelW))+
+			m.styles.dim.Render(wrapWords(kinds, indent, width)))
 	}
 	return m.styles.warn.Render("tool definition drift") + "\n" + strings.Join(lines, "\n")
+}
+
+// driftRowLabel is the short column label for a drift kind, sized for the
+// fixed-width label column rather than for prose.
+func driftRowLabel(kind store.ToolDriftKind) string {
+	switch kind {
+	case store.DriftToolAdded:
+		return "added"
+	case store.DriftToolRemoved:
+		return "removed"
+	case store.DriftDescription:
+		return "description"
+	case store.DriftInputSchema:
+		return "input schema"
+	case store.DriftTitle:
+		return "title"
+	case store.DriftOutputSchema:
+		return "output schema"
+	case store.DriftAnnotations:
+		return "annotations"
+	case store.DriftIcons:
+		return "icons"
+	}
+	return string(kind)
 }
 
 // wrapWords lays space-separated words into lines no wider than width, each

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/store"
 )
 
 func TestBaselineCommandAcceptsShowsAndResetsDefinitionDrift(t *testing.T) {
@@ -55,4 +56,42 @@ func executeBaseline(t *testing.T, args []string, stdin string) (int, string, st
 		t.Fatalf("unexpected command error: %v", err)
 	}
 	return int(code), stdout.String(), stderr.String()
+}
+
+// TestWriteToolDriftPrintsEveryKind is the CLI half of the renderer guard. The
+// drift gate counts every kind, so a kind missing from this table would fail a
+// run and then print nothing the operator could act on.
+func TestWriteToolDriftPrintsEveryKind(t *testing.T) {
+	var drift store.ToolDrift
+	for _, kind := range store.ToolDriftKinds {
+		drift.Add(kind, "tool-"+string(kind))
+	}
+	var buf bytes.Buffer
+	writeToolDrift(&buf, drift)
+	for _, kind := range store.ToolDriftKinds {
+		if !strings.Contains(buf.String(), "tool-"+string(kind)) {
+			t.Fatalf("kind %q is counted but never printed:\n%s", kind, buf.String())
+		}
+	}
+}
+
+// TestUnverifiedCoverageIsReported. A baseline that predates a field compares
+// fewer things than the operator may assume, so a clean run has to say which
+// fields it could not check rather than reading as a full all-clear.
+func TestUnverifiedCoverageIsReported(t *testing.T) {
+	var buf bytes.Buffer
+	writeUnverifiedCoverage(&buf, store.ToolDrift{
+		Unverified: []store.ToolDriftKind{store.DriftAnnotations, store.DriftOutputSchema},
+	})
+	for _, want := range []string{"annotations", "output_schema", "--accept"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("the notice should mention %q, got %q", want, buf.String())
+		}
+	}
+	// A fully covered baseline says nothing.
+	buf.Reset()
+	writeUnverifiedCoverage(&buf, store.ToolDrift{})
+	if buf.Len() != 0 {
+		t.Fatalf("a complete baseline should print no notice, got %q", buf.String())
+	}
 }

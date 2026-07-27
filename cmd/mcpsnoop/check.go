@@ -110,6 +110,7 @@ func newCheckCmd() *cobra.Command {
 						// while having checked nothing.
 						fmt.Fprintln(cmd.OutOrStdout(), "recorded first-seen tool baseline (trusted, not verified)")
 					}
+					writeUnverifiedCoverage(cmd.OutOrStdout(), summary.drift)
 					if summary.drift.BaselineError != "" {
 						// A baseline problem is not itself drift, so report it plainly and let
 						// it fail the run only when drift is the selected signal (see count).

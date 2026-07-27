@@ -13,6 +13,7 @@ import (
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
 	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
+	"github.com/kerlenton/mcpsnoop/internal/store"
 )
 
 const (
@@ -26,29 +27,30 @@ type Options struct {
 }
 
 type Report struct {
-	BeforeSession       string
-	AfterSession        string
-	AddedTools          []string
-	RemovedTools        []string
-	ChangedDescriptions []string
-	ChangedSchemas      []string
-	CallChanges         []CallChange
-	DurationChanges     []DurationChange
+	BeforeSession string
+	AfterSession  string
+	// Tools carries every definition difference, keyed by kind. One value rather
+	// than a slice per kind, so adding a kind cannot leave a renderer, a count or
+	// a gate silently behind.
+	Tools           store.ToolDrift
+	CallChanges     []CallChange
+	DurationChanges []DurationChange
 }
 
 // ToolDefinition is the behavior-affecting contract advertised for one MCP tool.
+// Title, OutputSchema, Annotations and Icons are here because each is something
+// a server can change after the user approved the tool: Title outranks both
+// annotations.title and Name as the displayed name, OutputSchema is the promise
+// about structuredContent, Annotations carries the behaviour hints the spec
+// tells clients to distrust, and Icons is rendered beside the tool.
 type ToolDefinition struct {
-	Name        string
-	Description string
-	InputSchema json.RawMessage
-}
-
-// ToolChanges contains definition differences between two complete tool lists.
-type ToolChanges struct {
-	AddedTools          []string
-	RemovedTools        []string
-	ChangedDescriptions []string
-	ChangedSchemas      []string
+	Name         string
+	Description  string
+	InputSchema  json.RawMessage
+	Title        string
+	OutputSchema json.RawMessage
+	Annotations  json.RawMessage
+	Icons        json.RawMessage
 }
 
 type CallChange struct {
@@ -66,21 +68,35 @@ type DurationChange struct {
 }
 
 func (r Report) Empty() bool {
-	return len(r.AddedTools) == 0 &&
-		len(r.RemovedTools) == 0 &&
-		len(r.ChangedDescriptions) == 0 &&
-		len(r.ChangedSchemas) == 0 &&
+	return r.Tools.Count() == 0 &&
 		len(r.CallChanges) == 0 &&
 		len(r.DurationChanges) == 0
 }
 
+// regressionKinds are the definition changes that make the after session worse
+// rather than merely different. A removed tool, a changed contract, and a
+// changed displayed name can all break or mislead a caller that relied on the
+// before session. Added tools do not, and neither do icons, which change how a
+// tool looks without changing what it does or promises.
+var regressionKinds = []store.ToolDriftKind{
+	store.DriftToolRemoved,
+	store.DriftDescription,
+	store.DriftInputSchema,
+	store.DriftTitle,
+	store.DriftOutputSchema,
+	store.DriftAnnotations,
+}
+
 // HasRegression reports whether the after session is worse than the before one:
-// a removed tool or a changed input schema (a potentially breaking contract
-// change), a call whose status got worse, or a call that got notably slower.
-// Improvements, added tools, fixed calls, and speedups do not count.
+// a removed tool, a changed description, title, input or output schema, or
+// changed annotations (all potentially breaking or misleading contract changes),
+// a call whose status got worse, or a call that got notably slower.
+// Improvements, added tools, fixed calls, speedups, and icon changes do not count.
 func (r Report) HasRegression() bool {
-	if len(r.RemovedTools) > 0 || len(r.ChangedDescriptions) > 0 || len(r.ChangedSchemas) > 0 {
-		return true
+	for _, kind := range regressionKinds {
+		if len(r.Tools.Names(kind)) > 0 {
+			return true
+		}
 	}
 	for _, change := range r.CallChanges {
 		if statusRank(change.After) > statusRank(change.Before) {
@@ -120,11 +136,7 @@ func Compare(before, after exporter.SessionExport, opts Options) Report {
 		BeforeSession: before.Session.ID,
 		AfterSession:  after.Session.ID,
 	}
-	toolChanges := CompareToolDefinitions(listedTools(before), listedTools(after))
-	report.AddedTools = toolChanges.AddedTools
-	report.RemovedTools = toolChanges.RemovedTools
-	report.ChangedDescriptions = toolChanges.ChangedDescriptions
-	report.ChangedSchemas = toolChanges.ChangedSchemas
+	report.Tools = CompareToolDefinitions(listedTools(before), listedTools(after))
 
 	beforeCalls := callsBySignature(before)
 	afterCalls := callsBySignature(after)
@@ -169,28 +181,17 @@ func WriteText(w io.Writer, report Report) error {
 		_, err := fmt.Fprintln(w, "no differences found")
 		return err
 	}
-	if len(report.AddedTools)+len(report.RemovedTools)+len(report.ChangedDescriptions)+len(report.ChangedSchemas) > 0 {
+	if report.Tools.Count() > 0 {
 		if _, err := fmt.Fprintln(w, "tools:"); err != nil {
 			return err
 		}
-		for _, name := range report.AddedTools {
-			if _, err := fmt.Fprintf(w, "  added: %s\n", name); err != nil {
-				return err
-			}
-		}
-		for _, name := range report.RemovedTools {
-			if _, err := fmt.Fprintf(w, "  removed: %s\n", name); err != nil {
-				return err
-			}
-		}
-		for _, name := range report.ChangedDescriptions {
-			if _, err := fmt.Fprintf(w, "  description changed: %s\n", name); err != nil {
-				return err
-			}
-		}
-		for _, name := range report.ChangedSchemas {
-			if _, err := fmt.Fprintf(w, "  schema changed: %s\n", name); err != nil {
-				return err
+		// Driven by store.ToolDriftKinds rather than a hand-written list, so a kind
+		// added later cannot be counted here and then never printed.
+		for _, kind := range store.ToolDriftKinds {
+			for _, name := range report.Tools.Names(kind) {
+				if _, err := fmt.Fprintf(w, "  %s: %s\n", driftLabel(kind), name); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -225,34 +226,89 @@ func WriteText(w io.Writer, report Report) error {
 
 // CompareToolDefinitions reports behavior-affecting differences between two
 // complete tool lists. Schema JSON is canonicalized before comparison.
-func CompareToolDefinitions(before, after []ToolDefinition) ToolChanges {
+//
+// skip names kinds the trusted side never recorded, which happens when a
+// baseline predates mcpsnoop tracking that field. Those arms are not run at all
+// rather than compared against nothing, since an absent record is not evidence
+// that the server changed anything.
+func CompareToolDefinitions(before, after []ToolDefinition, skip ...store.ToolDriftKind) store.ToolDrift {
 	beforeTools := toolDefinitionsByName(before)
 	afterTools := toolDefinitionsByName(after)
-	var changes ToolChanges
+	skipped := make(map[store.ToolDriftKind]bool, len(skip))
+	for _, kind := range skip {
+		skipped[kind] = true
+	}
+
+	var drift store.ToolDrift
+	drift.Unverified = append(drift.Unverified, skip...)
+	compare := func(kind store.ToolDriftKind, name string, differs func() bool) {
+		if !skipped[kind] && differs() {
+			drift.Add(kind, name)
+		}
+	}
+
 	for name, trusted := range beforeTools {
 		observed, ok := afterTools[name]
-		switch {
-		case !ok:
-			changes.RemovedTools = append(changes.RemovedTools, name)
-		default:
-			if trusted.Description != observed.Description {
-				changes.ChangedDescriptions = append(changes.ChangedDescriptions, name)
-			}
-			if canonicalJSON(trusted.InputSchema) != canonicalJSON(observed.InputSchema) {
-				changes.ChangedSchemas = append(changes.ChangedSchemas, name)
-			}
+		if !ok {
+			drift.Add(store.DriftToolRemoved, name)
+			continue
 		}
+		compare(store.DriftDescription, name, func() bool {
+			return trusted.Description != observed.Description
+		})
+		compare(store.DriftInputSchema, name, func() bool {
+			return comparableSchema(trusted.InputSchema) != comparableSchema(observed.InputSchema)
+		})
+		compare(store.DriftTitle, name, func() bool {
+			return trusted.Title != observed.Title
+		})
+		compare(store.DriftOutputSchema, name, func() bool {
+			return comparableSchema(trusted.OutputSchema) != comparableSchema(observed.OutputSchema)
+		})
+		compare(store.DriftAnnotations, name, func() bool {
+			return comparableAnnotations(trusted.Annotations) != comparableAnnotations(observed.Annotations)
+		})
+		compare(store.DriftIcons, name, func() bool {
+			// Order-sensitive on purpose. A consumer that takes the first usable
+			// icon sees a different one when two are swapped, and src is the field
+			// the spec warns can point off-domain or at a data: URI.
+			return canonicalJSON(trusted.Icons) != canonicalJSON(observed.Icons)
+		})
 	}
 	for name := range afterTools {
 		if _, ok := beforeTools[name]; !ok {
-			changes.AddedTools = append(changes.AddedTools, name)
+			drift.Add(store.DriftToolAdded, name)
 		}
 	}
-	slices.Sort(changes.AddedTools)
-	slices.Sort(changes.RemovedTools)
-	slices.Sort(changes.ChangedDescriptions)
-	slices.Sort(changes.ChangedSchemas)
-	return changes
+	for _, names := range drift.Changes {
+		slices.Sort(names)
+	}
+	return drift
+}
+
+// driftLabel is the singular per-tool phrasing for a diff line. ToolDriftKind's
+// own Label reads after a count ("2 tools removed"), which is wrong before a
+// single tool name.
+func driftLabel(kind store.ToolDriftKind) string {
+	switch kind {
+	case store.DriftToolAdded:
+		return "added"
+	case store.DriftToolRemoved:
+		return "removed"
+	case store.DriftDescription:
+		return "description changed"
+	case store.DriftInputSchema:
+		return "input schema changed"
+	case store.DriftTitle:
+		return "title changed"
+	case store.DriftOutputSchema:
+		return "output schema changed"
+	case store.DriftAnnotations:
+		return "annotations changed"
+	case store.DriftIcons:
+		return "icons changed"
+	}
+	return string(kind)
 }
 
 func toolDefinitionsByName(definitions []ToolDefinition) map[string]ToolDefinition {
@@ -275,12 +331,13 @@ func listedTools(session exporter.SessionExport) []ToolDefinition {
 		if call.Method != "tools/list" {
 			continue
 		}
+		// Each tool is decoded on its own, deliberately. Decoding the page into a
+		// typed slice meant one tool with a non-string description discarded every
+		// well-formed tool beside it, which is the same defect the store already
+		// fixed for its own decode. A tool that is advertised should be compared
+		// even when one of its fields is junk.
 		var result struct {
-			Tools []struct {
-				Name        string          `json:"name"`
-				Description string          `json:"description"`
-				InputSchema json.RawMessage `json:"inputSchema"`
-			} `json:"tools"`
+			Tools []json.RawMessage `json:"tools"`
 		}
 		if json.Unmarshal(call.Result, &result) != nil {
 			continue
@@ -288,17 +345,35 @@ func listedTools(session exporter.SessionExport) []ToolDefinition {
 		if !hasCursor(call.Params) {
 			clear(tools)
 		}
-		for _, tool := range result.Tools {
-			if tool.Name == "" {
+		for _, rawTool := range result.Tools {
+			var tool struct {
+				Name string `json:"name"`
+				// Raw with a tolerant second decode, so a wrong JSON type costs one
+				// field rather than the whole tool.
+				Description  json.RawMessage `json:"description"`
+				Title        json.RawMessage `json:"title"`
+				InputSchema  json.RawMessage `json:"inputSchema"`
+				OutputSchema json.RawMessage `json:"outputSchema"`
+				Annotations  json.RawMessage `json:"annotations"`
+				Icons        json.RawMessage `json:"icons"`
+			}
+			if json.Unmarshal(rawTool, &tool) != nil || tool.Name == "" {
 				continue
 			}
 			if _, exists := tools[tool.Name]; exists {
 				continue
 			}
+			var description, title string
+			_ = json.Unmarshal(tool.Description, &description)
+			_ = json.Unmarshal(tool.Title, &title)
 			tools[tool.Name] = ToolDefinition{
-				Name:        tool.Name,
-				Description: tool.Description,
-				InputSchema: append(json.RawMessage(nil), tool.InputSchema...),
+				Name:         tool.Name,
+				Description:  description,
+				Title:        title,
+				InputSchema:  append(json.RawMessage(nil), tool.InputSchema...),
+				OutputSchema: append(json.RawMessage(nil), tool.OutputSchema...),
+				Annotations:  append(json.RawMessage(nil), tool.Annotations...),
+				Icons:        append(json.RawMessage(nil), tool.Icons...),
 			}
 		}
 	}

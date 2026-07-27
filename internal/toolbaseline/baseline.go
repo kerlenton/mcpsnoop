@@ -19,7 +19,11 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/store"
 )
 
-const baselineVersion = 1
+// baselineVersion is the shape of the file this build writes. Version 1 recorded
+// only name, description and input_schema; version 2 adds title, output_schema,
+// annotations and icons. Version 1 files stay readable and keep answering for
+// the fields they do record, per versionCoverageGap.
+const baselineVersion = 2
 
 type Report = store.ToolDrift
 
@@ -35,9 +39,34 @@ type snapshot struct {
 }
 
 type toolDefinition struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	Title        string          `json:"title,omitempty"`
+	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
+	Annotations  json.RawMessage `json:"annotations,omitempty"`
+	Icons        json.RawMessage `json:"icons,omitempty"`
+}
+
+// versionCoverageGap names the drift kinds a snapshot of the given version has
+// no record of, so they are skipped rather than compared against nothing.
+//
+// This is what makes the upgrade safe. A version 1 file has no annotations key
+// by construction, since the store never captured one, so comparing it would
+// report annotation drift on every tool that has any, all at once, across every
+// installed baseline. That false rug-pull alarm is worse than the gap it would
+// be reporting, because it is exactly what teaches people to stop reading the
+// signal. The gap closes when the operator next records a baseline.
+func versionCoverageGap(version int) []store.ToolDriftKind {
+	if version >= 2 {
+		return nil
+	}
+	return []store.ToolDriftKind{
+		store.DriftTitle,
+		store.DriftOutputSchema,
+		store.DriftAnnotations,
+		store.DriftIcons,
+	}
 }
 
 func New(dir string) *Manager { return &Manager{dir: dir} }
@@ -69,7 +98,7 @@ func (m *Manager) Observe(server string, current []store.ToolDefinition) (Report
 	if err != nil {
 		return Report{}, false, err
 	}
-	return compare(baseline.Tools, normalize(current)), false, nil
+	return compare(baseline.Tools, normalize(current), baseline.Version), false, nil
 }
 
 func (m *Manager) Accept(server string, current []store.ToolDefinition) error {
@@ -186,8 +215,16 @@ func (m *Manager) load(server string) (snapshot, error) {
 	if err := json.Unmarshal(data, &baseline); err != nil {
 		return snapshot{}, fmt.Errorf("tool baseline %q is corrupt (%w); run mcpsnoop baseline --reset to trust the next complete tools/list", server, err)
 	}
-	if baseline.Version != baselineVersion || baseline.Server != server {
-		return snapshot{}, fmt.Errorf("tool baseline %q: unsupported or mismatched baseline", server)
+	if baseline.Server != server {
+		// A different server's file under this name means a copied directory or a
+		// hash collision, not an upgrade. Comparing against it would be nonsense.
+		return snapshot{}, fmt.Errorf("tool baseline %q records server %q; run mcpsnoop baseline --reset to record this one", server, baseline.Server)
+	}
+	if baseline.Version < 1 || baseline.Version > baselineVersion {
+		// Forward-only. A file from a newer mcpsnoop may record fields this build
+		// cannot interpret, so refusing is honest; an older one is handled by
+		// versionCoverageGap rather than rejected.
+		return snapshot{}, fmt.Errorf("tool baseline %q is version %d, newer than this mcpsnoop understands (%d); upgrade mcpsnoop, or run mcpsnoop baseline --reset to record it afresh", server, baseline.Version, baselineVersion)
 	}
 	baseline.Tools = normalizeStored(baseline.Tools)
 	return baseline, nil
@@ -275,40 +312,58 @@ func normalize(definitions []store.ToolDefinition) []toolDefinition {
 			continue
 		}
 		tools = append(tools, toolDefinition{
-			Name:        definition.Name,
-			Description: definition.Description,
-			InputSchema: json.RawMessage(canonicalJSON(definition.InputSchema)),
+			Name:         definition.Name,
+			Description:  definition.Description,
+			InputSchema:  json.RawMessage(canonicalJSON(definition.InputSchema)),
+			Title:        definition.Title,
+			OutputSchema: rawOrNil(definition.OutputSchema),
+			Annotations:  rawOrNil(definition.Annotations),
+			Icons:        rawOrNil(definition.Icons),
 		})
 	}
 	slices.SortFunc(tools, func(a, b toolDefinition) int { return strings.Compare(a.Name, b.Name) })
 	return tools
 }
 
+// rawOrNil canonicalises a field that a server may not have sent at all, and
+// keeps absent absent. Canonicalising an empty value would store the literal
+// "null", which is a different thing: absent output_schema means the tool makes
+// no promise about structuredContent, while an explicit null is a value the
+// server chose to send.
+func rawOrNil(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	return json.RawMessage(canonicalJSON(raw))
+}
+
 func normalizeStored(definitions []toolDefinition) []toolDefinition {
 	for i := range definitions {
 		definitions[i].InputSchema = json.RawMessage(canonicalJSON(definitions[i].InputSchema))
+		definitions[i].OutputSchema = rawOrNil(definitions[i].OutputSchema)
+		definitions[i].Annotations = rawOrNil(definitions[i].Annotations)
+		definitions[i].Icons = rawOrNil(definitions[i].Icons)
 	}
 	slices.SortFunc(definitions, func(a, b toolDefinition) int { return strings.Compare(a.Name, b.Name) })
 	return definitions
 }
 
-func compare(before, after []toolDefinition) Report {
-	changes := sessiondiff.CompareToolDefinitions(toSessionDiffTools(before), toSessionDiffTools(after))
-	return Report{
-		AddedTools:          changes.AddedTools,
-		RemovedTools:        changes.RemovedTools,
-		ChangedDescriptions: changes.ChangedDescriptions,
-		ChangedSchemas:      changes.ChangedSchemas,
-	}
+func compare(before, after []toolDefinition, version int) Report {
+	return sessiondiff.CompareToolDefinitions(
+		toSessionDiffTools(before), toSessionDiffTools(after), versionCoverageGap(version)...)
 }
 
 func toSessionDiffTools(definitions []toolDefinition) []sessiondiff.ToolDefinition {
 	tools := make([]sessiondiff.ToolDefinition, 0, len(definitions))
 	for _, definition := range definitions {
 		tools = append(tools, sessiondiff.ToolDefinition{
-			Name:        definition.Name,
-			Description: definition.Description,
-			InputSchema: append(json.RawMessage(nil), definition.InputSchema...),
+			Name:         definition.Name,
+			Description:  definition.Description,
+			InputSchema:  append(json.RawMessage(nil), definition.InputSchema...),
+			Title:        definition.Title,
+			OutputSchema: append(json.RawMessage(nil), definition.OutputSchema...),
+			Annotations:  append(json.RawMessage(nil), definition.Annotations...),
+			Icons:        append(json.RawMessage(nil), definition.Icons...),
 		})
 	}
 	return tools

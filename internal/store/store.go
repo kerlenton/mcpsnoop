@@ -927,6 +927,12 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 			// \u00e9 that the server sent escaped.
 			Description json.RawMessage `json:"description"`
 			InputSchema json.RawMessage `json:"inputSchema"`
+			// Title is raw for the same reason as Description: a plain string field
+			// makes "title": 42 fail the decode below and drop the whole tool.
+			Title        json.RawMessage `json:"title"`
+			OutputSchema json.RawMessage `json:"outputSchema"`
+			Annotations  json.RawMessage `json:"annotations"`
+			Icons        json.RawMessage `json:"icons"`
 		}
 		if json.Unmarshal(rawTool, &tool) != nil || tool.Name == "" {
 			continue
@@ -940,6 +946,8 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		// listing it with no description, and the raw bytes are still measured, so
 		// the cost figure still says the description was there.
 		_ = json.Unmarshal(tool.Description, &description)
+		var title string
+		_ = json.Unmarshal(tool.Title, &title)
 		if _, ok := sess.advertisedSet[tool.Name]; ok {
 			continue
 		}
@@ -955,10 +963,14 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		// keeps the rule that no description weighs nothing rather than the two
 		// bytes of an empty one.
 		sess.toolDefinitions[tool.Name] = ToolDefinition{
-			Name:        tool.Name,
-			Description: description,
-			InputSchema: schema,
-			Findings:    analyzeSchema(schema),
+			Name:         tool.Name,
+			Description:  description,
+			InputSchema:  schema,
+			Title:        title,
+			OutputSchema: append(json.RawMessage(nil), tool.OutputSchema...),
+			Annotations:  append(json.RawMessage(nil), tool.Annotations...),
+			Icons:        append(json.RawMessage(nil), tool.Icons...),
+			Findings:     analyzeSchema(schema),
 			Cost: ToolCost{
 				Name:             tool.Name,
 				Bytes:            compactJSONLen(rawTool),

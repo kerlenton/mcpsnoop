@@ -1174,14 +1174,16 @@ func TestToolDefinitionsCaptureDescriptionsSchemasAndCompletePagination(t *testi
 func TestToolDriftIsExposedOnSessionHeader(t *testing.T) {
 	s := New()
 	s.Ingest(req(1, time.Now(), proxy.ClientToServer, "1", "tools/list", ""))
-	s.SetToolDrift("s1", ToolDrift{ChangedDescriptions: []string{"search"}})
+	drift := ToolDrift{}
+	drift.Add(DriftDescription, "search")
+	s.SetToolDrift("s1", drift)
 
 	headers := s.Sessions()
 	if len(headers) != 1 || !headers[0].HasToolDrift {
 		t.Fatalf("session header drift = %+v", headers)
 	}
 	report, ok := s.ToolDrift("s1")
-	if !ok || len(report.ChangedDescriptions) != 1 || report.ChangedDescriptions[0] != "search" {
+	if changed := report.Names(DriftDescription); !ok || len(changed) != 1 || changed[0] != "search" {
 		t.Fatalf("tool drift = %+v, ok=%v", report, ok)
 	}
 }
