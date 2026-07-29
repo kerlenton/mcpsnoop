@@ -12,9 +12,11 @@
 package paths
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // maxSocketPathLen is a conservative unix-domain socket path limit. sun_path is
@@ -76,6 +78,24 @@ func ToolBaselinesDir() string {
 	d := filepath.Join(Base(), "tool-baselines")
 	_ = os.MkdirAll(d, 0o700)
 	return d
+}
+
+// ValidateLabel rejects labels that would make SessionLogPath escape SessionsDir.
+// Labels must be a single path component: no separators, no traversal, no NUL.
+func ValidateLabel(label string) error {
+	if label == "" {
+		return errors.New("label must not be empty")
+	}
+	if strings.ContainsRune(label, '\x00') {
+		return errors.New("label must not contain a NUL byte")
+	}
+	if label == "." || label == ".." {
+		return errors.New("label must not be a path segment")
+	}
+	if strings.ContainsAny(label, `/\`) {
+		return errors.New("label must not contain path separators")
+	}
+	return nil
 }
 
 // SessionLogPath returns the JSONL trace path for a given session id.

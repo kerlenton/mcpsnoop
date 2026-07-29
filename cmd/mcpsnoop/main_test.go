@@ -113,6 +113,24 @@ func TestExecuteStampsHARCreatorVersion(t *testing.T) {
 	}
 }
 
+func TestRootRejectsUnsafeLabel(t *testing.T) {
+	if code := execute([]string{"--label", "../../evil", "--", "node", "server.js"}); code != 2 {
+		t.Fatalf("exit = %d, want 2 for unsafe --label", code)
+	}
+}
+
+func TestRootRejectsUnsafeDerivedLabel(t *testing.T) {
+	if code := execute([]string{"--", ".."}); code != 2 {
+		t.Fatalf("exit = %d, want 2 for unsafe derived label", code)
+	}
+}
+
+func TestHTTPRejectsUnsafeLabel(t *testing.T) {
+	if code := execute([]string{"http", "--target", "http://localhost:3000/mcp", "--label", "../../evil"}); code != 2 {
+		t.Fatalf("exit = %d, want 2 for unsafe http --label", code)
+	}
+}
+
 func TestRootPassesWrappedCommandThroughUntouched(t *testing.T) {
 	var got []string
 	defer stubShim(&got)()

@@ -277,6 +277,11 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 			if err != nil {
 				return err
 			}
+			if label != "" {
+				if err := paths.ValidateLabel(label); err != nil {
+					return fmt.Errorf("invalid --label: %w", err)
+				}
+			}
 			return codeOf(runShimFn(args, label, traceFile, noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths), trace))
 		},
 	}
@@ -473,6 +478,10 @@ func runShim(command []string, label, traceFile string, noTrace bool, redaction 
 	if label == "" {
 		label = labelFor(command)
 	}
+	if err := paths.ValidateLabel(label); err != nil {
+		fmt.Fprintf(os.Stderr, "mcpsnoop: invalid label: %v\n", err)
+		return 2
+	}
 	sessionID := newSessionID(label)
 
 	sink := traceSink(sessionID, traceFile, noTrace, redaction, trace)
@@ -581,6 +590,10 @@ func newHTTPCmd() *cobra.Command {
 				} else {
 					lbl = "http"
 				}
+			}
+			if err := paths.ValidateLabel(lbl); err != nil {
+				fmt.Fprintln(os.Stderr, "mcpsnoop http: invalid --label:", err)
+				return exitCode(2)
 			}
 			sessionID := newSessionID(lbl)
 

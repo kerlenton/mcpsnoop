@@ -6,6 +6,37 @@ import (
 	"testing"
 )
 
+func TestValidateLabelRejectsUnsafeValues(t *testing.T) {
+	for _, label := range []string{
+		"",
+		".",
+		"..",
+		"../../evil",
+		`..\evil`,
+		"foo/bar",
+		`foo\bar`,
+		"@scope/server-foo",
+		"foo\x00bar",
+	} {
+		if err := ValidateLabel(label); err == nil {
+			t.Errorf("ValidateLabel(%q) = nil, want error", label)
+		}
+	}
+}
+
+func TestValidateLabelAcceptsStableNames(t *testing.T) {
+	for _, label := range []string{
+		"filesystem",
+		"server-filesystem",
+		"localhost:3000",
+		"foo..bar",
+	} {
+		if err := ValidateLabel(label); err != nil {
+			t.Errorf("ValidateLabel(%q) = %v, want nil", label, err)
+		}
+	}
+}
+
 func TestCheckSocketPathExplainsOverLongPath(t *testing.T) {
 	long := "/" + strings.Repeat("a", maxSocketPathLen) + "/hub.sock"
 	err := CheckSocketPath(long)
