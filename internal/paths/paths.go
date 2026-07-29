@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // maxSocketPathLen is a conservative unix-domain socket path limit. sun_path is
@@ -29,6 +30,27 @@ func CheckSocketPath(path string) error {
 	if len(path) > maxSocketPathLen {
 		return fmt.Errorf("socket path %q is %d bytes, over the %d-byte unix socket limit; set a shorter MCPSNOOP_HOME",
 			path, len(path), maxSocketPathLen)
+	}
+	return nil
+}
+
+// CheckLabel returns an actionable error when a label cannot safely name files
+// under the state directory. An explicit --label flows verbatim into the
+// session id and from there into SessionLogPath's file name, so a path
+// separator or a ".." would write the trace outside SessionsDir, and either
+// way produces a session that open and export cannot address again. labelFor
+// already strips separators when it derives a label from the wrapped command;
+// this is the same guarantee for the label the user supplies. Rejecting rather
+// than sanitising is deliberate: --label is documented as needing to be stable
+// and unique for baselines, and a silently rewritten label is neither.
+func CheckLabel(label string) error {
+	switch {
+	case strings.ContainsAny(label, `/\`):
+		return fmt.Errorf("label %q contains a path separator; a label names files under the mcpsnoop state dir", label)
+	case strings.Contains(label, ".."):
+		return fmt.Errorf("label %q contains %q; a label names files under the mcpsnoop state dir", label, "..")
+	case strings.ContainsRune(label, 0):
+		return fmt.Errorf("label contains a NUL byte; a label names files under the mcpsnoop state dir")
 	}
 	return nil
 }

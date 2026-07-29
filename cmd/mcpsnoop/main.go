@@ -273,6 +273,12 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 				return exitCode(1)
 			}
 			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths)
+			// After applyConfig, so a label from a shared .mcpsnoop.toml is held
+			// to the same rule as the flag.
+			if err := paths.CheckLabel(label); err != nil {
+				fmt.Fprintln(os.Stderr, "mcpsnoop:", err)
+				return exitCode(2)
+			}
 			trace, err := parseTraceOptions(otlpEndpoint, otlpHeaders)
 			if err != nil {
 				return err
@@ -566,6 +572,10 @@ func newHTTPCmd() *cobra.Command {
 				return exitCode(1)
 			}
 			applyConfig(cmd.Flags(), cfg, ok, &label, nil, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths)
+			if err := paths.CheckLabel(label); err != nil {
+				fmt.Fprintln(os.Stderr, "mcpsnoop http:", err)
+				return exitCode(2)
+			}
 			if target == "" {
 				fmt.Fprintln(os.Stderr, "mcpsnoop http: --target is required")
 				return exitCode(2)
