@@ -1145,6 +1145,10 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 		return e.Call.TaskStatus == "cancelled"
 	case "pending", "pend", "inflight":
 		return e.Call.State == store.Pending
+	case "listening", "listen":
+		// An open subscription stream. Deliberately not under status:pending,
+		// since not being a pending call is its whole point.
+		return e.Call.State == store.Listening
 	case "ok", "success":
 		return e.Call.State == store.Completed && !e.Call.Failed()
 	}

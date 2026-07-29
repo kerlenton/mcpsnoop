@@ -723,6 +723,10 @@ func exportCall(index int, c store.CallView) CallExport {
 	switch {
 	case c.State == store.Pending:
 		status = "pending"
+	case c.State == store.Listening:
+		// An open subscription stream, healthy by design, so it must not read
+		// as a hung pending call in an export either.
+		status = "listening"
 	case c.State == store.Superseded:
 		status = "superseded"
 	case c.TaskStatus == "cancelled":

@@ -38,6 +38,7 @@ main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
 .status.warn { color:var(--warn); }
 .status.superseded { color:var(--warn); }
 .status.pending { color:var(--pending); }
+.status.listening { color:var(--pending); }
 .status.bad { color:var(--invalid); }
 /* Per-event tone by kind/status, matching the TUI stream colors. */
 .tone-req { border-left-color:var(--req); } .tone-req .dir { color:var(--req); }
@@ -118,6 +119,7 @@ const matchStatus = (ev, call, v) => {
   if (!call) return false;
   if (["err", "error", "fail", "failed"].includes(v)) return call.status === "error";
   if (["pending", "pend", "inflight"].includes(v)) return call.status === "pending";
+  if (["listening", "listen"].includes(v)) return call.status === "listening";
   if (["ok", "success"].includes(v)) return call.status === "ok";
   return false;
 };
@@ -175,7 +177,7 @@ const statusOf = (ev, call) => {
     if (call.status === "error") return "error";
     return call.status;
   }
-  return call.status === "pending" || call.status === "superseded" ? call.status : "";
+  return ["pending", "listening", "superseded"].includes(call.status) ? call.status : "";
 };
 const renderEvent = (ev) => {
   const call = ev.call_index == null ? null : calls[ev.call_index];

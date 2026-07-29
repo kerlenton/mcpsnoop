@@ -125,8 +125,8 @@ func TestHTMLSurfacesSupersededStatus(t *testing.T) {
 		t.Fatal("embedded data should also carry the answered request as ok")
 	}
 	// statusOf surfaces superseded on a request row while ok still yields an empty
-	// cell (the ternary returns "" for anything else).
-	if !strings.Contains(html, `call.status === "pending" || call.status === "superseded" ? call.status : ""`) {
+	// cell (anything outside the list yields "").
+	if !strings.Contains(html, `["pending", "listening", "superseded"].includes(call.status) ? call.status : ""`) {
 		t.Fatal("statusOf does not surface the superseded status on a request row")
 	}
 	// The CSS rule that colors it (as warn) must exist.

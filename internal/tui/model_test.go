@@ -1726,3 +1726,27 @@ func TestStreamRowLeavesAnImplementationCodeUnnamed(t *testing.T) {
 		t.Fatalf("an implementation-defined code should render bare, got %q", got)
 	}
 }
+
+// An open subscriptions/listen stream must read "listening", not wear the
+// hung-call pending status, and status:listening finds it while status:pending
+// deliberately does not.
+func TestStreamRowShowsListeningStatusForOpenStream(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{}}`))
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+
+	if len(m.full) == 0 || m.full[0].Call == nil || m.full[0].Call.State != store.Listening {
+		t.Fatalf("first frame should be a listening call, got %+v", m.full[0].Call)
+	}
+	if got := m.streamCells(m.full[0]).status; got != "listening" {
+		t.Fatalf("open stream status = %q, want listening", got)
+	}
+	if !m.matchToken(m.full[0], "status:listening") {
+		t.Fatal("status:listening did not match the open stream")
+	}
+	if m.matchToken(m.full[0], "status:pending") {
+		t.Fatal("status:pending must not match a healthy open stream")
+	}
+}

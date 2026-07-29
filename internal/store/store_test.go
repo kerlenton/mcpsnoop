@@ -1938,3 +1938,105 @@ func TestResultTypeSurvivesAnMRTRRetry(t *testing.T) {
 		t.Fatalf("the retry's answer is judged by the retry's own revision: %q", ev.Warning)
 	}
 }
+
+// A subscriptions/listen request opens a long-lived stream whose response
+// arrives only when the stream ends, which may be hours later or never
+// (2026-07-28). It must read as its own Listening state rather than a hung
+// pending call, so the PENDING timer and check --fail-on pending stay
+// trustworthy on a healthy session.
+func TestListenOpensAStreamNotAPendingCall(t *testing.T) {
+	s := New()
+	ev := s.Ingest(req(1, time.Now(), proxy.ClientToServer, "1", "subscriptions/listen", `{}`))
+
+	if ev.Call == nil || ev.Call.State != Listening {
+		t.Fatalf("call = %+v, want Listening", ev.Call)
+	}
+	if ev.Call.Done() {
+		t.Fatal("an open stream has no response yet, so Done() must be false and its duration live")
+	}
+	if header := s.Sessions()[0]; header.Pending != 0 {
+		t.Fatalf("an open stream is not a pending call, pending = %d", header.Pending)
+	}
+}
+
+// Notifications delivered on the stream carry the listen request's id in
+// _meta, so they correlate back to the listen call and the stream reads as one
+// operation, the way task lifecycle frames already do.
+func TestListenStreamNotificationsCorrelateToTheListenCall(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "subscriptions/listen", `{}`))
+
+	ev := s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0.Add(time.Second), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/resources/updated",` +
+			`"params":{"uri":"file:///a.txt","_meta":{"io.modelcontextprotocol/subscriptionId":1}}}`)})
+	if ev.SubscriptionID != "1" {
+		t.Fatalf("subscription id = %q, want 1", ev.SubscriptionID)
+	}
+	if ev.SubscriptionCall == nil || ev.SubscriptionCall.Method != "subscriptions/listen" {
+		t.Fatalf("stream notification not linked to its listen call: %+v", ev.SubscriptionCall)
+	}
+
+	// A notification without the meta stays a plain notification.
+	plain := s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: t0.Add(2 * time.Second), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"file:///b.txt"}}`)})
+	if plain.SubscriptionID != "" || plain.SubscriptionCall != nil {
+		t.Fatalf("an unrelated notification must not be linked: %+v", plain)
+	}
+}
+
+// On stdio the server ends the stream by sending notifications/cancelled for
+// the listen request's id. That is the stream closing, not an error and not a
+// client cancelling its own call, so it settles the listen call as completed.
+func TestServerCancelledClosesTheListenStream(t *testing.T) {
+	s := New()
+	t0 := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "subscriptions/listen", `{}`))
+
+	ev := s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0.Add(time.Hour), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}`)})
+
+	if ev.SubscriptionCall == nil || ev.SubscriptionCall.State != Completed {
+		t.Fatalf("stream close = %+v, want a Completed listen call", ev.SubscriptionCall)
+	}
+	if got := ev.SubscriptionCall.End.Sub(ev.SubscriptionCall.Start); got != time.Hour {
+		t.Fatalf("stream duration = %v, want the stream's whole life (1h)", got)
+	}
+	header := s.Sessions()[0]
+	if header.Pending != 0 || header.Errors != 0 {
+		t.Fatalf("a closed stream is neither pending nor an error, got pending=%d errors=%d", header.Pending, header.Errors)
+	}
+}
+
+// A notifications/cancelled naming an ordinary in-flight call keeps today's
+// meaning: the call stays pending, only a Listening call is ever closed by it.
+func TestServerCancelledLeavesOrdinaryCallsAlone(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"slow"}`))
+
+	s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0.Add(time.Second), Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}`)})
+
+	if header := s.Sessions()[0]; header.Pending != 1 {
+		t.Fatalf("an ordinary cancelled call keeps its pending slot, pending = %d", header.Pending)
+	}
+}
+
+// When the stream's response finally arrives, hours later or at shutdown, it
+// completes the listen call without touching the pending counter it never
+// joined, so an unrelated in-flight call is still accounted for.
+func TestListenResponseCompletesTheStreamWithoutUnderflowingPending(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "subscriptions/listen", `{}`))
+	s.Ingest(req(2, t0, proxy.ClientToServer, "2", "tools/list", ""))
+
+	ev := s.Ingest(resp(3, t0.Add(time.Minute), proxy.ServerToClient, "1", `"result":{"resultType":"subscription_events"}`))
+	if ev.Call == nil || ev.Call.State != Completed {
+		t.Fatalf("stream end = %+v, want Completed", ev.Call)
+	}
+	if header := s.Sessions()[0]; header.Pending != 1 {
+		t.Fatalf("the tools/list call is still in flight, pending = %d", header.Pending)
+	}
+}

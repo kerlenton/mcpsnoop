@@ -207,7 +207,7 @@ func harStatus(status string) (int, string) {
 	case "":
 		return 0, "No Response"
 	default:
-		return 0, status // pending or superseded, never answered
+		return 0, status // pending, listening, or superseded, never answered
 	}
 }
 

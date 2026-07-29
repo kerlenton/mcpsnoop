@@ -34,6 +34,13 @@ const (
 	// Superseded means the request's id was reused by a later in-flight request, so
 	// this one can never be matched to a response. It is no longer pending.
 	Superseded
+	// Listening means the request opened a long-lived subscription stream
+	// (subscriptions/listen, 2026-07-28) that is healthily delivering
+	// notifications. It is deliberately not Pending: the response arrives only
+	// when the stream ends, which may be hours later or never, so counting the
+	// wait as a hung call would make the PENDING timer and a
+	// `check --fail-on pending` gate cry wolf on a perfectly healthy session.
+	Listening
 )
 
 func (s CallState) String() string {
@@ -44,6 +51,8 @@ func (s CallState) String() string {
 		return "failed"
 	case Superseded:
 		return "superseded"
+	case Listening:
+		return "listening"
 	default:
 		return "pending"
 	}
@@ -177,6 +186,12 @@ type event struct {
 	call               *call  // set for request/response events
 	taskCall           *call  // originating call for a task lifecycle frame
 	taskID             string
+	// subscriptionID is the id of the subscriptions/listen request a frame
+	// belongs to, and subscriptionCall that originating call. Set on stream
+	// notifications carrying the id in _meta and on the notifications/cancelled
+	// the server sends to terminate the stream.
+	subscriptionID   string
+	subscriptionCall *call
 	// mrtrRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised. Empty on an ordinary request.
 	mrtrRoot string
@@ -416,7 +431,9 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.requests++
 		if reused {
 			ev.warning = appendWarning(ev.warning, "request reuses an id already in flight")
-		} else {
+		} else if ev.call.state == Pending {
+			// A subscriptions/listen call opens Listening, not Pending, so it never
+			// joins the counter the TUI header and check --fail-on pending gate on.
 			sess.pending++
 		}
 		if msg.Method == "initialize" {
@@ -436,6 +453,29 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 						sess.errors++
 					}
 				}
+			}
+		}
+		// A notification delivered on a subscription stream names its listen
+		// request in _meta, so attach the originating call the way task lifecycle
+		// frames do, and the whole stream reads as one operation.
+		if subID := metaSubscriptionID(msg.Params); subID != "" {
+			if c := sess.listenCall(opposite(e.Direction), subID); c != nil {
+				ev.subscriptionID = subID
+				ev.subscriptionCall = c
+			}
+		}
+		// On stdio the server terminates a subscription stream by sending
+		// notifications/cancelled for the listen request. That is the stream
+		// closing, not a client abandoning its own call, so settle the call as
+		// completed rather than leave it listening forever. Looked up in the
+		// opposite direction, which is exactly the server-referencing-the-peer's-
+		// request case; a client cancelling its own request keeps today's meaning.
+		if msg.Method == "notifications/cancelled" {
+			if c := sess.listenCall(opposite(e.Direction), cancelledRequestID(msg.Params)); c != nil {
+				c.state = Completed
+				c.end = e.TS
+				ev.subscriptionID = c.id
+				ev.subscriptionCall = c
 			}
 		}
 	default:
@@ -614,6 +654,11 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 		c.isTool = true
 		c.toolName = toolName(msg.Params)
 	}
+	if msg.Method == "subscriptions/listen" {
+		// A stream-opening request whose response arrives only when the stream
+		// ends, so it gets its own state instead of a pending slot.
+		c.state = Listening
+	}
 	if isTaskMethod(msg.Method) {
 		c.taskID = taskID(msg.Params)
 	}
@@ -631,9 +676,12 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	if c == nil {
 		return nil, false // unmatched response (request missed or before backfill)
 	}
-	if c.state != Pending {
+	if c.state != Pending && c.state != Listening {
 		return c, false // already answered, a duplicate or late response must not recount
 	}
+	// A Listening call was never counted pending, so its eventual response, the
+	// stream ending, must not decrement the counter it never incremented.
+	wasListening := c.state == Listening
 	if c.method == "tools/call" && c.taskID != "" {
 		return c, false // the task handle already continued this call
 	}
@@ -671,7 +719,9 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	default:
 		c.state = Completed
 	}
-	sess.pending--
+	if !wasListening {
+		sess.pending--
+	}
 	switch c.method {
 	case "initialize":
 		sess.caps.applyResponse(msg.Result)
@@ -709,6 +759,56 @@ func taskID(params json.RawMessage) string {
 	}
 	_ = json.Unmarshal(params, &p)
 	return p.TaskID
+}
+
+// listenCall returns the still-open subscriptions/listen call an id references,
+// or nil. Gated on the method and the Listening state, so an id that happens to
+// collide with an ordinary call can never be linked to, or closed from, a
+// stream notification.
+func (sess *session) listenCall(dir proxy.Direction, id string) *call {
+	if id == "" {
+		return nil
+	}
+	c := sess.calls[callKey{dir: dir, id: id}]
+	if c == nil || c.method != "subscriptions/listen" || c.state != Listening {
+		return nil
+	}
+	return c
+}
+
+// metaSubscriptionID returns the listen request a stream notification names in
+// its _meta (io.modelcontextprotocol/subscriptionId), or "" when absent. Kept
+// as the raw JSON bytes rather than decoded, because the value is the JSON-RPC
+// id of the listen request and that is exactly how call ids are keyed: 7 and
+// "7" are different ids and must stay different here too.
+func metaSubscriptionID(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var p struct {
+		Meta struct {
+			SubscriptionID json.RawMessage `json:"io.modelcontextprotocol/subscriptionId"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return ""
+	}
+	return string(p.Meta.SubscriptionID)
+}
+
+// cancelledRequestID returns the id a notifications/cancelled names, raw for
+// the same reason as metaSubscriptionID.
+func cancelledRequestID(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var p struct {
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return ""
+	}
+	return string(p.RequestID)
 }
 
 func (sess *session) applyTaskState(taskID string, raw json.RawMessage, ts time.Time) (*call, bool) {

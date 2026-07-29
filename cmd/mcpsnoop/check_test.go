@@ -605,6 +605,25 @@ func TestCheckJUnitReportsSelectedDeprecatedFeature(t *testing.T) {
 	}
 }
 
+// A subscriptions/listen stream stays open for the life of a healthy session
+// (2026-07-28), so it must not trip a pending gate; an ordinary unanswered
+// request still must.
+func TestCheckPendingGateIgnoresOpenListenStream(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	listen := checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{}}`)
+
+	code, stdout, stderr := executeCheck(t, []string{"--fail-on", "pending", "-"}, encodeCheckLog(t, listen))
+	if code != 0 || stderr != "" {
+		t.Fatalf("an open stream failed the pending gate: code %d, stderr %q\n%s", code, stderr, stdout)
+	}
+
+	hung := checkEnvelope(2, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	code, stdout, _ = executeCheck(t, []string{"--fail-on", "pending", "-"}, encodeCheckLog(t, listen, hung))
+	if code != 1 || !strings.Contains(stdout, "check failed: pending") {
+		t.Fatalf("a genuinely hung call must still fail: code %d\n%s", code, stdout)
+	}
+}
+
 func executeCheck(t *testing.T, args []string, stdin string) (int, string, string) {
 	t.Helper()
 	cmd := newCheckCmd()

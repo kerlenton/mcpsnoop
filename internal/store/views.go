@@ -42,8 +42,10 @@ type CallView struct {
 // alongside an error or a tool error.
 func (c CallView) Failed() bool { return c.Err != nil || c.ToolErr || c.State == Failed }
 
-// Done reports whether a response has arrived.
-func (c CallView) Done() bool { return c.State != Pending }
+// Done reports whether a response has arrived. A Listening call has not had
+// one yet by design, so it stays live and Duration keeps counting, the same as
+// a pending call.
+func (c CallView) Done() bool { return c.State != Pending && c.State != Listening }
 
 // Duration is the request→response latency, or elapsed-so-far if still pending.
 func (c CallView) Duration() time.Duration {
@@ -92,6 +94,13 @@ type EventView struct {
 	Call       *CallView // set for request/response events
 	TaskCall   *CallView // originating call for a tasks/* lifecycle frame
 	TaskID     string
+	// SubscriptionID is the subscriptions/listen request this frame belongs to,
+	// and SubscriptionCall that originating call. Set on stream notifications
+	// carrying _meta io.modelcontextprotocol/subscriptionId and on the
+	// notifications/cancelled the server sends to terminate the stream, so the
+	// whole stream reads as one operation (2026-07-28).
+	SubscriptionID   string
+	SubscriptionCall *CallView
 	// MRTRRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised (SEP-2322). Empty on an ordinary request.
 	MRTRRoot string
@@ -359,6 +368,7 @@ func (e *event) view(_ *session) EventView {
 		Truncated:          e.truncated,
 		Deprecated:         e.deprecated,
 		TaskID:             e.taskID,
+		SubscriptionID:     e.subscriptionID,
 		MRTRRoot:           e.mrtrRoot,
 		MRTRStateIssue:     e.mrtrStateIssue,
 	}
@@ -369,6 +379,10 @@ func (e *event) view(_ *session) EventView {
 	if e.taskCall != nil {
 		cv := e.taskCall.view()
 		v.TaskCall = &cv
+	}
+	if e.subscriptionCall != nil {
+		cv := e.subscriptionCall.view()
+		v.SubscriptionCall = &cv
 	}
 	return v
 }

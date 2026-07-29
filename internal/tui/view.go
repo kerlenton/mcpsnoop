@@ -578,10 +578,11 @@ func (m Model) streamRow(e store.EventView, lay streamLayout) []cell {
 	return segs
 }
 
-// durStyle colors the DUR value. It only turns cyan for a live pending timer and
-// is dim otherwise, so latency reads as a plain number, not a verdict.
+// durStyle colors the DUR value. It only turns cyan for a live timer, a pending
+// call or an open subscription stream, and is dim otherwise, so latency reads
+// as a plain number, not a verdict.
 func (m Model) durStyle(e store.EventView) lipgloss.Style {
-	if e.Call != nil && e.Call.State == store.Pending {
+	if e.Call != nil && (e.Call.State == store.Pending || e.Call.State == store.Listening) {
 		return m.styles.pending
 	}
 	return m.styles.dim
@@ -646,6 +647,11 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			if e.Call.State == store.Pending {
 				c.status = "pending"
 				c.dur = m.spinnerFrame() + " " + e.Call.Duration().Round(100*time.Millisecond).String()
+			} else if e.Call.State == store.Listening {
+				// An open subscription stream is healthy by design, so it must not
+				// wear the hung-call PENDING timer; that signal stays trustworthy.
+				c.status = "listening"
+				c.dur = m.spinnerFrame() + " " + e.Call.Duration().Round(time.Second).String()
 			} else if e.Call.State == store.Superseded {
 				// Its id was reused while in flight, so it will never be answered.
 				c.status = "superseded"
@@ -876,6 +882,8 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 		switch {
 		case e.Call.State == store.Pending:
 			return m.styles.pending
+		case e.Call.State == store.Listening:
+			return m.styles.pending // live like an in-flight timer, but reads "listening"
 		case e.Call.State == store.Superseded:
 			return m.styles.warn // never answered, not a success
 		case e.Call.Failed():
@@ -1128,6 +1136,9 @@ func (m Model) pairWidget() string {
 		cur := m.styles.infoVal.Render(fmt.Sprintf("req %d", e.Seq))
 		if e.Call.State == store.Pending {
 			return cur + arrow + m.styles.pending.Render("pending")
+		}
+		if e.Call.State == store.Listening {
+			return cur + arrow + m.styles.pending.Render("listening")
 		}
 		if pi, ok := m.pairIndex(m.inspect); ok {
 			return cur + arrow + m.styles.req.Render(fmt.Sprintf("resp %d", m.full[pi].Seq))
