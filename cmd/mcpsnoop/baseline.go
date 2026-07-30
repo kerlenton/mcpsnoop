@@ -72,6 +72,9 @@ func newBaselineCmd() *cobra.Command {
 					fmt.Fprintln(cmd.OutOrStdout(), "created first-seen tool baseline")
 					return nil
 				}
+				// Before the Empty branch, so a clean run still says which fields it
+				// could not check rather than reading as a full all-clear.
+				writeUnverifiedCoverage(cmd.OutOrStdout(), report)
 				if report.Empty() {
 					fmt.Fprintln(cmd.OutOrStdout(), "no tool definition drift")
 					return nil
@@ -90,17 +93,49 @@ func newBaselineCmd() *cobra.Command {
 
 func writeToolDrift(w io.Writer, report store.ToolDrift) {
 	fmt.Fprintln(w, "definition drift:")
-	for _, change := range []struct {
-		label string
-		names []string
-	}{
-		{"added", report.AddedTools},
-		{"removed", report.RemovedTools},
-		{"description changed", report.ChangedDescriptions},
-		{"schema changed", report.ChangedSchemas},
-	} {
-		if len(change.names) > 0 {
-			fmt.Fprintf(w, "  %s: %s\n", change.label, strings.Join(change.names, ", "))
+	// Looped over store.ToolDriftKinds so a kind cannot be counted by the gate and
+	// then go unprinted here, leaving a failing run with nothing to act on.
+	for _, kind := range store.ToolDriftKinds {
+		if names := report.Names(kind); len(names) > 0 {
+			fmt.Fprintf(w, "  %s: %s\n", driftLabel(kind), strings.Join(names, ", "))
 		}
 	}
+}
+
+// driftLabel is the per-line phrasing, singular, since it precedes tool names.
+func driftLabel(kind store.ToolDriftKind) string {
+	switch kind {
+	case store.DriftToolAdded:
+		return "added"
+	case store.DriftToolRemoved:
+		return "removed"
+	case store.DriftDescription:
+		return "description changed"
+	case store.DriftInputSchema:
+		return "input schema changed"
+	case store.DriftTitle:
+		return "title changed"
+	case store.DriftOutputSchema:
+		return "output schema changed"
+	case store.DriftAnnotations:
+		return "annotations changed"
+	case store.DriftIcons:
+		return "icons changed"
+	}
+	return string(kind)
+}
+
+// writeUnverifiedCoverage reports the fields this baseline has no record of, so
+// a clean run does not read as "everything checked out" when part of the
+// definition was never compared.
+func writeUnverifiedCoverage(w io.Writer, report store.ToolDrift) {
+	if len(report.Unverified) == 0 {
+		return
+	}
+	var kinds []string
+	for _, kind := range report.Unverified {
+		kinds = append(kinds, string(kind))
+	}
+	fmt.Fprintf(w, "note: this baseline predates %s tracking; those fields were not compared. "+
+		"Re-record with --accept once you trust the current definitions.\n", strings.Join(kinds, ", "))
 }

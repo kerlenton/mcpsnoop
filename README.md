@@ -146,7 +146,7 @@ go install github.com/kerlenton/mcpsnoop/cmd/mcpsnoop@latest
 ### Homebrew
 
 ```bash
-brew install kerlenton/mcpsnoop/mcpsnoop
+brew install mcpsnoop
 ```
 
 Prebuilt binaries for every platform are on the [Releases](https://github.com/kerlenton/mcpsnoop/releases) page.
@@ -314,9 +314,10 @@ By default, duration changes must differ by at least 100 ms and 2x; use
 `--duration-threshold` and `--duration-ratio` to adjust those cutoffs.
 
 Pass `--exit-code` to gate CI on regressions: it exits non-zero when the after
-session drops a tool, changes a tool description or input schema, has a call whose
-status got worse, or slows down. A description-only change now counts as a
-regression too. Improvements (added tools, fixed calls, speedups) still exit zero.
+session drops a tool, changes a tool description, title, input schema, output
+schema or annotations, has a call whose status got worse, or slows down.
+Improvements (added tools, fixed calls, speedups) still exit zero, and so does an
+icon change, which alters how a tool looks without changing what it does.
 
 ## Checking sessions in CI
 
@@ -391,9 +392,20 @@ mcpsnoop check --expect-tool search --forbid-tool delete --max-duration 2s run.j
 ### Detect tool definition drift
 
 The first complete `tools/list` observed for a server label becomes its trusted
-baseline. Later sessions compare tool descriptions and input schemas with that
-baseline, including tools that were added or removed. The sessions table and
-tool summary flag drift without blocking or changing MCP traffic.
+baseline. Later sessions compare that baseline field by field: the description,
+the title, the input and output schemas, the annotations and the icons, plus
+tools that were added or removed. Annotations matter most, since a tool approved
+with `readOnlyHint` that later declares itself destructive is the rug-pull this
+check exists for, and the spec tells clients to treat annotations as untrusted.
+The title and the icons are tracked because they are what the user sees, and the
+spec ranks a tool's `title` above `annotations.title` and its name. The sessions
+table and tool summary flag drift without blocking or changing MCP traffic.
+
+Annotations are compared through their spec defaults, so a server that starts
+spelling out a hint it was already relying on is not reported. A baseline
+recorded before mcpsnoop tracked a field keeps working for the fields it does
+record and says which ones it cannot answer for; re-record with
+`mcpsnoop baseline --accept` once you trust the current definitions.
 
 Use a stable, unique `--label` for each server whose command name or target host
 would otherwise collide. Baselines are stored under the normal mcpsnoop state

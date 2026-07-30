@@ -33,7 +33,7 @@ func TestObserveAndNudgeSurfacesDrift(t *testing.T) {
 	observeAndNudge(m, st, "s1", nudge)
 
 	d, _ := st.ToolDrift("s1")
-	if len(d.ChangedDescriptions) != 1 || d.ChangedDescriptions[0] != "search" {
+	if changed := d.Names(store.DriftDescription); len(changed) != 1 || changed[0] != "search" {
 		t.Fatalf("drift should surface after the observation, got %+v", d)
 	}
 	if nudges != 2 {

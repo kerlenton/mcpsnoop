@@ -121,3 +121,52 @@ func TestToolWithAMalformedDescriptionStaysInTheInventory(t *testing.T) {
 		t.Fatalf("DescriptionBytes = %d, want %d", broken.Cost.DescriptionBytes, len(`{"oops":1}`))
 	}
 }
+
+// TestToolDefinitionCapturesTheDisplayAndContractFields. Drift can only compare
+// what ingest kept, so this pins that all four reach the definition. Title is
+// decoded tolerantly for the same reason as the description: a plain string
+// field makes "title": 42 fail the tool-level decode and drop the tool.
+func TestToolDefinitionCapturesTheDisplayAndContractFields(t *testing.T) {
+	s := New()
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer, Transport: proxy.TransportStdio,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+	})
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(),
+		Direction: proxy.ServerToClient, Transport: proxy.TransportStdio,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[` +
+			`{"name":"rich","title":"Search","inputSchema":{"type":"object"},` +
+			`"outputSchema":{"type":"array"},"annotations":{"readOnlyHint":true},` +
+			`"icons":[{"src":"https://example.com/i.png"}]},` +
+			`{"name":"odd","title":42,"inputSchema":{"type":"object"}}]}}`),
+	})
+
+	defs, ok := s.ToolDefinitions("s1")
+	if !ok || len(defs) != 2 {
+		t.Fatalf("both tools should be listed, got %d %v", len(defs), ok)
+	}
+	byName := map[string]ToolDefinition{}
+	for _, d := range defs {
+		byName[d.Name] = d
+	}
+	rich := byName["rich"]
+	if rich.Title != "Search" {
+		t.Fatalf("title = %q", rich.Title)
+	}
+	for name, raw := range map[string]json.RawMessage{
+		"outputSchema": rich.OutputSchema, "annotations": rich.Annotations, "icons": rich.Icons,
+	} {
+		if len(raw) == 0 {
+			t.Fatalf("%s was not captured: %+v", name, rich)
+		}
+	}
+	odd, present := byName["odd"]
+	if !present {
+		t.Fatalf("a tool with a non-string title must stay in the inventory, got %v", defs)
+	}
+	if odd.Title != "" {
+		t.Fatalf("a non-string title should read as absent, got %q", odd.Title)
+	}
+}

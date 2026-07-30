@@ -141,6 +141,15 @@ type call struct {
 	// opName is the tool, prompt or resource this call names, kept so a retry can
 	// be matched back to it without re-parsing the original params.
 	opName string
+	// protocolVersion is the revision this one request declared, which is the only
+	// version a response to it may be judged by. MCP is stateless: the spec says
+	// outright that a server must not rely on prior requests over the same
+	// connection to establish the protocol version, and that clients may interleave
+	// unrelated requests on one transport. Reading the session's version instead
+	// would judge this response by whatever the most recent unrelated request
+	// happened to declare, which flags a correct older answer and excuses a
+	// genuinely non-conformant newer one. Empty when the request declared none.
+	protocolVersion string
 	// mrtrState, its presence bit, and mrtrKeys park what an InputRequiredResult
 	// asked for. The retry uses a different JSON-RPC id, so these are also the
 	// evidence used to infer the link.
@@ -340,6 +349,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.TS, msg)
 		ev.call = c
+		// After completeCall, because that is what supplies the call, and the call
+		// is what carries the revision this response is judged by.
+		if note := missingResultTypeWarning(msg, c); note != "" {
+			ev.warning = appendWarning(ev.warning, note)
+		}
 		if c != nil && c.taskID != "" {
 			ev.taskID = c.taskID
 			if c.method != "tools/call" {
@@ -514,20 +528,49 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	// questions and the guards are not the same: a disagreement needs the header
 	// to be there, this needs to know it should have been.
 	//
-	// initialize is exempt. Its params carry the version the client proposes, not
-	// one anything has agreed to, and the store folds that proposal into the
-	// session before this runs, so judging the handshake by its own opening bid
-	// accuses a client whose server then negotiates down to a revision where these
-	// headers do not exist. The exemption costs nothing on the revision that
-	// requires them: 2026-07-28 removed the initialize handshake (SEP-2575), so a
-	// session genuinely speaking it has no initialize to skip.
+	// Requests only, which is why this needs an id and not just a method. The
+	// released 2026-07-28 transport says of a notification POST that "header
+	// requirements for notification POSTs are not defined by this revision", and
+	// that the core protocol defines no client-to-server notification on
+	// Streamable HTTP at all. Demanding a header there would be inventing a rule
+	// the spec declines to state, on a signal that fails a default check run.
+	//
+	// Judged by the revision this one request declared, never the session's. The
+	// session value is last-write-wins across every client request, and the spec
+	// forbids inferring a request's version from earlier requests on the same
+	// connection while explicitly allowing clients to interleave unrelated ones,
+	// so reading it would accuse an older client's request of omitting headers
+	// that a newer neighbour's revision requires. This mirrors what
+	// missingResultTypeWarning already does with call.protocolVersion.
+	//
+	// initialize needs no special case under that rule. Its version rides
+	// params.protocolVersion rather than _meta or the header, so a handshake
+	// request declares nothing here and the gate closes on its own. That is the
+	// right answer twice over: 2026-07-28 removed the handshake, so a client
+	// sending one is speaking an earlier revision whatever it hoped for.
 	if ev.transport == proxy.TransportHTTP && e.Direction == proxy.ClientToServer &&
-		!ev.batch && msg.Method != "" && msg.Method != "initialize" &&
-		requestRequiresRoutingHeaders(sess, ev) {
+		!ev.batch && msg.Method != "" && len(msg.ID) > 0 &&
+		requiresRoutingHeaders(requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)) {
 		for _, h := range missingRoutingHeaders(ev, msg.Method) {
 			ev.warning = appendWarning(ev.warning, "required routing header "+h+" is missing")
 			ev.mismatch = true
 		}
+	}
+
+	// io.modelcontextprotocol/clientCapabilities is REQUIRED in every request's
+	// _meta from 2026-07-28, alongside protocolVersion, and a server MUST reject a
+	// request missing a required field with -32602. Unlike the routing headers this
+	// holds on every transport, so it is checked separately rather than folded in
+	// above, and it does not set ev.mismatch: that flag means the -32020
+	// header-versus-body condition, and this is a different rejection.
+	//
+	// Same two guards as the headers, for the same reasons. Requests with an id
+	// only, and judged by the revision this request declared, never the session's.
+	if e.Direction == proxy.ClientToServer && !ev.batch && msg.Method != "" && len(msg.ID) > 0 &&
+		requiresRequestMeta(requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)) &&
+		!declaresClientCapabilities(msg.Params) {
+		ev.warning = appendWarning(ev.warning,
+			"request _meta is missing required io.modelcontextprotocol/clientCapabilities")
 	}
 
 	if note := deprecatedMethodNote(msg.Method); note != "" {
@@ -628,6 +671,7 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 		c.taskID = taskID(msg.Params)
 	}
 	c.opName = operationName(msg)
+	c.protocolVersion = requestProtocolVersion(msg.Params, e.MCPProtocolVersion)
 	sess.calls[key] = c
 	return c, reused
 }
@@ -825,7 +869,8 @@ func (c *capabilities) applyResponse(result json.RawMessage) {
 // applyRequestMeta reads the client's protocol version, info, and capabilities
 // from a request's _meta, where the stateless model repeats them on every
 // request instead of exchanging them once in initialize. The reverse-DNS keys
-// are sourced verbatim from the draft schema. It is a no-op when the request
+// are sourced verbatim from the released schema (schema/2026-07-28). It is a
+// no-op when the request
 // carries none of them, so a plain call never fabricates a handshake.
 func (c *capabilities) applyRequestMeta(params json.RawMessage) {
 	var p struct {
@@ -895,7 +940,7 @@ func (c *capabilities) applyDiscover(result json.RawMessage) {
 }
 
 // applyResponseMeta reads the server's identity from any response's _meta.
-// The normative draft schema ($defs.ResultMetaObject) says servers SHOULD send
+// The normative schema (schema/2026-07-28, $defs.ResultMetaObject) says servers SHOULD send
 // io.modelcontextprotocol/serverInfo on every response, so capture it even when
 // the session never calls server/discover. No-op when absent, so legacy
 // (2025-11-25) responses, which carry serverInfo at the top level only, are
@@ -954,6 +999,12 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 			// \u00e9 that the server sent escaped.
 			Description json.RawMessage `json:"description"`
 			InputSchema json.RawMessage `json:"inputSchema"`
+			// Title is raw for the same reason as Description: a plain string field
+			// makes "title": 42 fail the decode below and drop the whole tool.
+			Title        json.RawMessage `json:"title"`
+			OutputSchema json.RawMessage `json:"outputSchema"`
+			Annotations  json.RawMessage `json:"annotations"`
+			Icons        json.RawMessage `json:"icons"`
 		}
 		if json.Unmarshal(rawTool, &tool) != nil || tool.Name == "" {
 			continue
@@ -967,6 +1018,8 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		// listing it with no description, and the raw bytes are still measured, so
 		// the cost figure still says the description was there.
 		_ = json.Unmarshal(tool.Description, &description)
+		var title string
+		_ = json.Unmarshal(tool.Title, &title)
 		if _, ok := sess.advertisedSet[tool.Name]; ok {
 			continue
 		}
@@ -982,10 +1035,14 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		// keeps the rule that no description weighs nothing rather than the two
 		// bytes of an empty one.
 		sess.toolDefinitions[tool.Name] = ToolDefinition{
-			Name:        tool.Name,
-			Description: description,
-			InputSchema: schema,
-			Findings:    analyzeSchema(schema),
+			Name:         tool.Name,
+			Description:  description,
+			InputSchema:  schema,
+			Title:        title,
+			OutputSchema: append(json.RawMessage(nil), tool.OutputSchema...),
+			Annotations:  append(json.RawMessage(nil), tool.Annotations...),
+			Icons:        append(json.RawMessage(nil), tool.Icons...),
+			Findings:     analyzeSchema(schema),
 			Cost: ToolCost{
 				Name:             tool.Name,
 				Bytes:            compactJSONLen(rawTool),
@@ -1264,24 +1321,23 @@ func operationName(msg proxy.RPCMessage) string {
 // revision at all, so a session speaking one of those is correct to omit them.
 const routingHeadersRequiredFrom = "2026-07-28"
 
-// requiresRoutingHeaders reports whether a protocol version mandates them.
+// atLeastRevision reports whether a protocol version is at or after a revision.
+//
 // Revisions are dated YYYY-MM-DD, so string order is chronological, and a named
 // pre-release such as "draft" sorts after every date, which is the right answer:
 // it is ahead of the last release, not behind it. An empty version is false by
 // the same comparison, which is what we want, since a version we never saw is not
-// evidence and guessing would mean accusing a client on none.
-func requiresRoutingHeaders(version string) bool {
-	return version >= routingHeadersRequiredFrom
+// evidence and guessing would mean accusing someone on none.
+//
+// One place for the comparison and this reasoning, so a second gate cannot copy
+// the operator and leave the reasoning behind.
+func atLeastRevision(version, from string) bool {
+	return version >= from
 }
 
-// requestRequiresRoutingHeaders asks whether this frame is evidence of a
-// revision that mandates the headers. Either source counts on its own: the
-// session may have settled a version through the handshake or through _meta,
-// and a client can also state one in this very request's header without the
-// session having settled anything yet.
-func requestRequiresRoutingHeaders(sess *session, ev *event) bool {
-	return requiresRoutingHeaders(sess.caps.protocolVersion) ||
-		requiresRoutingHeaders(ev.mcpProtocolVersion)
+// requiresRoutingHeaders reports whether a protocol version mandates them.
+func requiresRoutingHeaders(version string) bool {
+	return atLeastRevision(version, routingHeadersRequiredFrom)
 }
 
 // namedOperationMethods are the three methods whose target Mcp-Name must carry.
@@ -1305,6 +1361,38 @@ func missingRoutingHeaders(ev *event, method string) []string {
 		missing = append(missing, "Mcp-Name")
 	}
 	return missing
+}
+
+// requestMetaRequiredFrom is the revision that made the per-request _meta fields
+// mandatory. Named apart from the other two gates even though all three currently
+// agree, so a later divergence in the spec cannot move one by editing another.
+const requestMetaRequiredFrom = "2026-07-28"
+
+// requiresRequestMeta reports whether a revision mandates the per-request _meta
+// protocol fields.
+func requiresRequestMeta(version string) bool {
+	return atLeastRevision(version, requestMetaRequiredFrom)
+}
+
+// declaresClientCapabilities reports whether a request carried the required
+// clientCapabilities field. An empty object counts: it declares that the client
+// has no capabilities to offer, which is a statement. An absent field and an
+// explicit null do not, since neither says anything a server could rely on, and
+// the spec forbids a server relying on capabilities the client did not declare.
+func declaresClientCapabilities(params json.RawMessage) bool {
+	if len(params) == 0 {
+		return false
+	}
+	var p struct {
+		Meta struct {
+			Capabilities json.RawMessage `json:"io.modelcontextprotocol/clientCapabilities"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return false
+	}
+	raw := bytes.TrimSpace(p.Meta.Capabilities)
+	return len(raw) > 0 && string(raw) != "null"
 }
 
 // metaProtocolVersion returns the protocol version a request repeats in its
@@ -1342,6 +1430,81 @@ func validationWarning(msg proxy.RPCMessage) string {
 		}
 	}
 	return warning
+}
+
+// resultTypeRequiredFrom is the revision that made resultType mandatory on every
+// result. Named separately from routingHeadersRequiredFrom even though the two
+// currently agree: that one is about HTTP headers and this one holds on every
+// transport, so a later change to either must not silently move the other.
+const resultTypeRequiredFrom = "2026-07-28"
+
+// requestProtocolVersion is the revision one request declared, from the two
+// places a request carries it, or "" when it carried neither.
+//
+// The body first, because the specification names _meta as where every request
+// supplies this metadata; the MCP-Protocol-Version header second, since it is
+// request scoped too and required on every Streamable HTTP request from
+// 2026-07-28. There is deliberately no fall back to the session: that is the
+// state the protocol forbids inferring from, and reintroducing it here would
+// undo the point.
+func requestProtocolVersion(params json.RawMessage, header string) string {
+	if version := metaProtocolVersion(params); version != "" {
+		return version
+	}
+	return header
+}
+
+// missingResultTypeWarning reports a result that omits the resultType field on a
+// request made under a revision that requires one.
+//
+// Judged by the request's own declared revision, never the session's. In the
+// stateless model there is no negotiated session version to speak of, and a
+// server that answered a 2026-07-28 request successfully accepted that revision,
+// so its result has to carry the field. An unmatched response is not judged at
+// all: without its request there is nothing that says which revision it belongs
+// to, and guessing is what this whole change removes.
+//
+// initialize stays exempt. Its version is a proposal, not an accepted revision,
+// and a client may put its preferred one in the MCP-Protocol-Version header of
+// that first request; a 2025-11-25 server answering it correctly would otherwise
+// be told it omitted a required field, and warnings fail a default check run.
+// 2026-07-28 removed the handshake outright, so a server answering one is
+// speaking an earlier revision whatever the request claimed.
+//
+// Presence, not validity. The spec also requires that an unrecognised resultType
+// be treated as invalid, which this does not check: the valid set grows with
+// whatever extensions the pair negotiated, so it is its own problem with its own
+// false positives. Tracked separately rather than half-done here.
+func missingResultTypeWarning(msg proxy.RPCMessage, c *call) string {
+	if len(msg.Result) == 0 {
+		return "" // an error response carries no result to check
+	}
+	if c == nil || c.method == "initialize" {
+		return ""
+	}
+	if !atLeastRevision(c.protocolVersion, resultTypeRequiredFrom) {
+		return ""
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(msg.Result, &fields) != nil {
+		return "" // not an object: validationWarning already has something to say
+	}
+	raw, ok := fields["resultType"]
+	if !ok {
+		return "result is missing required resultType"
+	}
+	// A key alone is not the field. resultType is a string, so null, a number and
+	// an empty string are not values it can hold, and the first two are the worst
+	// kind of wrong: they read as "present, fine" to a check that only looks for
+	// the key. Rejecting them costs nothing, because no extension can make a
+	// number valid. What is deliberately not checked is whether a non-empty
+	// string is one the pair recognises, since that set grows with whatever
+	// extensions they negotiated and guessing at it would invent false alarms.
+	var value string
+	if json.Unmarshal(raw, &value) != nil || value == "" {
+		return "result has an invalid resultType"
+	}
+	return ""
 }
 
 func appendWarning(existing, next string) string {

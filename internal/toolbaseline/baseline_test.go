@@ -37,10 +37,10 @@ func TestObserveCreatesBaselineThenDetectsDefinitionDrift(t *testing.T) {
 	if created {
 		t.Fatal("existing baseline was recreated")
 	}
-	if !equalStrings(report.AddedTools, []string{"summarize"}) ||
-		!equalStrings(report.RemovedTools, []string{"fetch"}) ||
-		!equalStrings(report.ChangedDescriptions, []string{"search"}) ||
-		!equalStrings(report.ChangedSchemas, []string{"search"}) {
+	if !equalStrings(report.Names(store.DriftToolAdded), []string{"summarize"}) ||
+		!equalStrings(report.Names(store.DriftToolRemoved), []string{"fetch"}) ||
+		!equalStrings(report.Names(store.DriftDescription), []string{"search"}) ||
+		!equalStrings(report.Names(store.DriftInputSchema), []string{"search"}) {
 		t.Fatalf("drift report = %+v", report)
 	}
 }
@@ -80,7 +80,7 @@ func TestConcurrentFirstObservationDoesNotOverwriteTrustedDefinition(t *testing.
 		if result.created {
 			created++
 		}
-		if len(result.report.ChangedDescriptions) == 1 {
+		if len(result.report.Names(store.DriftDescription)) == 1 {
 			drifted++
 		}
 	}
@@ -121,7 +121,7 @@ func TestObserveClassifiesDescriptionAndSchemaDriftSeparately(t *testing.T) {
 				Name: "search", Description: "Search private docs",
 				InputSchema: json.RawMessage(`{"type":"object"}`),
 			}},
-			want: Report{ChangedDescriptions: []string{"search"}},
+			want: driftOf(store.DriftDescription, "search"),
 		},
 		{
 			name: "schema only",
@@ -129,7 +129,7 @@ func TestObserveClassifiesDescriptionAndSchemaDriftSeparately(t *testing.T) {
 				Name: "search", Description: "Search docs",
 				InputSchema: json.RawMessage(`{"type":"object","required":["query"]}`),
 			}},
-			want: Report{ChangedSchemas: []string{"search"}},
+			want: driftOf(store.DriftInputSchema, "search"),
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -141,8 +141,9 @@ func TestObserveClassifiesDescriptionAndSchemaDriftSeparately(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !equalStrings(report.ChangedDescriptions, test.want.ChangedDescriptions) ||
-				!equalStrings(report.ChangedSchemas, test.want.ChangedSchemas) || report.Count() != test.want.Count() {
+			if !equalStrings(report.Names(store.DriftDescription), test.want.Names(store.DriftDescription)) ||
+				!equalStrings(report.Names(store.DriftInputSchema), test.want.Names(store.DriftInputSchema)) ||
+				report.Count() != test.want.Count() {
 				t.Fatalf("report = %+v, want %+v", report, test.want)
 			}
 		})
@@ -202,11 +203,11 @@ func TestObserveSessionAttachesDriftToTheStore(t *testing.T) {
 
 	changed := storeWithDefinitions("Search private docs")
 	report, created, err := ObserveSession(m, changed, "s1")
-	if err != nil || created || len(report.ChangedDescriptions) != 1 {
+	if err != nil || created || len(report.Names(store.DriftDescription)) != 1 {
 		t.Fatalf("changed observation = report %+v, created %v, err %v", report, created, err)
 	}
 	attached, ok := changed.ToolDrift("s1")
-	if !ok || !equalStrings(attached.ChangedDescriptions, []string{"search"}) {
+	if !ok || !equalStrings(attached.Names(store.DriftDescription), []string{"search"}) {
 		t.Fatalf("attached drift = %+v, ok %v", attached, ok)
 	}
 }
@@ -317,4 +318,11 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// driftOf builds a one-entry drift report for a table case.
+func driftOf(kind store.ToolDriftKind, name string) Report {
+	var d Report
+	d.Add(kind, name)
+	return d
 }

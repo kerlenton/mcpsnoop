@@ -135,9 +135,12 @@ func httpRequest(seq uint64, raw string, method, name, version string) proxy.Env
 }
 
 // call2026 is a tools/call whose _meta declares the revision that made the
-// routing headers mandatory, which is what opens the check.
+// routing headers mandatory, which is what opens the check. It also carries
+// clientCapabilities, which that revision requires on every request, so a test
+// using it is varying only the thing it is about.
 const call2026 = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search",` +
-	`"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`
+	`"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",` +
+	`"io.modelcontextprotocol/clientCapabilities":{}}}}`
 
 // TestIngestFlagsMissingRoutingHeaders is the feature: all three are REQUIRED in
 // 2026-07-28, and a compliant server rejects the request with 400 and -32020.
@@ -234,20 +237,54 @@ func TestIngestDoesNotDemandHeadersPerBatchElement(t *testing.T) {
 	}
 }
 
-// TestIngestDemandsHeadersOnANotification is the interpretation this reads into
-// "All requests": a notification carries a method, which is the Source Field the
-// gateway routes on, and a compliant server rejects it the same way. The narrow
-// reading would restrict the check to frames with an id.
-func TestIngestDemandsHeadersOnANotification(t *testing.T) {
+// TestIngestDoesNotDemandHeadersOnANotification pins the reading of the released
+// revision, which is narrower than "All requests" looks. Of a notification POST
+// the transport says "header requirements for notification POSTs are not defined
+// by this revision", and it also says the core protocol defines no
+// client-to-server notification on Streamable HTTP at all, naming
+// notifications/cancelled as stdio-only. Flagging one would be asserting a rule
+// the spec declines to state, and warnings fail a default check run.
+func TestIngestDoesNotDemandHeadersOnANotification(t *testing.T) {
 	s := New()
+	// The session is on the revision that requires the headers, so only the
+	// requests-only guard stands between this frame and three accusations.
 	s.Ingest(httpRequest(1, call2026, "tools/call", "search", "2026-07-28"))
 	ntf := httpRequest(2, `{"jsonrpc":"2.0","method":"notifications/cancelled"}`, "", "", "")
-	ev := s.Ingest(ntf)
-	if !strings.Contains(ev.Warning, "Mcp-Method") {
-		t.Fatalf("a notification routes on its method too, got %q", ev.Warning)
+	if ev := s.Ingest(ntf); ev.Warning != "" || ev.RoutingMismatch {
+		t.Fatalf("a notification owes no routing header, got %q", ev.Warning)
 	}
-	if strings.Contains(ev.Warning, "Mcp-Name") {
-		t.Fatalf("a notification names no operation, so Mcp-Name is not required, got %q", ev.Warning)
+
+	// A request with an id that declares the revision still owes them, or the
+	// narrowing has switched the check off rather than scoped it.
+	req := httpRequest(3, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}`, "", "", "2026-07-28")
+	if ev := s.Ingest(req); !strings.Contains(ev.Warning, "Mcp-Method") {
+		t.Fatalf("a request still owes its routing headers, got %q", ev.Warning)
+	}
+}
+
+// TestIngestSaysNothingAboutAnUndatedRequest is the cost of judging each request
+// by its own declaration, recorded so it is a decision rather than a surprise. A
+// request that declares no revision in _meta and no MCP-Protocol-Version header
+// cannot be dated, so the headers it owes are unknown, and this stays quiet even
+// when a neighbouring request on the same capture is on 2026-07-28.
+//
+// The missing-MCP-Protocol-Version arm is not thereby unreachable: it fires on
+// the request that declares the version in _meta and omits the header, which is
+// the case the header exists to serve.
+func TestIngestSaysNothingAboutAnUndatedRequest(t *testing.T) {
+	s := New()
+	s.Ingest(httpRequest(1, call2026, "tools/call", "search", "2026-07-28"))
+
+	undated := httpRequest(2, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}`, "", "", "")
+	if ev := s.Ingest(undated); ev.Warning != "" || ev.RoutingMismatch {
+		t.Fatalf("an undated request must not be judged by a neighbour, got %q", ev.Warning)
+	}
+
+	// Declared in _meta, header absent. This is the arm that still has to fire.
+	viaMeta := httpRequest(3, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search",`+
+		`"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`, "tools/call", "search", "")
+	if ev := s.Ingest(viaMeta); !strings.Contains(ev.Warning, "MCP-Protocol-Version") {
+		t.Fatalf("a request that dates itself in _meta still owes the header, got %q", ev.Warning)
 	}
 }
 
@@ -286,5 +323,109 @@ func TestIngestDoesNotJudgeAHandshakeByItsOwnProposal(t *testing.T) {
 	call := httpRequest(3, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}`, "", "", "")
 	if ev := s.Ingest(call); ev.Warning != "" || ev.RoutingMismatch {
 		t.Fatalf("a session negotiated down to 2025-11-25 must stay clean, got %q", ev.Warning)
+	}
+}
+
+// TestRoutingHeadersJudgeEachRequestByItsOwnRevision is the same false positive
+// #179 removed from the resultType check, kept out of its sibling. The session's
+// version is last-write-wins across every client request, and the spec forbids
+// inferring a request's revision from earlier ones on the same connection while
+// explicitly allowing clients to interleave unrelated requests.
+func TestRoutingHeadersJudgeEachRequestByItsOwnRevision(t *testing.T) {
+	t.Run("older request is not flagged by a newer neighbour", func(t *testing.T) {
+		s := New()
+		// A 2026-07-28 request, fully compliant, establishes the newer revision in
+		// the session. It must not spill onto the next request.
+		s.Ingest(httpRequest(1, call2026, "tools/call", "search", "2026-07-28"))
+		older := httpRequest(2, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search",`+
+			`"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25"}}}`, "", "", "2025-11-25")
+		if ev := s.Ingest(older); ev.Warning != "" || ev.RoutingMismatch {
+			t.Fatalf("a 2025-11-25 request owes no routing header, got %q", ev.Warning)
+		}
+	})
+
+	t.Run("newer request is still flagged behind an older neighbour", func(t *testing.T) {
+		s := New()
+		s.Ingest(httpRequest(1, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search",`+
+			`"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25"}}}`, "", "", "2025-11-25"))
+		newer := httpRequest(2, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search",`+
+			`"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`, "", "", "2026-07-28")
+		ev := s.Ingest(newer)
+		for _, want := range []string{"Mcp-Method", "Mcp-Name"} {
+			if !strings.Contains(ev.Warning, want) {
+				t.Fatalf("a 2026-07-28 request owes %s, got %q", want, ev.Warning)
+			}
+		}
+	})
+}
+
+// TestIngestDoesNotDemandHeadersOnAHandshake keeps the initialize case working
+// without a special case for it. The proposed version rides params.protocolVersion
+// rather than _meta or the header, so the request dates itself nowhere this check
+// reads and the gate closes on its own.
+func TestIngestDoesNotDemandHeadersOnAHandshake(t *testing.T) {
+	s := New()
+	init := httpRequest(1, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+
+		`{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"cli"}}}`, "", "", "")
+	if ev := s.Ingest(init); ev.Warning != "" || ev.RoutingMismatch {
+		t.Fatalf("a handshake owes no routing header, got %q", ev.Warning)
+	}
+}
+
+// TestIngestFlagsMissingClientCapabilities covers the other required per-request
+// _meta field. From 2026-07-28 it is REQUIRED on every request and a server MUST
+// reject a request without it with -32602, so a client omitting it is broken in a
+// way this tool exists to show.
+func TestIngestFlagsMissingClientCapabilities(t *testing.T) {
+	const declares = `"io.modelcontextprotocol/clientCapabilities":{}`
+	req := func(seq uint64, meta string) proxy.Envelope {
+		return proxy.Envelope{
+			SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: time.Now(),
+			Direction: proxy.ClientToServer, Transport: proxy.TransportStdio,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{` + meta + `}}}`),
+		}
+	}
+	const v2026 = `"io.modelcontextprotocol/protocolVersion":"2026-07-28"`
+
+	for _, tc := range []struct {
+		name string
+		meta string
+		want bool
+	}{
+		{"absent", v2026, true},
+		{"explicit null", v2026 + `,"io.modelcontextprotocol/clientCapabilities":null`, true},
+		// An empty object is a statement: the client has nothing to offer.
+		{"empty object", v2026 + `,` + declares, false},
+		{"populated", v2026 + `,"io.modelcontextprotocol/clientCapabilities":{"elicitation":{}}`, false},
+		// Earlier revisions had no per-request _meta at all.
+		{"pre-2026 revision", `"io.modelcontextprotocol/protocolVersion":"2025-11-25"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := New().Ingest(req(1, tc.meta))
+			got := strings.Contains(ev.Warning, "clientCapabilities")
+			if got != tc.want {
+				t.Fatalf("flagged = %v, want %v (warning %q)", got, tc.want, ev.Warning)
+			}
+			// It is a -32602 rejection, not the -32020 header condition, so it must
+			// not borrow the routing-mismatch flag.
+			if ev.RoutingMismatch {
+				t.Fatalf("a missing _meta field is not a routing mismatch: %q", ev.Warning)
+			}
+		})
+	}
+}
+
+// TestIngestDoesNotDemandClientCapabilitiesOfANotification. Same narrowing as the
+// routing headers: the spec puts the requirement on requests, and a notification
+// is not one.
+func TestIngestDoesNotDemandClientCapabilitiesOfANotification(t *testing.T) {
+	ev := New().Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer, Transport: proxy.TransportStdio,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"_meta":` +
+			`{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`),
+	})
+	if strings.Contains(ev.Warning, "clientCapabilities") {
+		t.Fatalf("a notification is not a request, got %q", ev.Warning)
 	}
 }

@@ -45,7 +45,8 @@ func (c CallView) Failed() bool { return c.Err != nil || c.ToolErr || c.State ==
 // Done reports whether a response has arrived.
 func (c CallView) Done() bool { return c.State != Pending && c.State != Streaming }
 
-// Duration is the request→response latency, or elapsed-so-far if still pending.
+// Duration is the request→response latency, or elapsed-so-far while the call is
+// still open, which covers both a pending request and a live stream.
 func (c CallView) Duration() time.Duration {
 	if c.Done() {
 		return c.End.Sub(c.Start)
@@ -122,7 +123,17 @@ type ToolDefinition struct {
 	Name        string
 	Description string
 	InputSchema json.RawMessage
-	Findings    []SchemaFinding
+	// Title is the display name the spec gives precedence over annotations.title
+	// and over Name, so a change here changes what the user is shown. OutputSchema
+	// is the contract for structuredContent, Annotations carries the behaviour
+	// hints a client is told to treat as untrusted, and Icons is what a UI renders
+	// beside the tool. All three stay raw, since drift compares them as JSON and
+	// re-encoding a decoded form cannot reproduce what the server sent.
+	Title        string
+	OutputSchema json.RawMessage
+	Annotations  json.RawMessage
+	Icons        json.RawMessage
+	Findings     []SchemaFinding
 	// Cost is what advertising this tool weighs, measured once at ingest.
 	Cost ToolCost
 }
@@ -167,20 +178,97 @@ type ToolListCost struct {
 	Complete bool
 }
 
+// ToolDriftKind names one way an advertised tool definition can differ from the
+// trusted baseline. Every field the spec lets a server change after approval
+// gets its own kind, because "something changed" is not actionable and the kinds
+// carry very different weight: a description edit is routine, a readOnlyHint
+// flipping to destructive is the rug-pull this feature exists for.
+type ToolDriftKind string
+
+const (
+	DriftToolAdded    ToolDriftKind = "added"
+	DriftToolRemoved  ToolDriftKind = "removed"
+	DriftDescription  ToolDriftKind = "description"
+	DriftInputSchema  ToolDriftKind = "input_schema"
+	DriftTitle        ToolDriftKind = "title"
+	DriftOutputSchema ToolDriftKind = "output_schema"
+	DriftAnnotations  ToolDriftKind = "annotations"
+	DriftIcons        ToolDriftKind = "icons"
+)
+
+// ToolDriftKinds is every kind in report order, so a renderer never has to
+// enumerate them by hand. Adding a kind here reaches Count, the clone, both
+// renderers and the CI gate at once; a hand-written list that missed one would
+// leave real drift detected and never shown.
+var ToolDriftKinds = []ToolDriftKind{
+	DriftToolAdded,
+	DriftToolRemoved,
+	DriftDescription,
+	DriftInputSchema,
+	DriftTitle,
+	DriftOutputSchema,
+	DriftAnnotations,
+	DriftIcons,
+}
+
+// Label is the phrase a report uses for this kind, written so it reads after a
+// count ("2 tools removed").
+func (k ToolDriftKind) Label() string {
+	switch k {
+	case DriftToolAdded:
+		return "tools added"
+	case DriftToolRemoved:
+		return "tools removed"
+	case DriftDescription:
+		return "descriptions changed"
+	case DriftInputSchema:
+		return "input schemas changed"
+	case DriftTitle:
+		return "titles changed"
+	case DriftOutputSchema:
+		return "output schemas changed"
+	case DriftAnnotations:
+		return "annotations changed"
+	case DriftIcons:
+		return "icons changed"
+	}
+	return string(k)
+}
+
 // ToolDrift is the difference between the current complete tool list and the
 // persisted trust-on-first-use baseline for the session's server label.
 type ToolDrift struct {
-	AddedTools          []string
-	RemovedTools        []string
-	ChangedDescriptions []string
-	ChangedSchemas      []string
-	BaselineError       string
+	// Changes maps a kind to the tool names it applies to, sorted.
+	Changes map[ToolDriftKind][]string
+	// Unverified names the kinds this baseline could not answer, because it was
+	// recorded before mcpsnoop tracked them. It is deliberately not drift and
+	// deliberately not an error: the tools may be fine, and we simply have no
+	// record to compare against. Empty() ignores it, so an older baseline does
+	// not fail a drift-gated run over our own upgrade.
+	Unverified    []ToolDriftKind
+	BaselineError string
 }
 
 func (d ToolDrift) Empty() bool { return d.Count() == 0 && d.BaselineError == "" }
 
 func (d ToolDrift) Count() int {
-	return len(d.AddedTools) + len(d.RemovedTools) + len(d.ChangedDescriptions) + len(d.ChangedSchemas)
+	total := 0
+	for _, names := range d.Changes {
+		total += len(names)
+	}
+	return total
+}
+
+// Names returns the tools affected by one kind, sorted, or nil for none.
+func (d ToolDrift) Names(kind ToolDriftKind) []string { return d.Changes[kind] }
+
+// Add records that a tool differs in one respect. It is the only writer, so the
+// map is never nil for a caller that used it.
+func (d *ToolDrift) Add(kind ToolDriftKind, tool string) {
+	if d.Changes == nil {
+		d.Changes = make(map[ToolDriftKind][]string, len(ToolDriftKinds))
+	}
+	d.Changes[kind] = append(d.Changes[kind], tool)
 }
 
 // CapsView is an immutable snapshot of the negotiated capabilities.
@@ -345,6 +433,10 @@ func (s *Store) ToolDefinitions(sessionID string) ([]ToolDefinition, bool) {
 	for _, name := range sess.advertisedTools {
 		definition := sess.toolDefinitions[name]
 		definition.InputSchema = append(json.RawMessage(nil), definition.InputSchema...)
+		definition.OutputSchema = append(json.RawMessage(nil), definition.OutputSchema...)
+		definition.Annotations = append(json.RawMessage(nil), definition.Annotations...)
+		definition.Icons = append(json.RawMessage(nil), definition.Icons...)
+		definition.Findings = slices.Clone(definition.Findings)
 		definitions = append(definitions, definition)
 	}
 	return definitions, true
@@ -407,14 +499,22 @@ func (s *Store) ToolDrift(sessionID string) (ToolDrift, bool) {
 	return cloneToolDrift(sess.toolDrift), true
 }
 
+// cloneToolDrift deep-copies a report for a reader. It walks the map rather than
+// naming kinds, so a kind added later cannot be silently dropped here while
+// Count still sees it, which would light the drift marker over a panel saying
+// nothing is wrong.
 func cloneToolDrift(drift ToolDrift) ToolDrift {
-	return ToolDrift{
-		AddedTools:          slices.Clone(drift.AddedTools),
-		RemovedTools:        slices.Clone(drift.RemovedTools),
-		ChangedDescriptions: slices.Clone(drift.ChangedDescriptions),
-		ChangedSchemas:      slices.Clone(drift.ChangedSchemas),
-		BaselineError:       drift.BaselineError,
+	out := ToolDrift{
+		Unverified:    slices.Clone(drift.Unverified),
+		BaselineError: drift.BaselineError,
 	}
+	if drift.Changes != nil {
+		out.Changes = make(map[ToolDriftKind][]string, len(drift.Changes))
+		for kind, names := range drift.Changes {
+			out.Changes[kind] = slices.Clone(names)
+		}
+	}
+	return out
 }
 
 // Timeline returns a snapshot of a session's events, oldest first. A nil slice
