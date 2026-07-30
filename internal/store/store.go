@@ -407,7 +407,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.requests++
 		if reused {
 			ev.warning = appendWarning(ev.warning, "request reuses an id already in flight")
-		} else if ev.call.state != Streaming {
+		}
+		// Counted on what this call is, independently of the reuse. openCall has
+		// already released the superseded call's slot if it held one, so the two
+		// decisions no longer have to agree about who owns the accounting.
+		if ev.call.state == Pending {
 			sess.pending++
 		}
 		if msg.Method == "initialize" {
@@ -592,9 +596,16 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 	if reused {
 		// The earlier in-flight call keeps this id, so it will never be matched now.
 		// Mark it superseded (not pending) so the timeline stops rendering it as a
-		// hanging request and agrees with the pending counter, which Ingest leaves
-		// unchanged on a reuse. The "reuses an id already in flight" warning on the
-		// new request is the explanation.
+		// hanging request. The "reuses an id already in flight" warning on the new
+		// request is the explanation.
+		//
+		// It gives up its pending slot here, where the transition happens, and only
+		// when it actually held one. A Streaming call never did, so transferring a
+		// slot it never took would drive the counter negative once the new call is
+		// answered.
+		if prev.state == Pending {
+			sess.pending--
+		}
 		prev.state = Superseded
 		prev.end = e.TS
 	}
@@ -1197,6 +1208,11 @@ func isStreamOpeningMethod(method string) bool {
 	return method == "subscriptions/listen"
 }
 
+// cancelledRequestID is the id a notifications/cancelled names, in the form the
+// store keys calls by. That form is the raw JSON text of the id, because Ingest
+// keys a call on string(msg.ID), so a string id keeps its quotes. Decoding into a
+// Go string here would strip them and never match the key, and a string id is
+// what the specification's own cancellation example uses.
 func cancelledRequestID(params json.RawMessage) string {
 	if len(params) == 0 {
 		return ""
@@ -1204,14 +1220,10 @@ func cancelledRequestID(params json.RawMessage) string {
 	var p struct {
 		RequestID json.RawMessage `json:"requestId"`
 	}
-	if json.Unmarshal(params, &p) != nil || len(p.RequestID) == 0 {
+	if json.Unmarshal(params, &p) != nil {
 		return ""
 	}
-	var s string
-	if json.Unmarshal(p.RequestID, &s) == nil {
-		return s
-	}
-	return strings.Trim(string(p.RequestID), `"`)
+	return string(bytes.TrimSpace(p.RequestID))
 }
 
 func (sess *session) closeStreamingCall(id string, ts time.Time) {
