@@ -276,6 +276,21 @@ Omit `-o` to write to stdout, and omit the session to take the newest, or pass
 `-` to read JSONL from stdin. In the TUI, press `e` to export the selected
 session as HTML, or run `:export json|html|text|har|otlp [path]` from command mode.
 
+To scrub an existing capture before inspecting or sharing it, pass the same
+redaction flags used during capture to `export` or `open`:
+
+```bash
+mcpsnoop export session.jsonl --redact-secrets --redact-key project_token -o shared.json
+mcpsnoop open session.jsonl --redact-path '$.params.arguments.password'
+```
+
+These flags redact JSON-RPC payloads and stderr or other non-JSON text in the
+exported file or the in-memory TUI view. Envelope metadata such as server labels
+and captured HTTP headers is unchanged. The source JSONL is not rewritten, and
+`export` rejects an output that refers to the source file. Still use a separate
+output path, inspect the result before sharing it, and treat redaction as best
+effort.
+
 ### Stream completed calls to an OTLP collector
 
 Send spans while the proxy is running by pointing it at an OTLP/HTTP JSON

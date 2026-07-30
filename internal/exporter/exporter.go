@@ -31,7 +31,8 @@ const (
 )
 
 type Options struct {
-	Format Format
+	Format    Format
+	Redaction proxy.RedactConfig
 }
 
 type SessionExport struct {
@@ -234,7 +235,12 @@ func LoadFile(path string) (*store.Store, string, error) {
 
 // Load reads a JSONL envelope stream into a store and returns its first session.
 func Load(r io.Reader, source string) (*store.Store, string, error) {
+	return load(r, source, proxy.RedactConfig{})
+}
+
+func load(r io.Reader, source string, redaction proxy.RedactConfig) (*store.Store, string, error) {
 	st := store.New()
+	redactor := proxy.NewRedactor(redaction)
 	var firstSession string
 	dec := json.NewDecoder(r)
 	for {
@@ -248,7 +254,7 @@ func Load(r io.Reader, source string) (*store.Store, string, error) {
 		if firstSession == "" {
 			firstSession = env.SessionID
 		}
-		st.Ingest(env)
+		st.Ingest(redactor.RedactEnvelope(env))
 	}
 	if firstSession == "" {
 		return nil, "", fmt.Errorf("%s: no envelopes found", source)
@@ -707,7 +713,7 @@ func ExportFile(inputPath string, w io.Writer, opts Options) error {
 // Export renders the session read from r, a JSONL envelope stream, to w. It is
 // the reader form of ExportFile, so a piped log ("-") exports like a file.
 func Export(r io.Reader, source string, w io.Writer, opts Options) error {
-	st, sessionID, err := Load(r, source)
+	st, sessionID, err := load(r, source, opts.Redaction)
 	if err != nil {
 		return err
 	}
