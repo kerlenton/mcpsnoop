@@ -276,6 +276,28 @@ Omit `-o` to write to stdout, and omit the session to take the newest, or pass
 `-` to read JSONL from stdin. In the TUI, press `e` to export the selected
 session as HTML, or run `:export json|html|text|har|otlp [path]` from command mode.
 
+To scrub an existing capture before inspecting or sharing it, pass the same
+redaction flags used during capture to `export` or `open`:
+
+```bash
+mcpsnoop export session.jsonl --redact-secrets --redact-key project_token -o shared.json
+mcpsnoop open session.jsonl --redact-path '$.params.arguments.password'
+```
+
+These flags rewrite the exported file or the in-memory TUI view, never the
+source JSONL. `export` refuses an output that names the same file as its input,
+and writes through a temporary file that is renamed into place, so a run that
+fails leaves the previous file whole.
+
+What each flag reaches differs, so check the result rather than assuming. All
+four scrub JSON-RPC payloads, and `--redact-key`, `--redact-path` and
+`--redact-secrets` reach only those. Only `--redact-value` also scrubs stderr,
+other non-JSON text, and the inside of a string. An `Mcp-Param-*` header is
+scrubbed alongside the body value it mirrors; the other envelope metadata,
+server labels, `Mcp-Name`, `Mcp-Method` and the HTTP status, is left as
+captured. Redaction is best effort, so use a separate output path and read the
+result before sharing it.
+
 ### Stream completed calls to an OTLP collector
 
 Send spans while the proxy is running by pointing it at an OTLP/HTTP JSON
@@ -350,9 +372,14 @@ The same signal covers a required routing header that is missing entirely. In
 request with `400` and `-32020`. mcpsnoop raises it only once the session is
 known to speak that revision or later: earlier revisions do not define these
 headers at all, so omitting them there is correct.
-A server's own `-32020` rejection counts as the same signal. The server validates
-`Mcp-Param-{Name}` values and header encodings that mcpsnoop never sees, so its
-verdict is sometimes the only evidence a mismatch happened.
+A server's own `-32020` rejection counts as the same signal. On HTTP
+`tools/call` requests, mcpsnoop also shows each `Mcp-Param-{Name}` header and,
+when the matching advertised tool definition is known, compares it with the
+annotated argument path. Nested properties, the Base64 sentinel, booleans, and
+numeric-equivalent safe integers are handled without string-comparison false
+positives. Unknown parameter headers and sessions without a matching tool
+definition remain observational only. Existing key- and value-based redaction
+also applies to captured parameter-header values before they reach a sink.
 Use `--format junit` to write one JUnit `<testcase>` per signal and session;
 failures follow the same `--fail-on` selection as the text output.
 

@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRedactorScrubsSecretsInServerArgv(t *testing.T) {
@@ -158,6 +161,35 @@ func TestRedactingSinkScrubsValuePatternMatches(t *testing.T) {
 	}
 	if params["count"] != float64(42) {
 		t.Fatalf("count = %v, want unchanged number", params["count"])
+	}
+}
+
+func TestRedactingSinkScrubsMCPParamHeaders(t *testing.T) {
+	sink := &captureSink{}
+	redacted := NewRedactingSink(sink, RedactConfig{
+		CommonSecrets: true,
+		ValuePatterns: []string{`sk-[A-Za-z0-9]+`},
+	})
+	headers := []MCPParamHeader{
+		{Name: "Mcp-Param-Token", Value: "=?base64?c2VjcmV0?="},
+		{Name: "Mcp-Param-Region", Value: "route sk-abc123 here"},
+		{Name: "Mcp-Param-Safe", Value: "visible"},
+	}
+
+	redacted.Emit(Envelope{MCPParamHeaders: headers})
+
+	got := sink.byDir("")[0].MCPParamHeaders
+	if got[0].Value != redactedValue {
+		t.Fatalf("token header = %q, want redacted", got[0].Value)
+	}
+	if got[1].Value != "route [REDACTED] here" {
+		t.Fatalf("pattern header = %q, want value-pattern redaction", got[1].Value)
+	}
+	if got[2].Value != "visible" {
+		t.Fatalf("safe header = %q, want unchanged", got[2].Value)
+	}
+	if headers[0].Value == redactedValue || strings.Contains(headers[1].Value, redactedValue) {
+		t.Fatal("redaction mutated the caller's envelope slice")
 	}
 }
 
@@ -360,5 +392,326 @@ func TestRedactRawPreservesMarkupInUntouchedFields(t *testing.T) {
 	}
 	if !strings.Contains(got, redactedValue) {
 		t.Fatalf("the secret should still be redacted: %s", got)
+	}
+}
+
+// TestRedactPathAlsoScrubsTheMirroredParamHeader is the blocker this closes. A
+// JSONPath addresses the body and has no expression for a header, so path
+// redaction used to scrub the argument and leave its mirror in the Mcp-Param
+// header verbatim. That leaked the secret into the log and made the store report
+// the pair as disagreeing, which fails a default check run on correct traffic.
+func TestRedactPathAlsoScrubsTheMirroredParamHeader(t *testing.T) {
+	path, err := ParseRedactPath("$.params.arguments.authKey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureSink{}
+	NewRedactingSink(sink, RedactConfig{Paths: []RedactPath{path}}).Emit(Envelope{
+		Direction: ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+			`{"name":"fetch","arguments":{"region":"us-west1","authKey":"sk-live-abcdef"}}}`),
+		MCPParamHeaders: []MCPParamHeader{
+			{Name: "Mcp-Param-Region", Value: "us-west1"},
+			{Name: "Mcp-Param-Auth", Value: "sk-live-abcdef"},
+		},
+	})
+
+	got := sink.byDir(ClientToServer)
+	if len(got) != 1 {
+		t.Fatalf("want one envelope, got %d", len(got))
+	}
+	if strings.Contains(string(got[0].Raw), "sk-live-abcdef") {
+		t.Fatalf("the body should be scrubbed: %s", got[0].Raw)
+	}
+	for _, h := range got[0].MCPParamHeaders {
+		if strings.Contains(h.Value, "sk-live-abcdef") {
+			t.Fatalf("header %s still carries the secret the path rule removed: %q", h.Name, h.Value)
+		}
+		// A header the rule never named keeps its value, or redaction has turned
+		// into a blanket wipe and the comparison it feeds becomes useless.
+		if h.Name == "Mcp-Param-Region" && h.Value != "us-west1" {
+			t.Fatalf("an unrelated header must survive, got %q", h.Value)
+		}
+	}
+	if !got[0].Redacted {
+		t.Fatal("a rewritten frame must be marked redacted, or the store cannot tell " +
+			"mcpsnoop's placeholder from a client that sent those bytes")
+	}
+}
+
+// TestRedactKeyAndSecretsAlsoScrubTheMirroredParamHeader. The link was recorded
+// for path rules only, so --redact-key and --redact-secrets scrubbed the body and
+// left the header holding the secret, which is the same leak in the two flags
+// most people actually reach for.
+func TestRedactKeyAndSecretsAlsoScrubTheMirroredParamHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cfg    RedactConfig
+		args   string
+		header string
+	}{
+		{"key rule", RedactConfig{Keys: []string{"authKey"}}, `{"authKey":"sk-live-abcdef"}`, "Mcp-Param-Auth"},
+		{"secrets preset", RedactConfig{CommonSecrets: true}, `{"api_key":"sk-live-abcdef"}`, "Mcp-Param-Key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &captureSink{}
+			NewRedactingSink(sink, tc.cfg).Emit(Envelope{
+				Direction: ClientToServer,
+				Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+					`{"name":"fetch","arguments":` + tc.args + `}}`),
+				MCPParamHeaders: []MCPParamHeader{{Name: tc.header, Value: "sk-live-abcdef"}},
+			})
+			got := sink.byDir(ClientToServer)
+			if len(got) != 1 {
+				t.Fatalf("want one envelope, got %d", len(got))
+			}
+			if strings.Contains(string(got[0].Raw), "sk-live-abcdef") {
+				t.Fatalf("the body should be scrubbed: %s", got[0].Raw)
+			}
+			if v := got[0].MCPParamHeaders[0].Value; strings.Contains(v, "sk-live-abcdef") {
+				t.Fatalf("header %s still carries the secret the rule removed: %q", tc.header, v)
+			}
+		})
+	}
+}
+
+// TestRedactScrubsTheEncodedMirror. A header value outside visible ASCII may only
+// travel wrapped in the Base64 sentinel, while the body holds it plain, so a link
+// that compares the two spellings verbatim never fires and the log keeps a header
+// that decodes straight back to the secret.
+func TestRedactScrubsTheEncodedMirror(t *testing.T) {
+	const secret = "sk-live-абв"
+	path, err := ParseRedactPath("$.params.arguments.authKey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureSink{}
+	NewRedactingSink(sink, RedactConfig{Paths: []RedactPath{path}}).Emit(Envelope{
+		Direction: ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+			`{"name":"fetch","arguments":{"authKey":` + quoteJSONString(secret) + `}}}`),
+		MCPParamHeaders: []MCPParamHeader{
+			{Name: "Mcp-Param-Auth", Value: Base64SentinelPrefix +
+				base64.StdEncoding.EncodeToString([]byte(secret)) + Base64SentinelSuffix},
+		},
+	})
+
+	got := sink.byDir(ClientToServer)
+	value := got[0].MCPParamHeaders[0].Value
+	decoded, ok := DecodeHeaderValue(value)
+	if !ok {
+		t.Fatalf("header value stopped decoding: %q", value)
+	}
+	if strings.Contains(decoded, secret) {
+		t.Fatalf("the encoded header still decodes back to the secret: %q", value)
+	}
+}
+
+// TestRedactLeavesHeadersWhoseValueSurvivesElsewhere. Matching by value alone
+// wiped every header sharing a spelling with a scrubbed argument, which is the
+// normal case for booleans and small integers, and the store then skipped those
+// bindings, so a genuine disagreement on them went unreported. When the spelling
+// is still in the stored body in clear, removing it from the header protects
+// nothing and only costs a check.
+func TestRedactLeavesHeadersWhoseValueSurvivesElsewhere(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, args string
+		headers          []MCPParamHeader
+		wantKept         string
+	}{
+		{
+			name: "boolean", path: "$.params.arguments.debug",
+			args:     `{"debug":true,"cacheEnabled":true}`,
+			headers:  []MCPParamHeader{{Name: "Mcp-Param-Debug", Value: "true"}, {Name: "Mcp-Param-Cache", Value: "true"}},
+			wantKept: "true",
+		},
+		{
+			name: "small integer", path: "$.params.arguments.shard",
+			args:     `{"shard":7,"retries":7}`,
+			headers:  []MCPParamHeader{{Name: "Mcp-Param-Shard", Value: "7"}, {Name: "Mcp-Param-Retries", Value: "7"}},
+			wantKept: "7",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, err := ParseRedactPath(tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sink := &captureSink{}
+			NewRedactingSink(sink, RedactConfig{Paths: []RedactPath{path}}).Emit(Envelope{
+				Direction: ClientToServer,
+				Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+					`{"name":"fetch","arguments":` + tc.args + `}}`),
+				MCPParamHeaders: tc.headers,
+			})
+			for _, h := range sink.byDir(ClientToServer)[0].MCPParamHeaders {
+				if h.Value != tc.wantKept {
+					t.Fatalf("header %s = %q, want %q: the same spelling is still in the body "+
+						"in clear, so scrubbing the header buys nothing and costs a check",
+						h.Name, h.Value, tc.wantKept)
+				}
+			}
+		})
+	}
+}
+
+// TestRedactScrubsANumericMirrorSpelledDifferently. The spec has these compared
+// numerically, so a body of 4.2e1 and a header of 42 are one value, and matching
+// wire spellings alone left the header showing a number the body no longer does.
+func TestRedactScrubsANumericMirrorSpelledDifferently(t *testing.T) {
+	path, err := ParseRedactPath("$.params.arguments.account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureSink{}
+	NewRedactingSink(sink, RedactConfig{Paths: []RedactPath{path}}).Emit(Envelope{
+		Direction: ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+			`{"name":"fetch","arguments":{"account":4.2e1}}}`),
+		MCPParamHeaders: []MCPParamHeader{{Name: "Mcp-Param-Account", Value: "42"}},
+	})
+	if v := sink.byDir(ClientToServer)[0].MCPParamHeaders[0].Value; v != redactedValue {
+		t.Fatalf("header = %q, want it scrubbed alongside the body it mirrors", v)
+	}
+}
+
+func quoteJSONString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// TestRedactScrubsAMirrorNestedUnderARemovedObject. A binding may sit on a
+// nested property, and a rule that removes the whole object removes every scalar
+// under it, so recording only the top value left the header mirroring an inner
+// one still holding the secret.
+func TestRedactScrubsAMirrorNestedUnderARemovedObject(t *testing.T) {
+	path, err := ParseRedactPath("$.params.arguments.credentials")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  RedactConfig
+	}{
+		{"key rule", RedactConfig{Keys: []string{"credentials"}}},
+		{"path rule", RedactConfig{Paths: []RedactPath{path}}},
+		{"secrets preset", RedactConfig{CommonSecrets: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &captureSink{}
+			NewRedactingSink(sink, tc.cfg).Emit(Envelope{
+				Direction: ClientToServer,
+				Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+					`{"name":"fetch","arguments":{"credentials":{"token":"sk-live-nested"}}}}`),
+				MCPParamHeaders: []MCPParamHeader{{Name: "Mcp-Param-Tok", Value: "sk-live-nested"}},
+			})
+			got := sink.byDir(ClientToServer)[0]
+			if strings.Contains(string(got.Raw), "sk-live-nested") {
+				t.Fatalf("the body should be scrubbed: %s", got.Raw)
+			}
+			if v := got.MCPParamHeaders[0].Value; strings.Contains(v, "sk-live-nested") {
+				t.Fatalf("the header mirroring a nested removed value still carries it: %q", v)
+			}
+		})
+	}
+}
+
+// TestRedactValuePatternScrubsTheEncodedMirror. A value pattern is written
+// against the plaintext, so it can never match the Base64 sentinel a header
+// carries the same value in, and the encoded header decoded straight back to the
+// secret the pattern had just removed from the body.
+func TestRedactValuePatternScrubsTheEncodedMirror(t *testing.T) {
+	const secret = "sk-live-аб123"
+	sink := &captureSink{}
+	NewRedactingSink(sink, RedactConfig{ValuePatterns: []string{`sk-live-\S+`}}).Emit(Envelope{
+		Direction: ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+			`{"name":"fetch","arguments":{"authKey":` + quoteJSONString(secret) + `}}}`),
+		MCPParamHeaders: []MCPParamHeader{
+			{Name: "Mcp-Param-Auth", Value: Base64SentinelPrefix +
+				base64.StdEncoding.EncodeToString([]byte(secret)) + Base64SentinelSuffix},
+		},
+	})
+	value := sink.byDir(ClientToServer)[0].MCPParamHeaders[0].Value
+	decoded, ok := DecodeHeaderValue(value)
+	if !ok {
+		t.Fatalf("header value stopped decoding: %q", value)
+	}
+	if strings.Contains(decoded, secret) {
+		t.Fatalf("the encoded header still decodes back to the secret: %q", value)
+	}
+}
+
+// TestRedactRefusesToExpandAnAbsurdMagnitude. RedactEnvelope runs inline on the
+// proxy path, inside the body tap that finishes while the request is still being
+// streamed upstream, so a stall here delays the traffic mcpsnoop is supposed to
+// be merely observing. 1e1000000 is nine bytes on the wire and a million digits
+// once big.Rat has it, and a body packed with them turned 17 KB into 49 seconds.
+func TestRedactRefusesToExpandAnAbsurdMagnitude(t *testing.T) {
+	fields := make([]string, 200)
+	for i := range fields {
+		fields[i] = fmt.Sprintf(`"f%d":1e1000000`, i)
+	}
+	env := Envelope{
+		Direction: ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x",` +
+			`"arguments":{"token":"sk-1",` + strings.Join(fields, ",") + `}}}`),
+		MCPParamHeaders: []MCPParamHeader{{Name: "Mcp-Param-A", Value: "sk-1"}},
+	}
+	r := NewRedactor(RedactConfig{Keys: []string{"token"}})
+
+	done := make(chan Envelope, 1)
+	go func() { done <- r.RedactEnvelope(env) }()
+	select {
+	case got := <-done:
+		if got.MCPParamHeaders[0].Value != redactedValue {
+			t.Fatalf("the mirrored header should still be scrubbed, got %q", got.MCPParamHeaders[0].Value)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RedactEnvelope expanded magnitudes it should have refused outright")
+	}
+}
+
+// TestRedactScrubsMcpNameButNotTheProtocolConstants. Mcp-Name mirrors
+// params.name for a tool or prompt and params.uri for a resource, so it carries
+// the user's own value and has to go with the body. Mcp-Method and
+// MCP-Protocol-Version carry protocol constants and feed the gates that decide
+// which revision a request is judged by, so scrubbing them would switch checks
+// off to hide something that was never sensitive.
+func TestRedactScrubsMcpNameButNotTheProtocolConstants(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"secret-tool",` +
+		`"arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`
+	for _, tc := range []struct {
+		name    string
+		cfg     RedactConfig
+		header  string
+		wantOut string
+	}{
+		{"key rule", RedactConfig{Keys: []string{"name"}}, "secret-tool", redactedValue},
+		{"value rule", RedactConfig{ValuePatterns: []string{"secret-tool"}}, "secret-tool", redactedValue},
+		{
+			"encoded mirror", RedactConfig{Keys: []string{"name"}},
+			Base64SentinelPrefix + base64.StdEncoding.EncodeToString([]byte("secret-tool")) + Base64SentinelSuffix,
+			redactedValue,
+		},
+		{"a name no rule named survives", RedactConfig{Keys: []string{"unrelated"}}, "secret-tool", "secret-tool"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &captureSink{}
+			NewRedactingSink(sink, tc.cfg).Emit(Envelope{
+				Direction: ClientToServer, Raw: json.RawMessage(body),
+				MCPMethod: "tools/call", MCPName: tc.header, MCPProtocolVersion: "2026-07-28",
+			})
+			got := sink.byDir(ClientToServer)[0]
+			if got.MCPName != tc.wantOut {
+				t.Fatalf("Mcp-Name = %q, want %q", got.MCPName, tc.wantOut)
+			}
+			if got.MCPMethod != "tools/call" {
+				t.Fatalf("Mcp-Method = %q, want it left alone", got.MCPMethod)
+			}
+			if got.MCPProtocolVersion != "2026-07-28" {
+				t.Fatalf("MCP-Protocol-Version = %q, want it left alone", got.MCPProtocolVersion)
+			}
+		})
 	}
 }

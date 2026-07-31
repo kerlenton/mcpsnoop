@@ -1056,3 +1056,86 @@ func TestJSONExportPreservesMarkup(t *testing.T) {
 		}
 	}
 }
+
+// TestParamHeadersSurviveTheJSONLRoundTrip pins the on-disk shape of the
+// Mcp-Param capture and of the redaction flag that scopes its checks. open,
+// export and check all rebuild a session by decoding the log back into
+// proxy.Envelope, so a renamed or dropped json tag loses every captured header
+// silently: the store sees none, reports no header verdict, and a check run over
+// a bad capture comes back clean. Nothing else in the suite reads a header off
+// disk, so a rename ships green without this.
+func TestParamHeadersSurviveTheJSONLRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	tool := `{"name":"route","inputSchema":{"type":"object","properties":` +
+		`{"region":{"type":"string","x-mcp-header":"Region"}}}}`
+	meta := `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",` +
+		`"io.modelcontextprotocol/clientCapabilities":{}}`
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: t0,
+		Transport: proxy.TransportHTTP, Direction: proxy.ClientToServer,
+		MCPMethod: "tools/list", MCPProtocolVersion: "2026-07-28",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{` + meta + `}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 2, TS: t0.Add(time.Millisecond),
+		Transport: proxy.TransportHTTP, Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[` + tool + `]}}`),
+	})
+	// The header disagrees with the body, so a session reloaded from disk must
+	// still carry both the captured header and the verdict drawn from it.
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 3, TS: t0.Add(2 * time.Millisecond),
+		Transport: proxy.TransportHTTP, Direction: proxy.ClientToServer,
+		MCPMethod: "tools/call", MCPName: "route", MCPProtocolVersion: "2026-07-28",
+		MCPParamHeaders: []proxy.MCPParamHeader{{Name: "Mcp-Param-Region", Value: "eu-west1"}},
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":` +
+			`{"name":"route","arguments":{"region":"us-west1"},` + meta + `}}`),
+	})
+	// A frame mcpsnoop scrubbed. Its placeholder must still read as a placeholder
+	// after a reload, or the redaction guard turns back into a false mismatch.
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 4, TS: t0.Add(3 * time.Millisecond),
+		Transport: proxy.TransportHTTP, Direction: proxy.ClientToServer,
+		MCPMethod: "tools/call", MCPName: "route", MCPProtocolVersion: "2026-07-28",
+		MCPParamHeaders: []proxy.MCPParamHeader{{Name: "Mcp-Param-Region", Value: "[REDACTED]"}},
+		Redacted:        true,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":` +
+			`{"name":"route","arguments":{"region":"us-west1"},` + meta + `}}`),
+	})
+
+	// The wire names are part of the log format, not implementation details, so
+	// they are asserted off the raw line. A struct-to-struct round trip inside one
+	// build would happily agree with itself after a rename.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if want := `"mcp_param_headers":[{"name":"Mcp-Param-Region","value":"eu-west1"}]`; !strings.Contains(lines[2], want) {
+		t.Fatalf("on-disk envelope lost its parameter headers:\n%s", lines[2])
+	}
+	if !strings.Contains(lines[3], `"redacted":true`) {
+		t.Fatalf("on-disk envelope lost its redaction flag:\n%s", lines[3])
+	}
+
+	st, sessionID, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeline := st.Timeline(sessionID)
+	call := timeline[len(timeline)-2]
+	if len(call.MCPParamHeaders) != 1 ||
+		call.MCPParamHeaders[0].Name != "Mcp-Param-Region" ||
+		call.MCPParamHeaders[0].Value != "eu-west1" {
+		t.Fatalf("reloaded parameter headers = %+v", call.MCPParamHeaders)
+	}
+	if !call.RoutingMismatch || !strings.Contains(call.Warning, "Mcp-Param-Region") {
+		t.Fatalf("reloaded call lost its header verdict: mismatch=%v warning=%q",
+			call.RoutingMismatch, call.Warning)
+	}
+	scrubbed := timeline[len(timeline)-1]
+	if scrubbed.RoutingMismatch || strings.Contains(scrubbed.Warning, "Mcp-Param") {
+		t.Fatalf("a reloaded scrubbed frame was reported as a mismatch: warning=%q", scrubbed.Warning)
+	}
+}

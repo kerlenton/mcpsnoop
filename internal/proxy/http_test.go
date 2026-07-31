@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -67,7 +68,7 @@ func TestBodyTapConcurrentReadAndClose(t *testing.T) {
 // emitterTo adapts a captureSink into the emit func httpProxyHandler expects.
 func emitterTo(sink *captureSink) func(Direction, []byte, route) {
 	return func(d Direction, raw []byte, rt route) {
-		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, MCPProtocolVersion: rt.protocolVersion, Batch: rt.batch, Truncated: rt.truncated, Status: rt.status, AuthChallenge: rt.challenge})
+		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, MCPProtocolVersion: rt.protocolVersion, MCPParamHeaders: rt.params, Batch: rt.batch, Truncated: rt.truncated, Status: rt.status, AuthChallenge: rt.challenge})
 	}
 }
 
@@ -222,9 +223,10 @@ func TestHTTPProxySkipsObservingAStillCompressedBody(t *testing.T) {
 }
 
 func TestHTTPProxyForwardsAndCapturesRoutingHeaders(t *testing.T) {
-	var gotMethod, gotName string
+	var gotMethod, gotName, gotRegion string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotName = r.Header.Get("Mcp-Method"), r.Header.Get("Mcp-Name")
+		gotRegion = r.Header.Get("Mcp-Param-Region")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 	}))
@@ -239,6 +241,7 @@ func TestHTTPProxyForwardsAndCapturesRoutingHeaders(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Mcp-Method", "tools/call")
 	req.Header.Set("Mcp-Name", "echo")
+	req.Header["mCp-pArAm-Region"] = []string{"us-west1"}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -246,13 +249,37 @@ func TestHTTPProxyForwardsAndCapturesRoutingHeaders(t *testing.T) {
 	_ = resp.Body.Close()
 
 	// Forwarded verbatim to the target.
-	if gotMethod != "tools/call" || gotName != "echo" {
-		t.Fatalf("target received Mcp-Method=%q Mcp-Name=%q, want tools/call / echo", gotMethod, gotName)
+	if gotMethod != "tools/call" || gotName != "echo" || gotRegion != "us-west1" {
+		t.Fatalf("target received Mcp-Method=%q Mcp-Name=%q Mcp-Param-Region=%q", gotMethod, gotName, gotRegion)
 	}
 	// Captured onto the observed client->server frame.
 	c2s := sink.byDir(ClientToServer)
 	if len(c2s) != 1 || c2s[0].MCPMethod != "tools/call" || c2s[0].MCPName != "echo" {
 		t.Fatalf("captured frame headers = %+v", c2s)
+	}
+	if got := c2s[0].MCPParamHeaders; !reflect.DeepEqual(got, []MCPParamHeader{{Name: "Mcp-Param-Region", Value: "us-west1"}}) {
+		t.Fatalf("captured parameter headers = %+v", got)
+	}
+}
+
+// TestMCPParamHeadersMatchThePrefixAndSort exercises the prefix match and the
+// ordering on a synthetic map. It is not a statement about the wire: net/http
+// canonicalises every field name before mcpsnoop sees it, so a real request can
+// never produce the uncanonicalised keys below. The test one above sends real
+// bytes and correctly expects the canonical spelling back.
+func TestMCPParamHeadersMatchThePrefixAndSort(t *testing.T) {
+	header := http.Header{
+		"mCp-pArAm-Zone":   {"west"},
+		"MCP-PARAM-Region": {"us", "backup"},
+		"X-Other":          {"ignored"},
+	}
+	want := []MCPParamHeader{
+		{Name: "MCP-PARAM-Region", Value: "us"},
+		{Name: "MCP-PARAM-Region", Value: "backup"},
+		{Name: "mCp-pArAm-Zone", Value: "west"},
+	}
+	if got := mcpParamHeaders(header); !reflect.DeepEqual(got, want) {
+		t.Fatalf("mcpParamHeaders() = %+v, want %+v", got, want)
 	}
 }
 
@@ -334,6 +361,7 @@ func TestHTTPProxyBatchHeadersRideFirstElementOnly(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Mcp-Method", "tools/list")
 	req.Header.Set("Mcp-Name", "search")
+	req.Header.Set("Mcp-Param-Region", "us-west1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -354,6 +382,12 @@ func TestHTTPProxyBatchHeadersRideFirstElementOnly(t *testing.T) {
 	}
 	if c2s[1].MCPMethod != "" || c2s[1].MCPName != "" {
 		t.Fatalf("later elements must not carry the headers, got %+v", c2s[1])
+	}
+	if len(c2s[0].MCPParamHeaders) != 1 || c2s[0].MCPParamHeaders[0].Value != "us-west1" {
+		t.Fatalf("first element should carry parameter headers, got %+v", c2s[0])
+	}
+	if len(c2s[1].MCPParamHeaders) != 0 {
+		t.Fatalf("later elements must not carry parameter headers, got %+v", c2s[1])
 	}
 }
 
