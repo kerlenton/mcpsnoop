@@ -144,7 +144,7 @@ func (r Redactor) RedactEnvelope(env Envelope) Envelope {
 	// collected for every rule, not only for paths, because a key rule reaches a
 	// mirrored header no more directly than a path does.
 	var scrubbed, survived map[string]struct{}
-	if len(env.MCPParamHeaders) > 0 {
+	if len(env.MCPParamHeaders) > 0 || env.MCPName != "" {
 		scrubbed = make(map[string]struct{})
 		survived = make(map[string]struct{})
 	}
@@ -168,6 +168,20 @@ func (r Redactor) RedactEnvelope(env Envelope) Envelope {
 		headers, headersChanged := r.redactMCPParamHeaders(env.MCPParamHeaders, scrubbed, survived)
 		env.MCPParamHeaders = headers
 		changed = changed || headersChanged
+	}
+	// Mcp-Name mirrors params.name for a tool or prompt and params.uri for a
+	// resource, which is exactly the shape a user reaches for --redact-path over,
+	// since a resource URI can be a filesystem path. Leaving it alone kept the
+	// value in the log after the body had lost it.
+	//
+	// Mcp-Method and MCP-Protocol-Version are deliberately not scrubbed. They
+	// carry protocol constants rather than anything of the user's, and both feed
+	// gates that decide which revision's rules a request is judged by, so
+	// replacing them would quietly switch off checks to hide a value that was
+	// never sensitive. Their comparisons are gated in the store instead.
+	if env.MCPName != "" && mirrorsScrubbed(env.MCPName, scrubbed, survived) {
+		env.MCPName = redactedValue
+		changed = true
 	}
 	// Recorded on the frame so the store can tell mcpsnoop's own placeholder from
 	// a client that sent those bytes itself.

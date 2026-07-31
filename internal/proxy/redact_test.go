@@ -671,3 +671,47 @@ func TestRedactRefusesToExpandAnAbsurdMagnitude(t *testing.T) {
 		t.Fatal("RedactEnvelope expanded magnitudes it should have refused outright")
 	}
 }
+
+// TestRedactScrubsMcpNameButNotTheProtocolConstants. Mcp-Name mirrors
+// params.name for a tool or prompt and params.uri for a resource, so it carries
+// the user's own value and has to go with the body. Mcp-Method and
+// MCP-Protocol-Version carry protocol constants and feed the gates that decide
+// which revision a request is judged by, so scrubbing them would switch checks
+// off to hide something that was never sensitive.
+func TestRedactScrubsMcpNameButNotTheProtocolConstants(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"secret-tool",` +
+		`"arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`
+	for _, tc := range []struct {
+		name    string
+		cfg     RedactConfig
+		header  string
+		wantOut string
+	}{
+		{"key rule", RedactConfig{Keys: []string{"name"}}, "secret-tool", redactedValue},
+		{"value rule", RedactConfig{ValuePatterns: []string{"secret-tool"}}, "secret-tool", redactedValue},
+		{
+			"encoded mirror", RedactConfig{Keys: []string{"name"}},
+			Base64SentinelPrefix + base64.StdEncoding.EncodeToString([]byte("secret-tool")) + Base64SentinelSuffix,
+			redactedValue,
+		},
+		{"a name no rule named survives", RedactConfig{Keys: []string{"unrelated"}}, "secret-tool", "secret-tool"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &captureSink{}
+			NewRedactingSink(sink, tc.cfg).Emit(Envelope{
+				Direction: ClientToServer, Raw: json.RawMessage(body),
+				MCPMethod: "tools/call", MCPName: tc.header, MCPProtocolVersion: "2026-07-28",
+			})
+			got := sink.byDir(ClientToServer)[0]
+			if got.MCPName != tc.wantOut {
+				t.Fatalf("Mcp-Name = %q, want %q", got.MCPName, tc.wantOut)
+			}
+			if got.MCPMethod != "tools/call" {
+				t.Fatalf("Mcp-Method = %q, want it left alone", got.MCPMethod)
+			}
+			if got.MCPProtocolVersion != "2026-07-28" {
+				t.Fatalf("MCP-Protocol-Version = %q, want it left alone", got.MCPProtocolVersion)
+			}
+		})
+	}
+}
