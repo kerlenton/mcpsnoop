@@ -350,9 +350,14 @@ The same signal covers a required routing header that is missing entirely. In
 request with `400` and `-32020`. mcpsnoop raises it only once the session is
 known to speak that revision or later: earlier revisions do not define these
 headers at all, so omitting them there is correct.
-A server's own `-32020` rejection counts as the same signal. The server validates
-`Mcp-Param-{Name}` values and header encodings that mcpsnoop never sees, so its
-verdict is sometimes the only evidence a mismatch happened.
+A server's own `-32020` rejection counts as the same signal. On HTTP
+`tools/call` requests, mcpsnoop also shows each `Mcp-Param-{Name}` header and,
+when the matching advertised tool definition is known, compares it with the
+annotated argument path. Nested properties, the Base64 sentinel, booleans, and
+numeric-equivalent safe integers are handled without string-comparison false
+positives. Unknown parameter headers and sessions without a matching tool
+definition remain observational only. Existing key- and value-based redaction
+also applies to captured parameter-header values before they reach a sink.
 Use `--format junit` to write one JUnit `<testcase>` per signal and session;
 failures follow the same `--fail-on` selection as the text output.
 

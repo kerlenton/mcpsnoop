@@ -1073,9 +1073,9 @@ func (m Model) inspectorHeader(w int) string {
 	right := m.pairWidget() + sep + m.styles.faint.Render(e.TS.Format("15:04:05.000"))
 	head := bar(w, left, right)
 	// A second chrome line carries the Streamable HTTP request headers (SEP-2243
-	// routing plus MCP-Protocol-Version) verbatim when the request had them, so the
-	// busy meta line stays readable and older transports show nothing. overlayHeaderH
-	// tracks the extra line.
+	// routing and parameter headers plus MCP-Protocol-Version) verbatim when the
+	// request had them, so the busy meta line stays readable and older transports
+	// show nothing. overlayHeaderH tracks the extra line.
 	if hasTransportMeta(e) {
 		var rp []string
 		if e.MCPMethod != "" {
@@ -1086,6 +1086,9 @@ func (m Model) inspectorHeader(w int) string {
 		}
 		if e.MCPProtocolVersion != "" {
 			rp = append(rp, m.styles.dim.Render("MCP-Protocol-Version ")+m.styles.neutral.Render(e.MCPProtocolVersion))
+		}
+		for _, header := range e.MCPParamHeaders {
+			rp = append(rp, m.styles.dim.Render(header.Name+" ")+m.styles.neutral.Render(header.Value))
 		}
 		if e.HTTPStatus != 0 {
 			rp = append(rp, m.styles.dim.Render("HTTP ")+m.styles.neutral.Render(fmt.Sprintf("%d %s", e.HTTPStatus, http.StatusText(e.HTTPStatus))))
@@ -1113,7 +1116,7 @@ func (m Model) inspectorHeaderH() int {
 // renderer and the height calculation both ask, and they must never disagree:
 // one saying yes while the other says no leaves the inspector body off by a row.
 func hasTransportMeta(e store.EventView) bool {
-	return e.MCPMethod != "" || e.MCPName != "" || e.MCPProtocolVersion != "" || e.HTTPStatus != 0
+	return e.MCPMethod != "" || e.MCPName != "" || e.MCPProtocolVersion != "" || len(e.MCPParamHeaders) != 0 || e.HTTPStatus != 0
 }
 
 // pairWidget is the right side of the inspector header, req N ⇄ resp N with the
