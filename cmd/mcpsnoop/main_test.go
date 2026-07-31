@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -151,6 +153,88 @@ func TestRootWithoutDashDashStopsAtFirstPositional(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("wrapped command = %v, want %v", got, want)
 	}
+}
+
+// A label names files: it flows verbatim into the session id and so into the
+// trace path under SessionsDir, so `--label ../../evil` would write the trace
+// outside the state dir and produce a session `open` cannot find again. It must
+// be rejected up front with a clear error, not sanitised into a different label
+// that would silently re-key the tool baseline.
+func TestRootRejectsPathHostileLabel(t *testing.T) {
+	for _, label := range []string{"../../evil", "srv/one", `srv\one`, "nul\x00label"} {
+		var got []string
+		restore := stubShim(&got)
+
+		code := execute([]string{"--label", label, "--", "node", "server.js"})
+		restore()
+		if code != 2 {
+			t.Fatalf("--label %q exit = %d, want 2", label, code)
+		}
+		if got != nil {
+			t.Fatalf("the shim must not run under a rejected label %q, ran %v", label, got)
+		}
+	}
+
+	// An ordinary label still wraps the command.
+	var got []string
+	defer stubShim(&got)()
+	if code := execute([]string{"--label", "server-everything", "--", "node", "server.js"}); code != 0 {
+		t.Fatalf("exit = %d, want 0 for a plain label", code)
+	}
+}
+
+// The same rule holds for a label read from .mcpsnoop.toml, which is exactly
+// the generated-or-shared file the check exists for.
+func TestRootRejectsPathHostileLabelFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".mcpsnoop.toml"), []byte("label = \"../../evil\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	var got []string
+	defer stubShim(&got)()
+	if code := execute([]string{"--", "node", "server.js"}); code != 2 {
+		t.Fatalf("exit = %d, want 2 for a hostile config label", code)
+	}
+	if got != nil {
+		t.Fatalf("the shim must not run under a rejected config label, ran %v", got)
+	}
+}
+
+// TestHTTPRejectsPathHostileLabel checks the http command applies the same rule
+// as the shim. It stubs the proxy rather than letting the command reach
+// RunHTTP: without the stub, a run where the check fails to fire binds the real
+// listen address and blocks until the package timeout, so the test that is meant
+// to report one bad label instead takes the whole package down with it.
+func TestHTTPRejectsPathHostileLabel(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	ran := false
+	defer stubHTTP(&ran)()
+
+	cmd := newHTTPCmd()
+	cmd.SetArgs([]string{"--label", "../../evil", "--target", "http://localhost:1/mcp"})
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+
+	err := cmd.Execute()
+	var code exitCode
+	if !errors.As(err, &code) || int(code) != 2 {
+		t.Fatalf("http --label ../../evil = %v, want exit code 2", err)
+	}
+	if ran {
+		t.Fatal("a rejected label must be refused before the proxy starts")
+	}
+}
+
+// stubHTTP replaces the proxy runner and returns a function restoring it.
+func stubHTTP(ran *bool) func() {
+	prev := runHTTPFn
+	runHTTPFn = func(context.Context, proxy.HTTPConfig) error {
+		*ran = true
+		return nil
+	}
+	return func() { runHTTPFn = prev }
 }
 
 func TestRootNoArgsRunsHubNotShim(t *testing.T) {
