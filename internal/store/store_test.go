@@ -1683,6 +1683,112 @@ func TestIngestCountsAnHTTPFailureOnce(t *testing.T) {
 	}
 }
 
+func TestSubscriptionsListenDoesNotCountAsPending(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	ev := s.Ingest(req(1, t0, proxy.ClientToServer, "5", "subscriptions/listen", `{}`))
+	if ev.Call == nil || ev.Call.State != Streaming {
+		t.Fatalf("listen call state = %v, want streaming", ev.Call.State)
+	}
+	if h := s.Sessions()[0]; h.Pending != 0 {
+		t.Fatalf("pending = %d, want 0 for an open listen stream", h.Pending)
+	}
+}
+
+func TestSubscriptionsListenCompletesWithoutPendingLeak(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "5", "subscriptions/listen", `{}`))
+	done := s.Ingest(resp(2, t0.Add(time.Second), proxy.ServerToClient, "5", `"result":{}`))
+	if done.Call == nil || done.Call.State != Completed {
+		t.Fatalf("completed listen state = %v, want completed", done.Call.State)
+	}
+	if h := s.Sessions()[0]; h.Pending != 0 {
+		t.Fatalf("pending = %d, want 0 after the stream ends", h.Pending)
+	}
+}
+
+func TestSubscriptionsListenClosesOnCancelledNotification(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "5", "subscriptions/listen", `{}`))
+	cancel := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0.Add(500 * time.Millisecond),
+		Direction: proxy.ServerToClient,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5}}`),
+	}
+	s.Ingest(cancel)
+	if h := s.Sessions()[0]; h.Pending != 0 {
+		t.Fatalf("pending = %d, want 0 after the server closes the stream", h.Pending)
+	}
+	events := s.Timeline("s1")
+	if events[0].Call == nil || events[0].Call.State != Completed {
+		t.Fatalf("listen call should be completed after notifications/cancelled, got %v", events[0].Call.State)
+	}
+}
+
+// TestSubscriptionsListenClosesOnAStringRequestID is the id-form regression. The
+// store keys a call on the raw JSON text of its id, so a string id keeps its
+// quotes, and a cancellation that decodes requestId into a Go string strips them
+// and matches nothing. The specification's own cancellation example uses a string
+// id, so this is the common shape rather than the exotic one, and a miss leaves
+// the stream reading as open forever, which is the symptom this change removes.
+func TestSubscriptionsListenClosesOnAStringRequestID(t *testing.T) {
+	for _, tc := range []struct{ name, id, requestID string }{
+		{"string id", `"sub-1"`, `"sub-1"`},
+		{"numeric id", `5`, `5`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New()
+			t0 := time.Now()
+			s.Ingest(req(1, t0, proxy.ClientToServer, tc.id, "subscriptions/listen", `{}`))
+			// The spec makes this a server MUST when it tears down a subscription.
+			s.Ingest(proxy.Envelope{
+				SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0.Add(time.Second),
+				Direction: proxy.ServerToClient,
+				Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":` +
+					`{"requestId":` + tc.requestID + `,"reason":"shutting down"}}`),
+			})
+
+			events := s.Timeline("s1")
+			if events[0].Call == nil || events[0].Call.State != Completed {
+				t.Fatalf("the teardown should close the stream, got %v", events[0].Call.State)
+			}
+			if h := s.Sessions()[0]; h.Pending != 0 {
+				t.Fatalf("pending = %d, want 0", h.Pending)
+			}
+		})
+	}
+}
+
+// TestReusingAStreamIdKeepsThePendingCounterHonest. A Streaming call never took a
+// pending slot, so the reuse path must not hand its slot to the new call: doing
+// that leaves the new pending request uncounted and then decrements on its answer,
+// driving the counter negative. A negative pending is nonsense in the footer and
+// it also masks a genuinely hung call from the CI gate.
+func TestReusingAStreamIdKeepsThePendingCounterHonest(t *testing.T) {
+	for _, tc := range []struct{ name, first, second string }{
+		{"pending then pending", "tools/list", "tools/list"},
+		{"pending then stream", "tools/list", "subscriptions/listen"},
+		{"stream then pending", "subscriptions/listen", "tools/list"},
+		{"stream then stream", "subscriptions/listen", "subscriptions/listen"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New()
+			t0 := time.Now()
+			s.Ingest(req(1, t0, proxy.ClientToServer, "7", tc.first, `{}`))
+			s.Ingest(req(2, t0.Add(time.Second), proxy.ClientToServer, "7", tc.second, `{}`))
+			if got := s.Sessions()[0].Pending; got < 0 {
+				t.Fatalf("pending went negative on the reuse: %d", got)
+			}
+			s.Ingest(resp(3, t0.Add(2*time.Second), proxy.ServerToClient, "7", `"result":{}`))
+			if got := s.Sessions()[0].Pending; got != 0 {
+				t.Fatalf("every call is settled, pending = %d, want 0", got)
+			}
+		})
+	}
+}
+
 // TestIngestDoesNotFlagADowngradedHandshake is the regression. initialize carries
 // the version the client proposes, and applyRequest folds it into the session
 // before the server has answered. A legacy client proposing 2026-07-28 to a

@@ -34,6 +34,9 @@ const (
 	// Superseded means the request's id was reused by a later in-flight request, so
 	// this one can never be matched to a response. It is no longer pending.
 	Superseded
+	// Streaming means a long-lived stream request (subscriptions/listen) whose
+	// response arrives only when the stream ends. It is open but not pending.
+	Streaming
 )
 
 func (s CallState) String() string {
@@ -44,6 +47,8 @@ func (s CallState) String() string {
 		return "failed"
 	case Superseded:
 		return "superseded"
+	case Streaming:
+		return "streaming"
 	default:
 		return "pending"
 	}
@@ -416,7 +421,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.requests++
 		if reused {
 			ev.warning = appendWarning(ev.warning, "request reuses an id already in flight")
-		} else {
+		}
+		// Counted on what this call is, independently of the reuse. openCall has
+		// already released the superseded call's slot if it held one, so the two
+		// decisions no longer have to agree about who owns the accounting.
+		if ev.call.state == Pending {
 			sess.pending++
 		}
 		if msg.Method == "initialize" {
@@ -427,6 +436,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.method = msg.Method
 		ev.warning = validationWarning(msg)
 		sess.notifications++
+		if msg.Method == "notifications/cancelled" {
+			if id := cancelledRequestID(msg.Params); id != "" {
+				sess.closeStreamingCall(id, e.TS)
+			}
+		}
 		if msg.Method == "notifications/tasks" {
 			if state, ok := parseTaskState(msg.Params); ok {
 				ev.taskID = state.TaskID
@@ -514,20 +528,49 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	// questions and the guards are not the same: a disagreement needs the header
 	// to be there, this needs to know it should have been.
 	//
-	// initialize is exempt. Its params carry the version the client proposes, not
-	// one anything has agreed to, and the store folds that proposal into the
-	// session before this runs, so judging the handshake by its own opening bid
-	// accuses a client whose server then negotiates down to a revision where these
-	// headers do not exist. The exemption costs nothing on the revision that
-	// requires them: 2026-07-28 removed the initialize handshake (SEP-2575), so a
-	// session genuinely speaking it has no initialize to skip.
+	// Requests only, which is why this needs an id and not just a method. The
+	// released 2026-07-28 transport says of a notification POST that "header
+	// requirements for notification POSTs are not defined by this revision", and
+	// that the core protocol defines no client-to-server notification on
+	// Streamable HTTP at all. Demanding a header there would be inventing a rule
+	// the spec declines to state, on a signal that fails a default check run.
+	//
+	// Judged by the revision this one request declared, never the session's. The
+	// session value is last-write-wins across every client request, and the spec
+	// forbids inferring a request's version from earlier requests on the same
+	// connection while explicitly allowing clients to interleave unrelated ones,
+	// so reading it would accuse an older client's request of omitting headers
+	// that a newer neighbour's revision requires. This mirrors what
+	// missingResultTypeWarning already does with call.protocolVersion.
+	//
+	// initialize needs no special case under that rule. Its version rides
+	// params.protocolVersion rather than _meta or the header, so a handshake
+	// request declares nothing here and the gate closes on its own. That is the
+	// right answer twice over: 2026-07-28 removed the handshake, so a client
+	// sending one is speaking an earlier revision whatever it hoped for.
 	if ev.transport == proxy.TransportHTTP && e.Direction == proxy.ClientToServer &&
-		!ev.batch && msg.Method != "" && msg.Method != "initialize" &&
-		requestRequiresRoutingHeaders(sess, ev) {
+		!ev.batch && msg.Method != "" && len(msg.ID) > 0 &&
+		requiresRoutingHeaders(requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)) {
 		for _, h := range missingRoutingHeaders(ev, msg.Method) {
 			ev.warning = appendWarning(ev.warning, "required routing header "+h+" is missing")
 			ev.mismatch = true
 		}
+	}
+
+	// io.modelcontextprotocol/clientCapabilities is REQUIRED in every request's
+	// _meta from 2026-07-28, alongside protocolVersion, and a server MUST reject a
+	// request missing a required field with -32602. Unlike the routing headers this
+	// holds on every transport, so it is checked separately rather than folded in
+	// above, and it does not set ev.mismatch: that flag means the -32020
+	// header-versus-body condition, and this is a different rejection.
+	//
+	// Same two guards as the headers, for the same reasons. Requests with an id
+	// only, and judged by the revision this request declared, never the session's.
+	if e.Direction == proxy.ClientToServer && !ev.batch && msg.Method != "" && len(msg.ID) > 0 &&
+		requiresRequestMeta(requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)) &&
+		!declaresClientCapabilities(msg.Params) {
+		ev.warning = appendWarning(ev.warning,
+			"request _meta is missing required io.modelcontextprotocol/clientCapabilities")
 	}
 
 	if note := deprecatedMethodNote(msg.Method); note != "" {
@@ -592,13 +635,20 @@ func (s *Store) sessionFor(e proxy.Envelope) *session {
 func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope) (*call, bool) {
 	key := callKey{dir: e.Direction, id: id}
 	prev, ok := sess.calls[key]
-	reused := ok && prev.state == Pending
+	reused := ok && (prev.state == Pending || prev.state == Streaming)
 	if reused {
 		// The earlier in-flight call keeps this id, so it will never be matched now.
 		// Mark it superseded (not pending) so the timeline stops rendering it as a
-		// hanging request and agrees with the pending counter, which Ingest leaves
-		// unchanged on a reuse. The "reuses an id already in flight" warning on the
-		// new request is the explanation.
+		// hanging request. The "reuses an id already in flight" warning on the new
+		// request is the explanation.
+		//
+		// It gives up its pending slot here, where the transition happens, and only
+		// when it actually held one. A Streaming call never did, so transferring a
+		// slot it never took would drive the counter negative once the new call is
+		// answered.
+		if prev.state == Pending {
+			sess.pending--
+		}
 		prev.state = Superseded
 		prev.end = e.TS
 	}
@@ -609,6 +659,9 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 		params: msg.Params,
 		start:  e.TS,
 		state:  Pending,
+	}
+	if isStreamOpeningMethod(msg.Method) {
+		c.state = Streaming
 	}
 	if msg.Method == "tools/call" {
 		c.isTool = true
@@ -631,7 +684,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	if c == nil {
 		return nil, false // unmatched response (request missed or before backfill)
 	}
-	if c.state != Pending {
+	if c.state != Pending && c.state != Streaming {
 		return c, false // already answered, a duplicate or late response must not recount
 	}
 	if c.method == "tools/call" && c.taskID != "" {
@@ -660,6 +713,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	c.end = ts
 	c.result = msg.Result
 	c.err = msg.Error
+	wasPending := c.state == Pending
 	switch {
 	case msg.Error != nil:
 		c.state = Failed // JSON-RPC / protocol error
@@ -671,7 +725,9 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Ti
 	default:
 		c.state = Completed
 	}
-	sess.pending--
+	if wasPending {
+		sess.pending--
+	}
 	switch c.method {
 	case "initialize":
 		sess.caps.applyResponse(msg.Result)
@@ -813,7 +869,8 @@ func (c *capabilities) applyResponse(result json.RawMessage) {
 // applyRequestMeta reads the client's protocol version, info, and capabilities
 // from a request's _meta, where the stateless model repeats them on every
 // request instead of exchanging them once in initialize. The reverse-DNS keys
-// are sourced verbatim from the draft schema. It is a no-op when the request
+// are sourced verbatim from the released schema (schema/2026-07-28). It is a
+// no-op when the request
 // carries none of them, so a plain call never fabricates a handshake.
 func (c *capabilities) applyRequestMeta(params json.RawMessage) {
 	var p struct {
@@ -883,7 +940,7 @@ func (c *capabilities) applyDiscover(result json.RawMessage) {
 }
 
 // applyResponseMeta reads the server's identity from any response's _meta.
-// The normative draft schema ($defs.ResultMetaObject) says servers SHOULD send
+// The normative schema (schema/2026-07-28, $defs.ResultMetaObject) says servers SHOULD send
 // io.modelcontextprotocol/serverInfo on every response, so capture it even when
 // the session never calls server/discover. No-op when absent, so legacy
 // (2025-11-25) responses, which carry serverInfo at the top level only, are
@@ -1204,6 +1261,40 @@ func classifyMRTRState(c *call, retryState string, retryHasState bool) MRTRState
 	}
 }
 
+func isStreamOpeningMethod(method string) bool {
+	return method == "subscriptions/listen"
+}
+
+// cancelledRequestID is the id a notifications/cancelled names, in the form the
+// store keys calls by. That form is the raw JSON text of the id, because Ingest
+// keys a call on string(msg.ID), so a string id keeps its quotes. Decoding into a
+// Go string here would strip them and never match the key, and a string id is
+// what the specification's own cancellation example uses.
+func cancelledRequestID(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var p struct {
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return ""
+	}
+	return string(bytes.TrimSpace(p.RequestID))
+}
+
+func (sess *session) closeStreamingCall(id string, ts time.Time) {
+	for _, dir := range []proxy.Direction{proxy.ClientToServer, proxy.ServerToClient} {
+		key := callKey{dir: dir, id: id}
+		c := sess.calls[key]
+		if c != nil && c.state == Streaming {
+			c.end = ts
+			c.state = Completed
+			return
+		}
+	}
+}
+
 func operationName(msg proxy.RPCMessage) string {
 	if len(msg.Params) == 0 {
 		return ""
@@ -1249,16 +1340,6 @@ func requiresRoutingHeaders(version string) bool {
 	return atLeastRevision(version, routingHeadersRequiredFrom)
 }
 
-// requestRequiresRoutingHeaders asks whether this frame is evidence of a
-// revision that mandates the headers. Either source counts on its own: the
-// session may have settled a version through the handshake or through _meta,
-// and a client can also state one in this very request's header without the
-// session having settled anything yet.
-func requestRequiresRoutingHeaders(sess *session, ev *event) bool {
-	return requiresRoutingHeaders(sess.caps.protocolVersion) ||
-		requiresRoutingHeaders(ev.mcpProtocolVersion)
-}
-
 // namedOperationMethods are the three methods whose target Mcp-Name must carry.
 // Deliberately narrower than operationName, which also maps resources/subscribe
 // and resources/unsubscribe: those are not in the spec's table, and demanding a
@@ -1280,6 +1361,38 @@ func missingRoutingHeaders(ev *event, method string) []string {
 		missing = append(missing, "Mcp-Name")
 	}
 	return missing
+}
+
+// requestMetaRequiredFrom is the revision that made the per-request _meta fields
+// mandatory. Named apart from the other two gates even though all three currently
+// agree, so a later divergence in the spec cannot move one by editing another.
+const requestMetaRequiredFrom = "2026-07-28"
+
+// requiresRequestMeta reports whether a revision mandates the per-request _meta
+// protocol fields.
+func requiresRequestMeta(version string) bool {
+	return atLeastRevision(version, requestMetaRequiredFrom)
+}
+
+// declaresClientCapabilities reports whether a request carried the required
+// clientCapabilities field. An empty object counts: it declares that the client
+// has no capabilities to offer, which is a statement. An absent field and an
+// explicit null do not, since neither says anything a server could rely on, and
+// the spec forbids a server relying on capabilities the client did not declare.
+func declaresClientCapabilities(params json.RawMessage) bool {
+	if len(params) == 0 {
+		return false
+	}
+	var p struct {
+		Meta struct {
+			Capabilities json.RawMessage `json:"io.modelcontextprotocol/clientCapabilities"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return false
+	}
+	raw := bytes.TrimSpace(p.Meta.Capabilities)
+	return len(raw) > 0 && string(raw) != "null"
 }
 
 // metaProtocolVersion returns the protocol version a request repeats in its

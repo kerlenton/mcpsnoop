@@ -43,9 +43,10 @@ type CallView struct {
 func (c CallView) Failed() bool { return c.Err != nil || c.ToolErr || c.State == Failed }
 
 // Done reports whether a response has arrived.
-func (c CallView) Done() bool { return c.State != Pending }
+func (c CallView) Done() bool { return c.State != Pending && c.State != Streaming }
 
-// Duration is the request→response latency, or elapsed-so-far if still pending.
+// Duration is the request→response latency, or elapsed-so-far while the call is
+// still open, which covers both a pending request and a live stream.
 func (c CallView) Duration() time.Duration {
 	if c.Done() {
 		return c.End.Sub(c.Start)

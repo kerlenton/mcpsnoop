@@ -581,7 +581,7 @@ func (m Model) streamRow(e store.EventView, lay streamLayout) []cell {
 // durStyle colors the DUR value. It only turns cyan for a live pending timer and
 // is dim otherwise, so latency reads as a plain number, not a verdict.
 func (m Model) durStyle(e store.EventView) lipgloss.Style {
-	if e.Call != nil && e.Call.State == store.Pending {
+	if e.Call != nil && (e.Call.State == store.Pending || e.Call.State == store.Streaming) {
 		return m.styles.pending
 	}
 	return m.styles.dim
@@ -646,6 +646,11 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			if e.Call.State == store.Pending {
 				c.status = "pending"
 				c.dur = m.spinnerFrame() + " " + e.Call.Duration().Round(100*time.Millisecond).String()
+			} else if e.Call.State == store.Streaming {
+				// A long-lived subscriptions/listen stream is open, not hung, so it
+				// gets no spinner and no pending label.
+				c.status = "streaming"
+				c.dur = e.Call.Duration().Round(100 * time.Millisecond).String()
 			} else if e.Call.State == store.Superseded {
 				// Its id was reused while in flight, so it will never be answered.
 				c.status = "superseded"
@@ -876,6 +881,8 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 		switch {
 		case e.Call.State == store.Pending:
 			return m.styles.pending
+		case e.Call.State == store.Streaming:
+			return m.styles.follow
 		case e.Call.State == store.Superseded:
 			return m.styles.warn // never answered, not a success
 		case e.Call.Failed():
@@ -1128,6 +1135,9 @@ func (m Model) pairWidget() string {
 		cur := m.styles.infoVal.Render(fmt.Sprintf("req %d", e.Seq))
 		if e.Call.State == store.Pending {
 			return cur + arrow + m.styles.pending.Render("pending")
+		}
+		if e.Call.State == store.Streaming {
+			return cur + arrow + m.styles.follow.Render("streaming")
 		}
 		if pi, ok := m.pairIndex(m.inspect); ok {
 			return cur + arrow + m.styles.req.Render(fmt.Sprintf("resp %d", m.full[pi].Seq))

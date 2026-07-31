@@ -2,13 +2,13 @@
 
 The [MCP 2026-07-28 revision](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/) is being written up all over the place, and almost all of it is about three things. The removal of the initialize handshake, the Tasks extension, and MCP Apps. There is a fourth change, tucked into a sub-page about a request pattern, and it is the one that broke something I maintain.
 
-It is called [Multi Round-Trip Requests, SEP-2322](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr). On its own it reads like a transport detail. In practice it means that every tool measuring how long an MCP call took is now, quietly, wrong. Mine included, until I fixed it.
+It is called [Multi Round-Trip Requests, SEP-2322](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr). On its own it reads like a transport detail. In practice it means that every tool measuring how long an MCP call took is now, quietly, wrong. Mine included, until I fixed it.
 
 ## What actually changed
 
 Before this revision, when a server needed something from the client mid-operation, say an elicitation, a sampling request, or a roots listing, it opened its own request back to the client over a held-open SSE stream and waited for the answer.
 
-That standalone channel is gone. MRTR removes it outright, and the spec calls this a breaking change. A related rule, [SEP-2260](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/), says a server-initiated request may now only happen while the server is actively processing a client request. So instead of opening a free-standing request of its own, the server answers the client's request with an InputRequiredResult, a result whose resultType is [input_required](https://modelcontextprotocol.io/specification/draft/schema), carrying an inputRequests map of what it needs plus an opaque requestState blob. The client gathers the answers and re-issues the original request with inputResponses and the echoed requestState.
+That standalone channel is gone. MRTR removes it outright, and the spec calls this a breaking change. A related rule, [SEP-2260](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/), says a server-initiated request may now only happen while the server is actively processing a client request. So instead of opening a free-standing request of its own, the server answers the client's request with an InputRequiredResult, a result whose resultType is [input_required](https://modelcontextprotocol.io/specification/2026-07-28/schema), carrying an inputRequests map of what it needs plus an opaque requestState blob. The client gathers the answers and re-issues the original request with inputResponses and the echoed requestState.
 
 The detail the whole thing hangs on is in the spec, in plain language.
 
