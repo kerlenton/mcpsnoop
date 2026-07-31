@@ -71,17 +71,21 @@ type EventView struct {
 	MCPName   string
 	// MCPProtocolVersion is the MCP-Protocol-Version request header.
 	MCPProtocolVersion string
+	// MCPParamHeaders are the captured Mcp-Param-* request headers in stable,
+	// case-insensitive field-name order.
+	MCPParamHeaders []proxy.MCPParamHeader
 	// HTTPStatus is the status of the response this frame arrived on, zero on
 	// stdio and on client frames. AuthChallenge is that response's
 	// WWW-Authenticate header.
 	HTTPStatus    int
 	AuthChallenge string
-	// RoutingMismatch is true when a routing header (Mcp-Method/Mcp-Name) or the
-	// MCP-Protocol-Version header disagrees with the body, or a routing header rides
-	// a batch, or a required one is missing. It is also true on a server's -32020
-	// response, which is that same condition as the server saw it: it validates
-	// values mcpsnoop cannot check, so its rejection is sometimes the only
-	// evidence. A structured handle for the condition the warning describes, so
+	// RoutingMismatch is true when a routing header (Mcp-Method/Mcp-Name or an
+	// Mcp-Param-* value) or the MCP-Protocol-Version header disagrees with the body,
+	// or a routing header rides a batch, or a required one is missing. It is also
+	// true on a server's -32020
+	// response, which is that same condition as the server saw it and remains
+	// useful when no matching tool definition was observed. A structured handle
+	// for the condition the warning describes, so
 	// filters and exporters need not match warning text.
 	RoutingMismatch bool
 	// Truncated is true when mcpsnoop capped its own observed copy of a large body.
@@ -134,6 +138,7 @@ type ToolDefinition struct {
 	Annotations  json.RawMessage
 	Icons        json.RawMessage
 	Findings     []SchemaFinding
+	paramHeaders []paramHeaderBinding
 	// Cost is what advertising this tool weighs, measured once at ingest.
 	Cost ToolCost
 }
@@ -354,6 +359,7 @@ func (e *event) view(_ *session) EventView {
 		MCPMethod:          e.mcpMethod,
 		MCPName:            e.mcpName,
 		MCPProtocolVersion: e.mcpProtocolVersion,
+		MCPParamHeaders:    slices.Clone(e.mcpParamHeaders),
 		HTTPStatus:         e.status,
 		AuthChallenge:      e.authChallenge,
 		RoutingMismatch:    e.mismatch,

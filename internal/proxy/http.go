@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -69,13 +70,14 @@ const (
 	mcpProtocolVersionHeader = "MCP-Protocol-Version"
 )
 
-// route carries the routing headers observed on a request, both empty when the
-// frame is a response or the client did not send them. batch marks a frame
+// route carries the routing headers observed on a request, empty when the frame
+// is a response or the client did not send them. batch marks a frame
 // split out of a JSON-RPC batch array, which routing headers cannot address.
 type route struct {
 	method          string // Mcp-Method
 	name            string // Mcp-Name
 	protocolVersion string // MCP-Protocol-Version (request-scoped, not per operation)
+	params          []MCPParamHeader
 	batch           bool
 	truncated       bool   // the observed copy was cut at the frame-size cap
 	status          int    // HTTP status of the response carrying this frame
@@ -103,6 +105,7 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 			MCPMethod:          r.method,
 			MCPName:            r.name,
 			MCPProtocolVersion: r.protocolVersion,
+			MCPParamHeaders:    slices.Clone(r.params),
 			Batch:              r.batch,
 			Truncated:          r.truncated,
 			Status:             r.status,
@@ -113,6 +116,25 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 		}
 		sink.Emit(env)
 	}
+}
+
+func mcpParamHeaders(header http.Header) []MCPParamHeader {
+	var params []MCPParamHeader
+	for name, values := range header {
+		if !strings.HasPrefix(strings.ToLower(name), "mcp-param-") {
+			continue
+		}
+		for _, value := range values {
+			params = append(params, MCPParamHeader{Name: name, Value: value})
+		}
+	}
+	slices.SortStableFunc(params, func(a, b MCPParamHeader) int {
+		if n := strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name)); n != 0 {
+			return n
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return params
 }
 
 // bodyTap forwards an HTTP body verbatim while copying at most cap bytes for
@@ -274,7 +296,12 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil && r.Method == http.MethodPost {
-			rt := route{method: r.Header.Get(mcpMethodHeader), name: r.Header.Get(mcpNameHeader), protocolVersion: r.Header.Get(mcpProtocolVersionHeader)}
+			rt := route{
+				method:          r.Header.Get(mcpMethodHeader),
+				name:            r.Header.Get(mcpNameHeader),
+				protocolVersion: r.Header.Get(mcpProtocolVersionHeader),
+				params:          mcpParamHeaders(r.Header),
+			}
 			// Same streaming tap for the request body, so a large upload is forwarded
 			// without being held in memory whole.
 			r.Body = newBodyTap(r.Body, maxFrameBytes, func(observed []byte, truncated bool) {
@@ -307,7 +334,7 @@ func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte,
 				// place the transport layer went missing again.
 				er := route{batch: true, protocolVersion: rt.protocolVersion, status: rt.status, challenge: rt.challenge}
 				if i == 0 {
-					er.method, er.name = rt.method, rt.name
+					er.method, er.name, er.params = rt.method, rt.name, rt.params
 				}
 				emit(dir, m, er)
 			}

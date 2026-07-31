@@ -37,6 +37,17 @@ type SessionMeta struct {
 	CWD     string   `json:"cwd,omitempty"`
 }
 
+// MCPParamHeader is one custom tool-parameter header observed on an HTTP
+// request. Name is net/http's canonical spelling of the field, not the client's
+// own: Go runs every field name through textproto.CanonicalMIMEHeaderKey before
+// mcpsnoop sees it, so `MCP-PARAM-REGION` and `mcp-param-region` both arrive as
+// `Mcp-Param-Region`. It is kept so the inspector has a name to show, and every
+// comparison against it lowercases first, which is what the spec requires.
+type MCPParamHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 // Envelope wraps a single observed event for transport to the hub and for the
 // on-disk session log. The shim stays dumb, it never correlates or interprets,
 // it just timestamps and labels. All correlation/timing lives in the hub.
@@ -59,12 +70,20 @@ type Envelope struct {
 	// MCPProtocolVersion is the MCP-Protocol-Version request header, empty for
 	// stdio and pre-2026 HTTP servers.
 	MCPProtocolVersion string `json:"mcp_protocol_version,omitempty"`
+	// MCPParamHeaders are the Mcp-Param-* request headers generated from
+	// x-mcp-header annotations in a tool's input schema.
+	MCPParamHeaders []MCPParamHeader `json:"mcp_param_headers,omitempty"`
 	// Batch marks a frame that was one element of a JSON-RPC batch array. Routing
 	// headers address a single operation, so they cannot describe a batch.
 	Batch bool `json:"batch,omitempty"`
 	// Truncated marks a frame whose observed copy was cut at the frame-size cap.
 	// The bytes still forwarded to the other side in full; only this copy is short.
 	Truncated bool `json:"truncated,omitempty"`
+	// Redacted marks a frame mcpsnoop's own redaction rewrote. The store needs it
+	// to tell its placeholder apart from a client that simply sent that string,
+	// since "[REDACTED]" is a legal header value and a legal argument, and a check
+	// that skips whenever it sees those bytes is a check a client can switch off.
+	Redacted bool `json:"redacted,omitempty"`
 
 	// Status is the HTTP status of the response this frame arrived on. Zero on
 	// stdio and on client frames, since only a response has one.

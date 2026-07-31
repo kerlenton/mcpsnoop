@@ -303,6 +303,26 @@ func TestInspectorHeaderHSyncsWithProtocolVersionOnly(t *testing.T) {
 	}
 }
 
+func TestInspectorShowsMCPParamHeaders(t *testing.T) {
+	m := New(store.New())
+	m.full = []store.EventView{{
+		MCPParamHeaders: []proxy.MCPParamHeader{
+			{Name: "Mcp-Param-Region", Value: "us-west1"},
+			{Name: "Mcp-Param-Count", Value: "42"},
+		},
+	}}
+	m.inspect = 0
+	if got := m.inspectorHeaderH(); got != 2 {
+		t.Fatalf("inspectorHeaderH() = %d, want 2 for parameter headers", got)
+	}
+	header := m.inspectorHeader(200)
+	for _, want := range []string{"Mcp-Param-Count", "42", "Mcp-Param-Region", "us-west1"} {
+		if !strings.Contains(header, want) {
+			t.Fatalf("inspector header missing %q: %q", want, header)
+		}
+	}
+}
+
 func TestInspectorOverlay(t *testing.T) {
 	st := store.New()
 	seed(st)

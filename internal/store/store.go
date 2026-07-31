@@ -172,6 +172,7 @@ type event struct {
 	mcpMethod          string // Mcp-Method routing header (HTTP transport, SEP-2243)
 	mcpName            string // Mcp-Name routing header
 	mcpProtocolVersion string // MCP-Protocol-Version request header
+	mcpParamHeaders    []proxy.MCPParamHeader
 	batch              bool   // one element of a JSON-RPC batch (routing headers cannot address it)
 	transport          string // the channel this frame was observed on (proxy.TransportHTTP, …)
 	status             int    // HTTP status of the response this frame arrived on (zero on stdio)
@@ -222,6 +223,12 @@ type session struct {
 	toolListSeen bool
 	toolDrift    ToolDrift
 	toolDriftSet bool
+	// paramHeaderInvalid names tools whose latest advertised inputSchema carries an
+	// x-mcp-header the spec forbids, and which constraint it breaks. applyToolsList
+	// runs deep inside completeCall, which cannot widen its return, so the verdict
+	// is parked here and Ingest drains it onto the tools/list response frame that
+	// carried the definitions.
+	paramHeaderInvalid []paramHeaderViolation
 
 	command []string
 	cwd     string
@@ -297,7 +304,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		return EventView{Kind: EventOther} // control frame, not shown in the stream
 	}
 
-	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName, mcpProtocolVersion: e.MCPProtocolVersion, batch: e.Batch, transport: e.Transport, status: e.Status, authChallenge: e.AuthChallenge}
+	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName, mcpProtocolVersion: e.MCPProtocolVersion, mcpParamHeaders: sortedMCPParamHeaders(e.MCPParamHeaders), batch: e.Batch, transport: e.Transport, status: e.Status, authChallenge: e.AuthChallenge}
 
 	if e.Direction == proxy.ServerStderr {
 		ev.kind = EventStderr
@@ -354,6 +361,14 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		if note := missingResultTypeWarning(msg, c); note != "" {
 			ev.warning = appendWarning(ev.warning, note)
 		}
+		// Drained here rather than returned, because applyToolsList runs inside
+		// completeCall. Each name is reported once, on the frame that advertised it.
+		for _, invalid := range sess.paramHeaderInvalid {
+			ev.warning = appendWarning(ev.warning,
+				"tool "+strconv.Quote(invalid.tool)+" declares "+invalid.reason+
+					", so its Mcp-Param headers are not checked")
+		}
+		sess.paramHeaderInvalid = nil
 		if c != nil && c.taskID != "" {
 			ev.taskID = c.taskID
 			if c.method != "tools/call" {
@@ -573,6 +588,15 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			"request _meta is missing required io.modelcontextprotocol/clientCapabilities")
 	}
 
+	if ev.transport == proxy.TransportHTTP && e.Direction == proxy.ClientToServer &&
+		!ev.batch && msg.Method == "tools/call" && len(msg.ID) > 0 &&
+		requiresRoutingHeaders(requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)) {
+		for _, warning := range mcpParamHeaderWarnings(sess, msg, ev.mcpParamHeaders, e.Redacted) {
+			ev.warning = appendWarning(ev.warning, warning)
+			ev.mismatch = true
+		}
+	}
+
 	if note := deprecatedMethodNote(msg.Method); note != "" {
 		ev.deprecated = note
 	} else if state, ok := parseInputRequired(msg.Result); ok {
@@ -594,9 +618,9 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	// The server's own verdict on the header checks mcpsnoop performs itself.
 	// Flagged structurally rather than as a warning: the frame is already an
 	// error and already counted, and what this adds is that the failure was a
-	// routing one. It matters because the server validates more than mcpsnoop
-	// can (Mcp-Param-{Name} values, malformed encodings), so its rejection is
-	// sometimes the only evidence a mismatch happened at all.
+	// routing one. It remains useful when mcpsnoop never observed the matching
+	// tool definition and therefore could not map an Mcp-Param-{Name} header
+	// back to its argument path.
 	if msg.Error != nil && msg.Error.Code == ErrorCodeHeaderMismatch {
 		ev.mismatch = true
 	}
@@ -989,6 +1013,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		sess.advertisedTools = nil
 	}
 
+	var invalidParamHeaderTools []paramHeaderViolation
 	for _, rawTool := range r.Tools {
 		var tool struct {
 			Name string `json:"name"`
@@ -1027,6 +1052,23 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		sess.advertisedSet[tool.Name] = struct{}{}
 		sess.advertisedTools = append(sess.advertisedTools, tool.Name)
 		schema := append(json.RawMessage(nil), tool.InputSchema...)
+		// The validity verdict is reported, not discarded. The spec makes an
+		// x-mcp-header violating its constraints a definition a client MUST reject,
+		// excluding the tool from the list and logging why. mcpsnoop observes rather
+		// than serves, so the analogous answer is to say so on the frame that
+		// advertised it and to compare no headers for that tool, which is what a
+		// conforming client would then be doing anyway. Throwing the verdict away
+		// left every one of those constraints computed and never reported.
+		//
+		// Only an actual violation is reported, and it says which constraint. A
+		// schema mcpsnoop could not read is not the server's fault, and reporting the
+		// two the same way turned the user's own --redact-secrets into an accusation
+		// against traffic that was correct.
+		paramHeaders, violation := mcpParamHeaderBindings(schema)
+		if violation != "" {
+			invalidParamHeaderTools = append(invalidParamHeaderTools,
+				paramHeaderViolation{tool: tool.Name, reason: violation})
+		}
 
 		// Measured from the raw bytes, not gated on the decoded string being
 		// non-empty: whatever the description field holds, those bytes were spent
@@ -1043,6 +1085,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 			Annotations:  append(json.RawMessage(nil), tool.Annotations...),
 			Icons:        append(json.RawMessage(nil), tool.Icons...),
 			Findings:     analyzeSchema(schema),
+			paramHeaders: paramHeaders,
 			Cost: ToolCost{
 				Name:             tool.Name,
 				Bytes:            compactJSONLen(rawTool),
@@ -1052,6 +1095,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		}
 	}
 	sess.toolListComplete = r.NextCursor == ""
+	sess.paramHeaderInvalid = append(sess.paramHeaderInvalid, invalidParamHeaderTools...)
 }
 
 // hasListCursor reports whether a tools/list request carries a pagination cursor,
