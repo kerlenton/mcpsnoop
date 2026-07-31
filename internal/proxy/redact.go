@@ -223,6 +223,16 @@ func (r Redactor) redactMCPParamHeaders(headers []MCPParamHeader, scrubbed, surv
 //
 // The header is decoded first, because a value outside visible ASCII may only
 // travel wrapped in the Base64 sentinel while the body holds it plain.
+//
+// What this deliberately does not do. The match is on the spelling alone, over
+// the whole frame, with no idea which property a header is bound to, because the
+// binding lives in the tool's inputSchema and the shim has never seen it. So a
+// header whose value happens to equal something an unrelated rule removed is
+// scrubbed too, which can erase the evidence of a genuine header-versus-body
+// disagreement. That is the deliberate trade. A secret left in a file the user
+// was told is scrubbed is worse than a check lost on one frame. Making it exact
+// means carrying the redacted argument paths on the envelope and pairing them
+// with the bindings in the store, which is tracked separately.
 func mirrorsScrubbed(value string, scrubbed, survived map[string]struct{}) bool {
 	decoded, ok := DecodeHeaderValue(value)
 	if !ok {
@@ -302,8 +312,18 @@ func (r Redactor) redactPaths(value *any, scrubbed map[string]struct{}) bool {
 	return changed
 }
 
-// recordSpellings adds every way a JSON scalar could appear as a header value to
-// set, and does nothing for a non-scalar or a nil set.
+// maxNumericSpelling bounds how far a number is expanded before being compared.
+// 2^53-1 is sixteen digits, so anything near this is already far outside the
+// range an x-mcp-header integer may carry.
+const maxNumericSpelling = 512
+
+// recordSpellings adds every way a JSON value could appear as a header value to
+// set, and does nothing for a nil set.
+//
+// It descends into objects and arrays. A rule that removes a whole object
+// removes every scalar under it, and a binding may sit on a nested property, so
+// recording only the top value left the header mirroring an inner one still
+// holding the secret.
 //
 // A number contributes two spellings when they differ, the one the wire used and
 // its plain integer form. The spec has servers compare an x-mcp-header integer
@@ -321,10 +341,61 @@ func recordSpellings(v any, set map[string]struct{}) {
 		set[strconv.FormatBool(t)] = struct{}{}
 	case json.Number:
 		set[t.String()] = struct{}{}
-		if exact, ok := new(big.Rat).SetString(t.String()); ok && exact.IsInt() {
-			set[exact.Num().String()] = struct{}{}
+		if normalized, ok := normalizedInteger(t.String()); ok {
+			set[normalized] = struct{}{}
+		}
+	case map[string]any:
+		for _, child := range t {
+			recordSpellings(child, set)
+		}
+	case []any:
+		for _, child := range t {
+			recordSpellings(child, set)
 		}
 	}
+}
+
+// normalizedInteger is the plain integer spelling of a number the wire wrote
+// with a fraction or an exponent. A spelling that is already plain needs no
+// answer, which keeps big.Rat off the common path entirely.
+//
+// The magnitude is bounded before expanding. 1e1000000 is nine bytes on the wire
+// and a million digits once big.Rat has it, and this runs inline on the proxy
+// path where a stall delays the traffic mcpsnoop is supposed to be observing
+// rather than merely slowing mcpsnoop down. Nothing refused here could be a
+// legal x-mcp-header integer anyway.
+func normalizedInteger(spelling string) (string, bool) {
+	if !strings.ContainsAny(spelling, ".eE") {
+		return "", false
+	}
+	if len(spelling) > maxNumericSpelling || !numericExponentFits(spelling) {
+		return "", false
+	}
+	exact, ok := new(big.Rat).SetString(spelling)
+	if !ok || !exact.IsInt() {
+		return "", false
+	}
+	return exact.Num().String(), true
+}
+
+func numericExponentFits(spelling string) bool {
+	_, exponent, found := strings.Cut(spelling, "e")
+	if !found {
+		_, exponent, found = strings.Cut(spelling, "E")
+	}
+	if !found {
+		return true
+	}
+	// Bounded before parsing, so a thousand-digit exponent cannot overflow the
+	// int it would be parsed into.
+	if len(exponent) > 6 {
+		return false
+	}
+	value, err := strconv.Atoi(exponent)
+	if err != nil {
+		return false
+	}
+	return value <= maxNumericSpelling && value >= -maxNumericSpelling
 }
 
 // collectSurviving records which of the scrubbed spellings the rewritten body
@@ -369,6 +440,11 @@ func (r Redactor) redactValue(v any, scrubbed map[string]struct{}) bool {
 			if s, ok := child.(string); ok {
 				redacted := r.redactString(s)
 				if redacted != s {
+					// Recorded like a key match. A value pattern is written against the
+					// plaintext, so it cannot match the Base64 sentinel a header carries
+					// the same value in, and without this the body was scrubbed while the
+					// encoded mirror decoded straight back to the secret.
+					recordSpellings(s, scrubbed)
 					x[key] = redacted
 					changed = true
 				}

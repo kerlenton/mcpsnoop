@@ -45,7 +45,7 @@ func TestDecodeHeaderValue(t *testing.T) {
 }
 
 func encodeHeader(value string) string {
-	return base64SentinelPrefix + base64.StdEncoding.EncodeToString([]byte(value)) + base64SentinelSuffix
+	return proxy.Base64SentinelPrefix + base64.StdEncoding.EncodeToString([]byte(value)) + proxy.Base64SentinelSuffix
 }
 
 // TestIngestAcceptsAnEncodedMcpNameThatMatches is the regression. A compliant

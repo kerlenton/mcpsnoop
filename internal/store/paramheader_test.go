@@ -512,8 +512,30 @@ func TestParamHeaderBindingsReportOnlyRealViolations(t *testing.T) {
 		{
 			name:         "annotation on a number",
 			schema:       `{"type":"object","properties":{"ratio":{"type":"number","x-mcp-header":"Ratio"}}}`,
-			wantReason:   "whose type is not one of string, integer or boolean",
+			wantReason:   `whose type "number" is not one of string, integer or boolean`,
 			wantBindings: 0,
+		},
+		// The spec constrains the parameter's type, not the presence of a type
+		// keyword, and a client that excluded these tools would be excluding tools
+		// no rule forbids.
+		{
+			name:   "annotation on an enum with no type keyword",
+			schema: `{"type":"object","properties":{"region":{"enum":["us","eu"],"x-mcp-header":"Region"}}}`,
+		},
+		{
+			name:   "explicit null annotation on a property that declares none",
+			schema: `{"type":"object","properties":{"ratio":{"type":"number","x-mcp-header":null}}}`,
+		},
+		{
+			name:         "nullable union carries the annotation",
+			schema:       `{"type":"object","properties":{"region":{"type":["string","null"],"x-mcp-header":"Region"}}}`,
+			wantBindings: 1,
+		},
+		{
+			name: "duplicate is caught even behind an unjudgeable type",
+			schema: `{"type":"object","properties":{"a":{"enum":["x"],"x-mcp-header":"Region"},` +
+				`"b":{"type":"string","x-mcp-header":"region"}}}`,
+			wantReason: "on more than one property",
 		},
 		{
 			name: "same annotation twice",
@@ -608,10 +630,107 @@ func TestParamHeaderBindingsSurviveAUnionType(t *testing.T) {
 		t.Fatalf("a header disagreeing with the body must be reported, got %v", got)
 	}
 
-	// A union is still not a legal place for the annotation itself.
-	if _, violation := mcpParamHeaderBindings(json.RawMessage(
-		`{"properties":{"x":{"type":["string","null"],"x-mcp-header":"X"}}}`)); violation == "" {
-		t.Fatal("x-mcp-header on a union type is not permitted")
+	// A nullable union is a legal place for the annotation. The spec's own table
+	// has a row for a parameter whose value is null, telling the client to omit
+	// the header, which only makes sense if the parameter may be nullable, and
+	// ["string","null"] is how a generated schema spells that.
+	nullable, violation := mcpParamHeaderBindings(json.RawMessage(
+		`{"properties":{"x":{"type":["string","null"],"x-mcp-header":"X"}}}`))
+	if violation != "" {
+		t.Fatalf("a nullable parameter may carry the annotation, got %s", violation)
+	}
+	if len(nullable) != 1 || nullable[0].typ != "string" {
+		t.Fatalf("bindings = %+v, want one string binding", nullable)
+	}
+
+	// A union naming two real types is something mcpsnoop cannot judge, so it
+	// binds nothing and accuses nobody.
+	both, violation := mcpParamHeaderBindings(json.RawMessage(
+		`{"properties":{"x":{"type":["string","number"],"x-mcp-header":"X"}}}`))
+	if violation != "" || len(both) != 0 {
+		t.Fatalf("bindings = %+v violation = %q, want neither", both, violation)
+	}
+}
+
+// TestParamHeaderNullableParameterOmitsItsHeader closes the loop on the nullable
+// case. The spec's table says a client MUST omit the header when the value is
+// null and the server MUST NOT expect it, which the old union rejection made
+// unreachable for the one schema spelling that legitimately permits null.
+func TestParamHeaderNullableParameterOmitsItsHeader(t *testing.T) {
+	const schema = `{"type":"object","properties":{"region":{"type":["string","null"],"x-mcp-header":"Region"}}}`
+	sess := paramSession(t, "route", schema)
+	if got := mcpParamHeaderWarnings(sess, paramCallMsg("route", `{"region":null}`), nil, false); len(got) != 0 {
+		t.Fatalf("a null value with no header must be silent, got %v", got)
+	}
+	got := mcpParamHeaderWarnings(sess, paramCallMsg("route", `{"region":"us-west1"}`),
+		[]proxy.MCPParamHeader{{Name: "Mcp-Param-Region", Value: "eu-west1"}}, false)
+	if len(got) != 1 {
+		t.Fatalf("a nullable parameter must still be compared when it has a value, got %v", got)
+	}
+}
+
+// TestParamHeaderRedactedAncestorIsNotAMissingParameter. A scrubbed ancestor
+// hides the parameter from the walk, and reporting that as the client omitting a
+// value invents a violation out of the user's privacy setting on a signal that
+// fails a default check run.
+func TestParamHeaderRedactedAncestorIsNotAMissingParameter(t *testing.T) {
+	const schema = `{"type":"object","properties":{"options":{"type":"object","properties":` +
+		`{"count":{"type":"integer","x-mcp-header":"Count"}}}}}`
+	headers := []proxy.MCPParamHeader{{Name: "Mcp-Param-Count", Value: "42"}}
+	for _, tc := range []struct {
+		name     string
+		args     string
+		redacted bool
+		want     int
+	}{
+		{"scrubbed ancestor on a redacted frame", `{"options":"[REDACTED]"}`, true, 0},
+		{"same bytes with no redaction", `{"options":"[REDACTED]"}`, false, 1},
+		{"genuinely absent parameter still warns", `{"options":{}}`, true, 1},
+		{"present and matching stays silent", `{"options":{"count":42}}`, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mcpParamHeaderWarnings(paramSession(t, "route", schema),
+				paramCallMsg("route", tc.args), headers, tc.redacted)
+			if len(got) != tc.want {
+				t.Fatalf("warnings = %v, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseMCPIntegerGrammarAndMagnitude. The old character scan refused 0x2A
+// while letting 0o52 and 0b101 through, and its comment claimed all three were
+// NaN under JavaScript's Number(), which is false for two of them. The magnitude
+// bound is the other half: 1e1000000 is nine bytes and a million digits once
+// big.Rat expands it, under the store's lock.
+func TestParseMCPIntegerGrammarAndMagnitude(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"42", true}, {"-7", true}, {"+42", true}, {"042", true},
+		{"42.0", true}, {"4.2e1", true}, {"0.42e2", true}, {"-0", true},
+		{"42.5", false}, {"", false}, {"-", false}, {"42abc", false},
+		{"0x2A", false}, {"0o52", false}, {"0b101", false},
+		{"1_000", false}, {"84/2", false}, {"0x1p+5", false},
+		{"٤٢", false}, {"NaN", false}, {"Inf", false}, {"1e", false},
+		{"1e1000000", false}, {"1e-1000000", false}, {"1e999999999999999999999", false},
+	} {
+		if got := parseMCPInteger(tc.value); got.safe != tc.want {
+			t.Errorf("parseMCPInteger(%q).safe = %v, want %v", tc.value, got.safe, tc.want)
+		}
+	}
+
+	// The point of the bound. Without it this expands to a million digits.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		parseMCPInteger("1e1000000")
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parseMCPInteger expanded a magnitude it should have refused outright")
 	}
 }
 
