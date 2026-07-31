@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -201,7 +202,16 @@ func TestRootRejectsPathHostileLabelFromConfig(t *testing.T) {
 	}
 }
 
+// TestHTTPRejectsPathHostileLabel checks the http command applies the same rule
+// as the shim. It stubs the proxy rather than letting the command reach
+// RunHTTP: without the stub, a run where the check fails to fire binds the real
+// listen address and blocks until the package timeout, so the test that is meant
+// to report one bad label instead takes the whole package down with it.
 func TestHTTPRejectsPathHostileLabel(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	ran := false
+	defer stubHTTP(&ran)()
+
 	cmd := newHTTPCmd()
 	cmd.SetArgs([]string{"--label", "../../evil", "--target", "http://localhost:1/mcp"})
 	cmd.SilenceErrors = true
@@ -212,6 +222,19 @@ func TestHTTPRejectsPathHostileLabel(t *testing.T) {
 	if !errors.As(err, &code) || int(code) != 2 {
 		t.Fatalf("http --label ../../evil = %v, want exit code 2", err)
 	}
+	if ran {
+		t.Fatal("a rejected label must be refused before the proxy starts")
+	}
+}
+
+// stubHTTP replaces the proxy runner and returns a function restoring it.
+func stubHTTP(ran *bool) func() {
+	prev := runHTTPFn
+	runHTTPFn = func(context.Context, proxy.HTTPConfig) error {
+		*ran = true
+		return nil
+	}
+	return func() { runHTTPFn = prev }
 }
 
 func TestRootNoArgsRunsHubNotShim(t *testing.T) {

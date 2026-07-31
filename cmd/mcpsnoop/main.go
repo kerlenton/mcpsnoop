@@ -198,11 +198,15 @@ func redactConfig(commonSecrets bool, keys redactKeysFlag, values redactValuesFl
 
 func main() { os.Exit(execute(os.Args[1:])) }
 
-// runShimFn and runHubFn are indirected so tests can check how the root command
-// routes the wrapped command without spawning a server or launching the TUI.
+// runShimFn, runHubFn and runHTTPFn are indirected so tests can check how a
+// command routes without spawning a server, launching the TUI, or binding a
+// port. The http seam matters most: without it a test that reaches RunHTTP
+// binds the real --listen address and blocks until the package timeout, which
+// fails the whole package rather than the one test.
 var (
 	runShimFn = runShim
 	runHubFn  = runHub
+	runHTTPFn = proxy.RunHTTP
 )
 
 // exitCode carries a command's process exit code out through cobra's error
@@ -601,7 +605,7 @@ func newHTTPCmd() *cobra.Command {
 			defer stop()
 
 			fmt.Fprintf(os.Stderr, "mcpsnoop: proxying %s → %s (session %s)\n", listen, target, sessionID)
-			if err := proxy.RunHTTP(ctx, proxy.HTTPConfig{
+			if err := runHTTPFn(ctx, proxy.HTTPConfig{
 				Listen:    listen,
 				Target:    target,
 				Label:     lbl,
