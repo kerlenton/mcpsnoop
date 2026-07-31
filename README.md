@@ -284,12 +284,19 @@ mcpsnoop export session.jsonl --redact-secrets --redact-key project_token -o sha
 mcpsnoop open session.jsonl --redact-path '$.params.arguments.password'
 ```
 
-These flags redact JSON-RPC payloads and stderr or other non-JSON text in the
-exported file or the in-memory TUI view. Envelope metadata such as server labels
-and captured HTTP headers is unchanged. The source JSONL is not rewritten, and
-`export` rejects an output that refers to the source file. Still use a separate
-output path, inspect the result before sharing it, and treat redaction as best
-effort.
+These flags rewrite the exported file or the in-memory TUI view, never the
+source JSONL. `export` refuses an output that names the same file as its input,
+and writes through a temporary file that is renamed into place, so a run that
+fails leaves the previous file whole.
+
+What each flag reaches differs, so check the result rather than assuming. All
+four scrub JSON-RPC payloads, and `--redact-key`, `--redact-path` and
+`--redact-secrets` reach only those. Only `--redact-value` also scrubs stderr,
+other non-JSON text, and the inside of a string. An `Mcp-Param-*` header is
+scrubbed alongside the body value it mirrors; the other envelope metadata,
+server labels, `Mcp-Name`, `Mcp-Method` and the HTTP status, is left as
+captured. Redaction is best effort, so use a separate output path and read the
+result before sharing it.
 
 ### Stream completed calls to an OTLP collector
 

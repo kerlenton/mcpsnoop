@@ -469,19 +469,10 @@ func newExportCmd() *cobra.Command {
 				source = inPath
 			}
 
-			out := os.Stdout
+			var out io.Writer = os.Stdout
+			var target *exportTarget
 			if outFlag != "-" {
-				if err := os.MkdirAll(filepath.Dir(outFlag), 0o700); err != nil {
-					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
-					return exitCode(1)
-				}
-				f, err := os.OpenFile(outFlag, os.O_CREATE|os.O_WRONLY, 0o600)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
-					return exitCode(1)
-				}
-				defer f.Close()
-				same, err := sameOpenFile(in, f)
+				same, err := sameSource(in, inPath, outFlag)
 				if err != nil {
 					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
 					return exitCode(1)
@@ -490,21 +481,28 @@ func newExportCmd() *cobra.Command {
 					fmt.Fprintln(os.Stderr, "mcpsnoop export: input and output refer to the same file")
 					return exitCode(1)
 				}
-				if err := f.Truncate(0); err != nil {
+				target, err = openExportTarget(outFlag)
+				if err != nil {
 					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
 					return exitCode(1)
 				}
-				out = f
+				defer target.abort()
+				out = target
 			}
 
 			opts := exporter.Options{
 				Format:    format,
 				Redaction: redactConfig(redactSecrets, redactKeys, redactValues, redactPaths),
 			}
-			err = exporter.Export(in, source, out, opts)
-			if err != nil {
+			if err := exporter.Export(in, source, out, opts); err != nil {
 				fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
 				return exitCode(1)
+			}
+			if target != nil {
+				if err := target.commit(); err != nil {
+					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
+					return exitCode(1)
+				}
 			}
 			return nil
 		},
@@ -519,20 +517,105 @@ func newExportCmd() *cobra.Command {
 	return cmd
 }
 
-func sameOpenFile(input io.Reader, output *os.File) (bool, error) {
-	inputFile, ok := input.(*os.File)
-	if !ok {
+// sameSource reports whether the export would write over the file it is reading.
+// Both sides are compared by stat, so two spellings of one path, a symlink and a
+// hard link all reach the same answer, and a stdin the shell redirected from a
+// real file is caught as well as a path given on the command line.
+//
+// A stdin arriving down a pipe cannot be traced back to a file, so this returns
+// false there and the answer for that case is elsewhere. The export is written
+// to a temporary file and renamed into place, which means the source is read in
+// full before the destination is touched, rather than being truncated out from
+// under the process still reading it.
+func sameSource(in io.Reader, inPath, outPath string) (bool, error) {
+	var (
+		inputInfo os.FileInfo
+		err       error
+	)
+	switch file, ok := in.(*os.File); {
+	case inPath != "":
+		inputInfo, err = os.Stat(inPath)
+	case ok:
+		inputInfo, err = file.Stat()
+	default:
 		return false, nil
 	}
-	inputInfo, err := inputFile.Stat()
 	if err != nil {
 		return false, err
 	}
-	outputInfo, err := output.Stat()
+	outputInfo, err := os.Stat(outPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
 		return false, err
 	}
 	return os.SameFile(inputInfo, outputInfo), nil
+}
+
+// exportTarget is where an export is written. A regular file, or a path that
+// does not exist yet, is written through a temporary file beside it and renamed
+// into place once the whole export succeeded. That is what keeps a failed or
+// interrupted run from replacing a previous export with a stub, and it is the
+// only protection left when the source arrives down a pipe, since the same-file
+// check cannot see which file is behind stdin.
+//
+// Anything else, a device, a fifo, or the /dev/fd descriptor a shell builds for
+// `-o >(cmd)` and for `-o /dev/stdout` in a pipeline, is written straight
+// through. Those cannot be renamed over, and they cannot be truncated either,
+// which is what made an explicit Truncate refuse them with EINVAL where the
+// O_TRUNC it replaced had simply been ignored.
+type exportTarget struct {
+	file *os.File
+	temp string
+	dest string
+}
+
+func openExportTarget(path string) (*exportTarget, error) {
+	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
+		file, err := os.OpenFile(path, os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		return &exportTarget{file: file}, nil
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	// Created in the destination's own directory so the rename stays on one
+	// filesystem, and named with a leading dot so a half-written export does not
+	// look like a finished one to whatever is watching the directory.
+	file, err := os.CreateTemp(dir, ".mcpsnoop-export-*")
+	if err != nil {
+		return nil, err
+	}
+	return &exportTarget{file: file, temp: file.Name(), dest: path}, nil
+}
+
+func (t *exportTarget) Write(p []byte) (int, error) { return t.file.Write(p) }
+
+func (t *exportTarget) commit() error {
+	if err := t.file.Close(); err != nil {
+		return err
+	}
+	if t.temp == "" {
+		return nil
+	}
+	if err := os.Rename(t.temp, t.dest); err != nil {
+		return err
+	}
+	t.temp = ""
+	return nil
+}
+
+// abort is deferred unconditionally and does nothing once commit has run, so
+// every path out of the command cleans up after itself.
+func (t *exportTarget) abort() {
+	_ = t.file.Close()
+	if t.temp != "" {
+		_ = os.Remove(t.temp)
+	}
 }
 
 // runShim runs the transparent stdio proxy. It writes the durable session log

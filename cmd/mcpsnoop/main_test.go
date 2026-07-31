@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -845,5 +846,134 @@ func assertRawTokenRedacted(t *testing.T, raw json.RawMessage) {
 	}
 	if params["keep"] != "visible" {
 		t.Fatalf("keep = %v, want visible", params["keep"])
+	}
+}
+
+// TestExportWritesToANonRegularOutput. Dropping O_TRUNC from the open so the
+// same-file check could run first turned an ignored flag into an explicit
+// ftruncate, and ftruncate refuses a pipe with EINVAL. That broke every shape a
+// shell builds a descriptor for, `-o /dev/stdout` inside a pipeline and
+// `-o >(cmd)` most of all, which worked on the commit before.
+func TestExportWritesToANonRegularOutput(t *testing.T) {
+	input, original := writeUnredactedSession(t)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	read := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		read <- b
+	}()
+
+	path := fmt.Sprintf("/dev/fd/%d", w.Fd())
+	code := execute([]string{"export", input, "--output", path})
+	_ = w.Close()
+	if code != 0 {
+		t.Fatalf("export to %s exit = %d, want 0", path, code)
+	}
+	if got := <-read; !json.Valid(got) {
+		t.Fatalf("export to a pipe wrote %d bytes and they are not the export:\n%s", len(got), got)
+	}
+	assertFileUnchanged(t, input, original)
+}
+
+// TestExportLeavesTheTargetAloneWhenItFails. The export is renamed into place
+// once it succeeds, so a run that dies partway leaves the previous file whole
+// rather than the stub an up-front truncate would have left.
+func TestExportLeavesTheTargetAloneWhenItFails(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "previous.json")
+	const previous = `{"kept":true}`
+	if err := os.WriteFile(output, []byte(previous), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(t.TempDir(), "broken.jsonl")
+	if err := os.WriteFile(broken, []byte("{not json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := execute([]string{"export", broken, "--output", output}); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != previous {
+		t.Fatalf("a failed export replaced the previous one: %q", got)
+	}
+	entries, err := os.ReadDir(filepath.Dir(output))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("a failed export left its temporary file behind: %v", entries)
+	}
+}
+
+// TestExportFromAPipeDoesNotZeroTheSource. The same-file check cannot see which
+// file is behind a pipe, so `cat log | mcpsnoop export - -o log` used to
+// truncate the log while cat was still reading it, leaving nothing at all and
+// blaming the input for being corrupt. Writing through a temporary file means
+// the source is read in full first.
+func TestExportFromAPipeDoesNotZeroTheSource(t *testing.T) {
+	// Bigger than a pipe buffer on purpose. Below that the writer finishes before
+	// the destination is touched and the bug hides, which is why a small fixture
+	// makes this test pass against the very code it is meant to catch.
+	input := filepath.Join(t.TempDir(), "big.jsonl")
+	var source []byte
+	for seq := 1; len(source) < 512*1024; seq++ {
+		line, err := json.Marshal(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "server", Seq: uint64(seq),
+			TS: time.Unix(1, 0), Direction: proxy.ClientToServer, Transport: proxy.TransportStdio,
+			Raw: json.RawMessage(fmt.Sprintf(
+				`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"lookup","arguments":{"pad":%q}}}`,
+				seq, strings.Repeat("x", 512))),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		source = append(append(source, line...), '\n')
+	}
+	if err := os.WriteFile(input, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Streamed off disk rather than out of memory, because that is what `cat log |`
+	// does and it is the whole mechanism. A writer holding its own copy never
+	// notices the file being truncated underneath it, so it would pass against the
+	// very code this test exists to catch.
+	streaming, err := os.Open(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer streaming.Close()
+	go func() {
+		defer w.Close()
+		_, _ = io.Copy(w, streaming)
+	}()
+
+	cmd := newExportCmd()
+	cmd.SetIn(r)
+	cmd.SetArgs([]string{"-", "--output", input})
+	cmd.SilenceErrors = true
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("export = %v, want success", err)
+	}
+	got, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("the source was zeroed out from under the reader")
+	}
+	if !json.Valid(got) {
+		t.Fatalf("the source holds neither its own contents nor a complete export:\n%s", got)
 	}
 }
