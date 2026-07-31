@@ -3,8 +3,10 @@ package proxy
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRedactorScrubsSecretsInServerArgv(t *testing.T) {
@@ -576,4 +578,96 @@ func TestRedactScrubsANumericMirrorSpelledDifferently(t *testing.T) {
 func quoteJSONString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// TestRedactScrubsAMirrorNestedUnderARemovedObject. A binding may sit on a
+// nested property, and a rule that removes the whole object removes every scalar
+// under it, so recording only the top value left the header mirroring an inner
+// one still holding the secret.
+func TestRedactScrubsAMirrorNestedUnderARemovedObject(t *testing.T) {
+	path, err := ParseRedactPath("$.params.arguments.credentials")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  RedactConfig
+	}{
+		{"key rule", RedactConfig{Keys: []string{"credentials"}}},
+		{"path rule", RedactConfig{Paths: []RedactPath{path}}},
+		{"secrets preset", RedactConfig{CommonSecrets: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &captureSink{}
+			NewRedactingSink(sink, tc.cfg).Emit(Envelope{
+				Direction: ClientToServer,
+				Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+					`{"name":"fetch","arguments":{"credentials":{"token":"sk-live-nested"}}}}`),
+				MCPParamHeaders: []MCPParamHeader{{Name: "Mcp-Param-Tok", Value: "sk-live-nested"}},
+			})
+			got := sink.byDir(ClientToServer)[0]
+			if strings.Contains(string(got.Raw), "sk-live-nested") {
+				t.Fatalf("the body should be scrubbed: %s", got.Raw)
+			}
+			if v := got.MCPParamHeaders[0].Value; strings.Contains(v, "sk-live-nested") {
+				t.Fatalf("the header mirroring a nested removed value still carries it: %q", v)
+			}
+		})
+	}
+}
+
+// TestRedactValuePatternScrubsTheEncodedMirror. A value pattern is written
+// against the plaintext, so it can never match the Base64 sentinel a header
+// carries the same value in, and the encoded header decoded straight back to the
+// secret the pattern had just removed from the body.
+func TestRedactValuePatternScrubsTheEncodedMirror(t *testing.T) {
+	const secret = "sk-live-аб123"
+	sink := &captureSink{}
+	NewRedactingSink(sink, RedactConfig{ValuePatterns: []string{`sk-live-\S+`}}).Emit(Envelope{
+		Direction: ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+			`{"name":"fetch","arguments":{"authKey":` + quoteJSONString(secret) + `}}}`),
+		MCPParamHeaders: []MCPParamHeader{
+			{Name: "Mcp-Param-Auth", Value: Base64SentinelPrefix +
+				base64.StdEncoding.EncodeToString([]byte(secret)) + Base64SentinelSuffix},
+		},
+	})
+	value := sink.byDir(ClientToServer)[0].MCPParamHeaders[0].Value
+	decoded, ok := DecodeHeaderValue(value)
+	if !ok {
+		t.Fatalf("header value stopped decoding: %q", value)
+	}
+	if strings.Contains(decoded, secret) {
+		t.Fatalf("the encoded header still decodes back to the secret: %q", value)
+	}
+}
+
+// TestRedactRefusesToExpandAnAbsurdMagnitude. RedactEnvelope runs inline on the
+// proxy path, inside the body tap that finishes while the request is still being
+// streamed upstream, so a stall here delays the traffic mcpsnoop is supposed to
+// be merely observing. 1e1000000 is nine bytes on the wire and a million digits
+// once big.Rat has it, and a body packed with them turned 17 KB into 49 seconds.
+func TestRedactRefusesToExpandAnAbsurdMagnitude(t *testing.T) {
+	fields := make([]string, 200)
+	for i := range fields {
+		fields[i] = fmt.Sprintf(`"f%d":1e1000000`, i)
+	}
+	env := Envelope{
+		Direction: ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x",` +
+			`"arguments":{"token":"sk-1",` + strings.Join(fields, ",") + `}}}`),
+		MCPParamHeaders: []MCPParamHeader{{Name: "Mcp-Param-A", Value: "sk-1"}},
+	}
+	r := NewRedactor(RedactConfig{Keys: []string{"token"}})
+
+	done := make(chan Envelope, 1)
+	go func() { done <- r.RedactEnvelope(env) }()
+	select {
+	case got := <-done:
+		if got.MCPParamHeaders[0].Value != redactedValue {
+			t.Fatalf("the mirrored header should still be scrubbed, got %q", got.MCPParamHeaders[0].Value)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RedactEnvelope expanded magnitudes it should have refused outright")
+	}
 }

@@ -43,21 +43,40 @@ type paramHeaderSchema struct {
 	Properties map[string]json.RawMessage `json:"properties"`
 }
 
-// paramHeaderType is the single primitive type a property declares, or "" when
-// it declares none, several, or something that is not a primitive. The spec
-// permits x-mcp-header only on integer, string and boolean, so a union is not a
-// legal place for the annotation, but it is a legal thing to appear elsewhere in
-// the schema and must not poison the walk.
-func paramHeaderType(raw json.RawMessage) string {
+// paramHeaderType is the type a property declares and whether it declares one at
+// all. The two answers are separate because the spec constrains x-mcp-header to
+// "parameters with primitive types" and says nothing about a schema that names
+// no type. An undeclared type is a constraint mcpsnoop cannot evaluate, not a
+// violation to report, so a property whose type is expressed only through enum
+// or const must not be accused of one.
+//
+// A union is read by dropping "null". The spec's own table has a row for a
+// parameter whose value is null, telling the client to omit the header, so a
+// nullable parameter is a legal place for the annotation, and ["string","null"]
+// is what a generated schema spells that as.
+func paramHeaderType(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", false
+	}
 	var single string
 	if json.Unmarshal(raw, &single) == nil {
-		return single
+		return single, true
 	}
 	var union []string
-	if json.Unmarshal(raw, &union) == nil && len(union) == 1 {
-		return union[0]
+	if json.Unmarshal(raw, &union) != nil {
+		return "", false
 	}
-	return ""
+	named := ""
+	for _, member := range union {
+		if member == "null" {
+			continue
+		}
+		if named != "" {
+			return "", false
+		}
+		named = member
+	}
+	return named, named != ""
 }
 
 type paramHeaderBinding struct {
@@ -117,10 +136,14 @@ func mcpParamHeaderWarnings(sess *session, msg proxy.RPCMessage, headers []proxy
 	for _, binding := range bindings {
 		fullName := mcpParamHeaderPrefix + binding.header
 		spellings, present := values[strings.ToLower(fullName)]
-		raw, exists := lookupParamArgument(params.Arguments, binding.path)
+		raw, exists, ancestorScrubbed := lookupParamArgument(params.Arguments, binding.path)
 		path := strings.Join(binding.path, ".")
 		if !exists || string(raw) == "null" {
-			if present {
+			// An ancestor mcpsnoop replaced with the placeholder hides the parameter
+			// from the walk. Reporting that as the client omitting a value invents a
+			// violation out of the user's privacy setting, on a signal that fails a
+			// default check run.
+			if present && !(redacted && ancestorScrubbed) {
 				warnings = append(warnings, "routing header "+fullName+
 					" is present but body parameter "+strconv.Quote(path)+" is absent or null")
 			}
@@ -253,12 +276,18 @@ func collectMCPParamHeaderBindings(properties map[string]json.RawMessage, prefix
 			continue
 		}
 		path := append(slices.Clone(prefix), name)
-		if len(property.Header) != 0 {
-			binding, violation := paramHeaderAnnotation(property, path, seen)
+		// An explicit null is an absent annotation, not an empty one. A serializer
+		// that emits every unset optional field, which Jackson without NON_NULL and
+		// a plain dataclass dump both do, would otherwise take the whole tool down
+		// over a property that carries no annotation at all.
+		if len(property.Header) != 0 && string(property.Header) != "null" {
+			binding, bind, violation := paramHeaderAnnotation(property, path, seen)
 			if violation != "" {
 				return nil, violation
 			}
-			out = append(out, binding)
+			if bind {
+				out = append(out, binding)
+			}
 		}
 		var violation string
 		out, violation = collectMCPParamHeaderBindings(property.Properties, path, seen, out)
@@ -273,30 +302,45 @@ func collectMCPParamHeaderBindings(properties map[string]json.RawMessage, prefix
 // spec puts on it, naming the one it breaks. The name is what turns the report
 // into something a reader can act on, since a single message covering every
 // rejection reason sends them after the wrong rule.
-func paramHeaderAnnotation(property paramHeaderSchema, path []string, seen map[string]struct{}) (paramHeaderBinding, string) {
+//
+// The three returns are binding, whether to bind it, and the violation. A
+// property can be all three ways round: legal and bound, illegal and reported,
+// or legal as far as the spec is concerned while declaring a type mcpsnoop
+// cannot read, which is bound to nothing and reported as nothing.
+func paramHeaderAnnotation(property paramHeaderSchema, path []string, seen map[string]struct{}) (paramHeaderBinding, bool, string) {
 	where := " on property " + strconv.Quote(strings.Join(path, "."))
 	var header string
 	if json.Unmarshal(property.Header, &header) != nil {
-		return paramHeaderBinding{}, "an x-mcp-header" + where + " that is not a string"
+		return paramHeaderBinding{}, false, "an x-mcp-header" + where + " that is not a string"
 	}
 	if header == "" {
-		return paramHeaderBinding{}, "an empty x-mcp-header" + where
+		return paramHeaderBinding{}, false, "an empty x-mcp-header" + where
 	}
 	if !validMCPParamHeaderName(header) {
-		return paramHeaderBinding{}, "x-mcp-header " + strconv.Quote(header) + where +
+		return paramHeaderBinding{}, false, "x-mcp-header " + strconv.Quote(header) + where +
 			", which is not a valid header field name"
 	}
-	typ := paramHeaderType(property.Type)
-	if !isMCPParamPrimitive(typ) {
-		return paramHeaderBinding{}, "x-mcp-header " + strconv.Quote(header) + where +
-			", whose type is not one of string, integer or boolean"
-	}
+	// Recorded before the walk can drop this property for an unjudgeable type, so
+	// a duplicate hiding behind one is still caught. The rule is about the
+	// annotation values in an inputSchema and does not depend on what they sit on.
 	key := strings.ToLower(header)
 	if _, duplicate := seen[key]; duplicate {
-		return paramHeaderBinding{}, "x-mcp-header " + strconv.Quote(header) + " on more than one property"
+		return paramHeaderBinding{}, false, "x-mcp-header " + strconv.Quote(header) + " on more than one property"
 	}
 	seen[key] = struct{}{}
-	return paramHeaderBinding{path: path, header: header, typ: typ}, ""
+	typ, declared := paramHeaderType(property.Type)
+	if declared && !isMCPParamPrimitive(typ) {
+		return paramHeaderBinding{}, false, "x-mcp-header " + strconv.Quote(header) + where +
+			", whose type " + strconv.Quote(typ) + " is not one of string, integer or boolean"
+	}
+	if !declared {
+		// Legal as far as the spec goes, since it constrains the parameter's type
+		// rather than the presence of a type keyword. Without one there is nothing
+		// to compare a header value against, so the binding is dropped in silence,
+		// the same answer an unreadable schema gets.
+		return paramHeaderBinding{}, false, ""
+	}
+	return paramHeaderBinding{path: path, header: header, typ: typ}, true, ""
 }
 
 // isMCPParamPrimitive reports whether a declared type may carry an
@@ -322,22 +366,30 @@ func validMCPParamHeaderName(name string) bool {
 	return name != ""
 }
 
-func lookupParamArgument(arguments map[string]json.RawMessage, path []string) (json.RawMessage, bool) {
+// lookupParamArgument walks a binding's property path through the call
+// arguments. scrubbed reports that the walk stopped on mcpsnoop's own
+// placeholder rather than on a value the client left out, which the caller needs
+// because the two look identical from the leaf and only one of them is the
+// client's doing.
+func lookupParamArgument(arguments map[string]json.RawMessage, path []string) (value json.RawMessage, found, scrubbed bool) {
 	if len(path) == 0 {
-		return nil, false
+		return nil, false, false
 	}
 	current, ok := arguments[path[0]]
 	for _, part := range path[1:] {
 		if !ok {
-			return nil, false
+			return nil, false, false
+		}
+		if string(current) == strconv.Quote(redactedMarker) {
+			return nil, false, true
 		}
 		var object map[string]json.RawMessage
 		if json.Unmarshal(current, &object) != nil {
-			return nil, false
+			return nil, false, false
 		}
 		current, ok = object[part]
 	}
-	return current, ok
+	return current, ok, false
 }
 
 // mcpParamPrimitive reads a body argument as the type its binding declares. The
@@ -382,13 +434,7 @@ type mcpInteger struct {
 
 func parseMCPInteger(value string) mcpInteger {
 	value = strings.TrimSpace(value)
-	// Three spellings big.Rat accepts that no conforming client can produce, the
-	// underscore separator, hex-float notation and the fraction form, all NaN under
-	// JavaScript's Number(). Everything else stays permissive on purpose: the spec
-	// tells servers to compare these numerically, so 42.0, 042 and 4.2e1 must keep
-	// matching a body of 42, and refusing them would warn on correct traffic, which
-	// is the worse failure of the two.
-	if strings.ContainsAny(value, "_xX/") {
+	if !decimalMCPNumber(value) {
 		return mcpInteger{}
 	}
 	exact, ok := new(big.Rat).SetString(value)
@@ -405,6 +451,79 @@ func parseMCPInteger(value string) mcpInteger {
 		integer: true,
 		safe:    parsed >= -maxSafeMCPInteger && parsed <= maxSafeMCPInteger,
 	}
+}
+
+// maxMCPNumberDigits bounds how far a spelling is expanded. 2^53-1 is sixteen
+// digits, so this is already far past anything an x-mcp-header integer may hold.
+const maxMCPNumberDigits = 512
+
+// decimalMCPNumber reports whether value is a decimal number worth handing to
+// big.Rat, and is the guard in front of it.
+//
+// It does two jobs. It fixes the grammar to the decimal forms the spec asks for,
+// which keeps hex, octal, binary, underscore separators and big.Rat's fraction
+// form out with one consistent rule rather than a character scan that let 0o52
+// through while refusing 0x2A. Within decimal it stays permissive on purpose,
+// since the spec tells servers to compare numerically, so 42.0, 042, +42 and
+// 4.2e1 all keep matching a body of 42 and none of them warns on correct
+// traffic.
+//
+// And it refuses a magnitude big.Rat would expand into megabytes. 1e1000000 is
+// nine bytes on the wire and a million digits once expanded, and this runs under
+// the store's lock, so the expansion has to be refused rather than survived.
+// Anything refused that way is far outside the safe range, which is the answer
+// the exact parse would have reached anyway.
+func decimalMCPNumber(value string) bool {
+	i := 0
+	if i < len(value) && (value[i] == '+' || value[i] == '-') {
+		i++
+	}
+	integerDigits := countDigits(value, &i)
+	fractionDigits := 0
+	if i < len(value) && value[i] == '.' {
+		i++
+		fractionDigits = countDigits(value, &i)
+	}
+	if integerDigits == 0 && fractionDigits == 0 {
+		return false
+	}
+	exponent := 0
+	if i < len(value) && (value[i] == 'e' || value[i] == 'E') {
+		i++
+		sign := 1
+		if i < len(value) && (value[i] == '+' || value[i] == '-') {
+			if value[i] == '-' {
+				sign = -1
+			}
+			i++
+		}
+		start := i
+		for i < len(value) && value[i] >= '0' && value[i] <= '9' {
+			// Capped as it accumulates, so a thousand-digit exponent cannot overflow.
+			if exponent <= maxMCPNumberDigits {
+				exponent = exponent*10 + int(value[i]-'0')
+			}
+			i++
+		}
+		if i == start {
+			return false
+		}
+		exponent *= sign
+	}
+	if i != len(value) {
+		return false
+	}
+	return integerDigits+fractionDigits <= maxMCPNumberDigits &&
+		integerDigits+exponent <= maxMCPNumberDigits &&
+		exponent >= -maxMCPNumberDigits
+}
+
+func countDigits(value string, i *int) int {
+	start := *i
+	for *i < len(value) && value[*i] >= '0' && value[*i] <= '9' {
+		*i++
+	}
+	return *i - start
 }
 
 func mcpParamString(value any) string {
