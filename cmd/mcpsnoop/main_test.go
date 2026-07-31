@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +21,7 @@ import (
 	hubpkg "github.com/kerlenton/mcpsnoop/internal/hub"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/store"
 )
 
 func TestLabelFor(t *testing.T) {
@@ -316,6 +319,209 @@ func TestRedactKeysFlagConfigEnablesCommonSecretsPreset(t *testing.T) {
 	}
 	if got, want := cfg.Keys, []string{"custom_secret"}; !slices.Equal(got, want) {
 		t.Fatalf("keys = %v, want %v", got, want)
+	}
+}
+
+func TestExportRedactsCapturedSessionWithoutModifyingInput(t *testing.T) {
+	input, original := writeUnredactedSession(t)
+	output := filepath.Join(t.TempDir(), "session.json")
+	if err := os.WriteFile(output, bytes.Repeat([]byte("stale"), 2048), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"export", input, "--format", "json"}
+	args = append(args, capturedSessionRedactionFlags()...)
+	args = append(args, "--output", output)
+
+	if code := execute(args); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(got) {
+		t.Fatalf("export did not replace the existing output cleanly:\n%s", got)
+	}
+	assertCapturedSessionRedacted(t, got)
+	assertFileUnchanged(t, input, original)
+}
+
+func TestExportRejectsSourceAsOutputWithoutModifyingInput(t *testing.T) {
+	t.Run("path", func(t *testing.T) {
+		input, original := writeUnredactedSession(t)
+		if code := execute([]string{"export", input, "--redact-secrets", "--output", input}); code != 1 {
+			t.Fatalf("exit = %d, want 1", code)
+		}
+		assertFileUnchanged(t, input, original)
+	})
+
+	t.Run("hard link", func(t *testing.T) {
+		input, original := writeUnredactedSession(t)
+		output := filepath.Join(t.TempDir(), "same-session.jsonl")
+		if err := os.Link(input, output); err != nil {
+			t.Skipf("hard links unavailable: %v", err)
+		}
+		if code := execute([]string{"export", input, "--redact-secrets", "--output", output}); code != 1 {
+			t.Fatalf("exit = %d, want 1", code)
+		}
+		assertFileUnchanged(t, input, original)
+	})
+
+	t.Run("stdin file", func(t *testing.T) {
+		input, original := writeUnredactedSession(t)
+		in, err := os.Open(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer in.Close()
+
+		cmd := newExportCmd()
+		cmd.SetIn(in)
+		cmd.SetArgs([]string{"-", "--redact-secrets", "--output", input})
+		cmd.SilenceErrors = true
+		err = cmd.Execute()
+		var code exitCode
+		if !errors.As(err, &code) || code != 1 {
+			t.Fatalf("error = %v, want exit status 1", err)
+		}
+		assertFileUnchanged(t, input, original)
+	})
+}
+
+func TestOpenRedactsCapturedSessionInMemoryWithoutModifyingInput(t *testing.T) {
+	input, original := writeUnredactedSession(t)
+	var opened *store.Store
+	previous := runOpenTUIFn
+	runOpenTUIFn = func(_ context.Context, st *store.Store) error {
+		opened = st
+		return nil
+	}
+	defer func() { runOpenTUIFn = previous }()
+
+	args := []string{"open", input}
+	args = append(args, capturedSessionRedactionFlags()...)
+	if code := execute(args); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if opened == nil {
+		t.Fatal("open did not pass a store to the TUI")
+	}
+	events := opened.Timeline("s1")
+	if len(events) != 1 {
+		t.Fatalf("timeline has %d events, want 1", len(events))
+	}
+	assertCapturedSessionRedacted(t, events[0].Raw)
+	assertFileUnchanged(t, input, original)
+}
+
+func TestCapturedSessionReadDefaultsRemainUnredacted(t *testing.T) {
+	input, original := writeUnredactedSession(t)
+	output := filepath.Join(t.TempDir(), "session.json")
+	if code := execute([]string{"export", input, "--format", "json", "--output", output}); code != 0 {
+		t.Fatalf("export exit = %d, want 0", code)
+	}
+	exported, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"common-secret", "key-secret", "value-only-789", "path-secret"} {
+		if !bytes.Contains(exported, []byte(secret)) {
+			t.Fatalf("default export omitted %q:\n%s", secret, exported)
+		}
+	}
+
+	var opened *store.Store
+	previous := runOpenTUIFn
+	runOpenTUIFn = func(_ context.Context, st *store.Store) error {
+		opened = st
+		return nil
+	}
+	defer func() { runOpenTUIFn = previous }()
+	if code := execute([]string{"open", input}); code != 0 {
+		t.Fatalf("open exit = %d, want 0", code)
+	}
+	if opened == nil {
+		t.Fatal("open did not pass a store to the TUI")
+	}
+	events := opened.Timeline("s1")
+	if len(events) != 1 {
+		t.Fatalf("timeline has %d events, want 1", len(events))
+	}
+	for _, secret := range []string{"common-secret", "key-secret", "value-only-789", "path-secret"} {
+		if !bytes.Contains(events[0].Raw, []byte(secret)) {
+			t.Fatalf("default open omitted %q:\n%s", secret, events[0].Raw)
+		}
+	}
+	assertFileUnchanged(t, input, original)
+}
+
+func TestCapturedSessionCommandsExposeRedactionFlags(t *testing.T) {
+	exportCmd, openCmd := newExportCmd(), newOpenCmd()
+	for _, flag := range []string{"redact-secrets", "redact-key", "redact-value", "redact-path"} {
+		if exportCmd.Flags().Lookup(flag) == nil {
+			t.Errorf("export command is missing --%s", flag)
+		}
+		if openCmd.Flags().Lookup(flag) == nil {
+			t.Errorf("open command is missing --%s", flag)
+		}
+	}
+}
+
+func writeUnredactedSession(t *testing.T) (string, []byte) {
+	t.Helper()
+	input := filepath.Join(t.TempDir(), "session.jsonl")
+	env := proxy.Envelope{
+		SessionID:   "s1",
+		ServerLabel: "server",
+		Seq:         1,
+		TS:          time.Unix(1, 0),
+		Direction:   proxy.ClientToServer,
+		Transport:   proxy.TransportStdio,
+		Raw:         json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lookup","arguments":{"authorization":"common-secret","project_token":"key-secret","note":"value-only-789","nested":{"private":"path-secret"},"keep":"visible"}}}`),
+	}
+	line, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := append(line, '\n')
+	if err := os.WriteFile(input, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return input, original
+}
+
+func capturedSessionRedactionFlags() []string {
+	return []string{
+		"--redact-secrets",
+		"--redact-key", "project_token",
+		"--redact-value", `value-only-[0-9]+`,
+		"--redact-path", "$.params.arguments.nested.private",
+	}
+}
+
+func assertCapturedSessionRedacted(t *testing.T, got []byte) {
+	t.Helper()
+	for _, secret := range []string{"common-secret", "key-secret", "value-only-789", "path-secret"} {
+		if bytes.Contains(got, []byte(secret)) {
+			t.Errorf("redacted view still contains %q:\n%s", secret, got)
+		}
+	}
+	if !bytes.Contains(got, []byte("[REDACTED]")) {
+		t.Errorf("redacted view does not contain the redaction marker:\n%s", got)
+	}
+	if !bytes.Contains(got, []byte("visible")) {
+		t.Errorf("redacted view omitted the safe value:\n%s", got)
+	}
+}
+
+func assertFileUnchanged(t *testing.T, path string, want []byte) {
+	t.Helper()
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, want) {
+		t.Fatal("read command modified the captured session")
 	}
 }
 
@@ -640,5 +846,134 @@ func assertRawTokenRedacted(t *testing.T, raw json.RawMessage) {
 	}
 	if params["keep"] != "visible" {
 		t.Fatalf("keep = %v, want visible", params["keep"])
+	}
+}
+
+// TestExportWritesToANonRegularOutput. Dropping O_TRUNC from the open so the
+// same-file check could run first turned an ignored flag into an explicit
+// ftruncate, and ftruncate refuses a pipe with EINVAL. That broke every shape a
+// shell builds a descriptor for, `-o /dev/stdout` inside a pipeline and
+// `-o >(cmd)` most of all, which worked on the commit before.
+func TestExportWritesToANonRegularOutput(t *testing.T) {
+	input, original := writeUnredactedSession(t)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	read := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		read <- b
+	}()
+
+	path := fmt.Sprintf("/dev/fd/%d", w.Fd())
+	code := execute([]string{"export", input, "--output", path})
+	_ = w.Close()
+	if code != 0 {
+		t.Fatalf("export to %s exit = %d, want 0", path, code)
+	}
+	if got := <-read; !json.Valid(got) {
+		t.Fatalf("export to a pipe wrote %d bytes and they are not the export:\n%s", len(got), got)
+	}
+	assertFileUnchanged(t, input, original)
+}
+
+// TestExportLeavesTheTargetAloneWhenItFails. The export is renamed into place
+// once it succeeds, so a run that dies partway leaves the previous file whole
+// rather than the stub an up-front truncate would have left.
+func TestExportLeavesTheTargetAloneWhenItFails(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "previous.json")
+	const previous = `{"kept":true}`
+	if err := os.WriteFile(output, []byte(previous), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(t.TempDir(), "broken.jsonl")
+	if err := os.WriteFile(broken, []byte("{not json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := execute([]string{"export", broken, "--output", output}); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != previous {
+		t.Fatalf("a failed export replaced the previous one: %q", got)
+	}
+	entries, err := os.ReadDir(filepath.Dir(output))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("a failed export left its temporary file behind: %v", entries)
+	}
+}
+
+// TestExportFromAPipeDoesNotZeroTheSource. The same-file check cannot see which
+// file is behind a pipe, so `cat log | mcpsnoop export - -o log` used to
+// truncate the log while cat was still reading it, leaving nothing at all and
+// blaming the input for being corrupt. Writing through a temporary file means
+// the source is read in full first.
+func TestExportFromAPipeDoesNotZeroTheSource(t *testing.T) {
+	// Bigger than a pipe buffer on purpose. Below that the writer finishes before
+	// the destination is touched and the bug hides, which is why a small fixture
+	// makes this test pass against the very code it is meant to catch.
+	input := filepath.Join(t.TempDir(), "big.jsonl")
+	var source []byte
+	for seq := 1; len(source) < 512*1024; seq++ {
+		line, err := json.Marshal(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "server", Seq: uint64(seq),
+			TS: time.Unix(1, 0), Direction: proxy.ClientToServer, Transport: proxy.TransportStdio,
+			Raw: json.RawMessage(fmt.Sprintf(
+				`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"lookup","arguments":{"pad":%q}}}`,
+				seq, strings.Repeat("x", 512))),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		source = append(append(source, line...), '\n')
+	}
+	if err := os.WriteFile(input, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Streamed off disk rather than out of memory, because that is what `cat log |`
+	// does and it is the whole mechanism. A writer holding its own copy never
+	// notices the file being truncated underneath it, so it would pass against the
+	// very code this test exists to catch.
+	streaming, err := os.Open(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer streaming.Close()
+	go func() {
+		defer w.Close()
+		_, _ = io.Copy(w, streaming)
+	}()
+
+	cmd := newExportCmd()
+	cmd.SetIn(r)
+	cmd.SetArgs([]string{"-", "--output", input})
+	cmd.SilenceErrors = true
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("export = %v, want success", err)
+	}
+	got, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("the source was zeroed out from under the reader")
+	}
+	if !json.Valid(got) {
+		t.Fatalf("the source holds neither its own contents nor a complete export:\n%s", got)
 	}
 }

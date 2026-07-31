@@ -198,15 +198,16 @@ func redactConfig(commonSecrets bool, keys redactKeysFlag, values redactValuesFl
 
 func main() { os.Exit(execute(os.Args[1:])) }
 
-// runShimFn, runHubFn and runHTTPFn are indirected so tests can check how a
-// command routes without spawning a server, launching the TUI, or binding a
-// port. The http seam matters most: without it a test that reaches RunHTTP
-// binds the real --listen address and blocks until the package timeout, which
-// fails the whole package rather than the one test.
+// Runner functions are indirected so tests can check routing and loaded state
+// without spawning a server, launching the TUI, or binding a port. The HTTP
+// seam matters most: without it a test that reaches RunHTTP binds the real
+// --listen address and blocks until the package timeout, which fails the whole
+// package rather than the one test.
 var (
-	runShimFn = runShim
-	runHubFn  = runHub
-	runHTTPFn = proxy.RunHTTP
+	runShimFn    = runShim
+	runHubFn     = runHub
+	runHTTPFn    = proxy.RunHTTP
+	runOpenTUIFn = tui.RunOpen
 )
 
 // exitCode carries a command's process exit code out through cobra's error
@@ -416,7 +417,13 @@ func sessionNonce() string {
 
 // newExportCmd reads a persisted JSONL session and writes a portable export.
 func newExportCmd() *cobra.Command {
-	var formatFlag, outFlag string
+	var (
+		formatFlag, outFlag string
+		redactSecrets       bool
+		redactKeys          redactKeysFlag
+		redactValues        redactValuesFlag
+		redactPaths         redactPathsFlag
+	)
 	cmd := &cobra.Command{
 		Use:   "export [session-id|log.jsonl|-]",
 		Short: "Render a captured session to json, html, text, har, or otlp",
@@ -444,29 +451,58 @@ func newExportCmd() *cobra.Command {
 				}
 			}
 
-			out := os.Stdout
-			if outFlag != "-" {
-				if err := os.MkdirAll(filepath.Dir(outFlag), 0o700); err != nil {
-					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
-					return exitCode(1)
-				}
-				f, err := os.OpenFile(outFlag, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+			var (
+				in     io.Reader
+				source string
+			)
+			if stdin {
+				in = cmd.InOrStdin()
+				source = "stdin"
+			} else {
+				f, err := os.Open(inPath)
 				if err != nil {
 					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
 					return exitCode(1)
 				}
 				defer f.Close()
-				out = f
+				in = f
+				source = inPath
 			}
 
-			if stdin {
-				err = exporter.Export(cmd.InOrStdin(), "stdin", out, exporter.Options{Format: format})
-			} else {
-				err = exporter.ExportFile(inPath, out, exporter.Options{Format: format})
+			var out io.Writer = os.Stdout
+			var target *exportTarget
+			if outFlag != "-" {
+				same, err := sameSource(in, inPath, outFlag)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
+					return exitCode(1)
+				}
+				if same {
+					fmt.Fprintln(os.Stderr, "mcpsnoop export: input and output refer to the same file")
+					return exitCode(1)
+				}
+				target, err = openExportTarget(outFlag)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
+					return exitCode(1)
+				}
+				defer target.abort()
+				out = target
 			}
-			if err != nil {
+
+			opts := exporter.Options{
+				Format:    format,
+				Redaction: redactConfig(redactSecrets, redactKeys, redactValues, redactPaths),
+			}
+			if err := exporter.Export(in, source, out, opts); err != nil {
 				fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
 				return exitCode(1)
+			}
+			if target != nil {
+				if err := target.commit(); err != nil {
+					fmt.Fprintln(os.Stderr, "mcpsnoop export:", err)
+					return exitCode(1)
+				}
 			}
 			return nil
 		},
@@ -474,7 +510,112 @@ func newExportCmd() *cobra.Command {
 	cmd.Flags().SortFlags = false
 	cmd.Flags().StringVarP(&formatFlag, "format", "T", "json", "output format, one of json, html, text, har, otlp")
 	cmd.Flags().StringVarP(&outFlag, "output", "o", "-", "output path, or - for stdout")
+	cmd.Flags().BoolVar(&redactSecrets, "redact-secrets", false, "scrub common secret JSON keys in captured JSON-RPC payloads")
+	cmd.Flags().Var(&redactKeys, "redact-key", "JSON key name to scrub in captured JSON-RPC payloads, repeat or comma-separated")
+	cmd.Flags().Var(&redactValues, "redact-value", "regular expression to scrub inside captured JSON-RPC string values, stderr, and non-JSON text, repeatable")
+	cmd.Flags().Var(&redactPaths, "redact-path", "JSONPath selecting values in captured JSON-RPC payloads to scrub, repeatable")
 	return cmd
+}
+
+// sameSource reports whether the export would write over the file it is reading.
+// Both sides are compared by stat, so two spellings of one path, a symlink and a
+// hard link all reach the same answer, and a stdin the shell redirected from a
+// real file is caught as well as a path given on the command line.
+//
+// A stdin arriving down a pipe cannot be traced back to a file, so this returns
+// false there and the answer for that case is elsewhere. The export is written
+// to a temporary file and renamed into place, which means the source is read in
+// full before the destination is touched, rather than being truncated out from
+// under the process still reading it.
+func sameSource(in io.Reader, inPath, outPath string) (bool, error) {
+	var (
+		inputInfo os.FileInfo
+		err       error
+	)
+	switch file, ok := in.(*os.File); {
+	case inPath != "":
+		inputInfo, err = os.Stat(inPath)
+	case ok:
+		inputInfo, err = file.Stat()
+	default:
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	outputInfo, err := os.Stat(outPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return os.SameFile(inputInfo, outputInfo), nil
+}
+
+// exportTarget is where an export is written. A regular file, or a path that
+// does not exist yet, is written through a temporary file beside it and renamed
+// into place once the whole export succeeded. That is what keeps a failed or
+// interrupted run from replacing a previous export with a stub, and it is the
+// only protection left when the source arrives down a pipe, since the same-file
+// check cannot see which file is behind stdin.
+//
+// Anything else, a device, a fifo, or the /dev/fd descriptor a shell builds for
+// `-o >(cmd)` and for `-o /dev/stdout` in a pipeline, is written straight
+// through. Those cannot be renamed over, and they cannot be truncated either,
+// which is what made an explicit Truncate refuse them with EINVAL where the
+// O_TRUNC it replaced had simply been ignored.
+type exportTarget struct {
+	file *os.File
+	temp string
+	dest string
+}
+
+func openExportTarget(path string) (*exportTarget, error) {
+	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
+		file, err := os.OpenFile(path, os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		return &exportTarget{file: file}, nil
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	// Created in the destination's own directory so the rename stays on one
+	// filesystem, and named with a leading dot so a half-written export does not
+	// look like a finished one to whatever is watching the directory.
+	file, err := os.CreateTemp(dir, ".mcpsnoop-export-*")
+	if err != nil {
+		return nil, err
+	}
+	return &exportTarget{file: file, temp: file.Name(), dest: path}, nil
+}
+
+func (t *exportTarget) Write(p []byte) (int, error) { return t.file.Write(p) }
+
+func (t *exportTarget) commit() error {
+	if err := t.file.Close(); err != nil {
+		return err
+	}
+	if t.temp == "" {
+		return nil
+	}
+	if err := os.Rename(t.temp, t.dest); err != nil {
+		return err
+	}
+	t.temp = ""
+	return nil
+}
+
+// abort is deferred unconditionally and does nothing once commit has run, so
+// every path out of the command cleans up after itself.
+func (t *exportTarget) abort() {
+	_ = t.file.Close()
+	if t.temp != "" {
+		_ = os.Remove(t.temp)
+	}
 }
 
 // runShim runs the transparent stdio proxy. It writes the durable session log
@@ -647,7 +788,13 @@ func runHub(historyLimit int) int {
 
 // newOpenCmd opens a persisted JSONL session directly in the TUI.
 func newOpenCmd() *cobra.Command {
-	return &cobra.Command{
+	var (
+		redactSecrets bool
+		redactKeys    redactKeysFlag
+		redactValues  redactValuesFlag
+		redactPaths   redactPathsFlag
+	)
+	cmd := &cobra.Command{
 		Use:   "open [session-id|session.jsonl|-]",
 		Short: "Open a captured session in the TUI, or - to read from stdin",
 		Long:  "Open a captured session in the TUI. With no session, the newest session log is opened. Use - to read from stdin.",
@@ -657,13 +804,19 @@ func newOpenCmd() *cobra.Command {
 			if len(args) == 1 {
 				arg = args[0]
 			}
-			return codeOf(runOpen(arg))
+			return codeOf(runOpen(arg, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths)))
 		},
 	}
+	cmd.Flags().SortFlags = false
+	cmd.Flags().BoolVar(&redactSecrets, "redact-secrets", false, "scrub common secret JSON keys in captured JSON-RPC payloads")
+	cmd.Flags().Var(&redactKeys, "redact-key", "JSON key name to scrub in captured JSON-RPC payloads, repeat or comma-separated")
+	cmd.Flags().Var(&redactValues, "redact-value", "regular expression to scrub inside captured JSON-RPC string values, stderr, and non-JSON text, repeatable")
+	cmd.Flags().Var(&redactPaths, "redact-path", "JSONPath selecting values in captured JSON-RPC payloads to scrub, repeatable")
+	return cmd
 }
 
 // runOpen loads a session (id, path, or - for stdin) and shows it in the TUI.
-func runOpen(arg string) int {
+func runOpen(arg string, redaction proxy.RedactConfig) int {
 	inPath, usedStdin, err := resolveOpenSessionPath(arg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
@@ -683,10 +836,8 @@ func runOpen(arg string) int {
 		r = f
 	}
 
-	st := store.New()
-	if err := proxy.Decode(r, func(e proxy.Envelope) {
-		st.Ingest(e)
-	}); err != nil {
+	st, err := loadOpenStore(r, redaction)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
 		return 1
 	}
@@ -705,13 +856,24 @@ func runOpen(arg string) int {
 			return 1
 		}
 	} else {
-		if err := tui.RunOpen(ctx, st); err != nil {
+		if err := runOpenTUIFn(ctx, st); err != nil {
 			fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
 			return 1
 		}
 	}
 
 	return 0
+}
+
+func loadOpenStore(r io.Reader, redaction proxy.RedactConfig) (*store.Store, error) {
+	st := store.New()
+	redactor := proxy.NewRedactor(redaction)
+	if err := proxy.Decode(r, func(e proxy.Envelope) {
+		st.Ingest(redactor.RedactEnvelope(e))
+	}); err != nil {
+		return nil, err
+	}
+	return st, nil
 }
 
 func resolveOpenSessionPath(arg string) (string, bool, error) {
