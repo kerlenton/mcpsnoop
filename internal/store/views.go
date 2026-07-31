@@ -94,9 +94,14 @@ type EventView struct {
 	// Deprecated carries a heads-up when a frame uses a feature deprecated in the
 	// 2026-07-28 MCP release. It is structured like Truncated and never fails check.
 	Deprecated string
-	Call       *CallView // set for request/response events
-	TaskCall   *CallView // originating call for a tasks/* lifecycle frame
-	TaskID     string
+	// CacheHint surfaces ttlMs and cacheScope from a cacheable result (SEP-2549).
+	CacheHint CacheHint
+	// CacheStaleRefetch is set when a client re-fetches inside a declared ttlMs
+	// window. Structured like Deprecated and never fails check.
+	CacheStaleRefetch string
+	Call              *CallView // set for request/response events
+	TaskCall          *CallView // originating call for a tasks/* lifecycle frame
+	TaskID            string
 	// MRTRRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised (SEP-2322). Empty on an ordinary request.
 	MRTRRoot string
@@ -365,6 +370,8 @@ func (e *event) view(_ *session) EventView {
 		RoutingMismatch:    e.mismatch,
 		Truncated:          e.truncated,
 		Deprecated:         e.deprecated,
+		CacheHint:          e.cacheHint,
+		CacheStaleRefetch:  e.cacheStaleRefetch,
 		TaskID:             e.taskID,
 		MRTRRoot:           e.mrtrRoot,
 		MRTRStateIssue:     e.mrtrStateIssue,

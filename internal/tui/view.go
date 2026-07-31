@@ -738,6 +738,22 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = e.Deprecated + " · " + c.detail
 		}
 	}
+	if e.CacheStaleRefetch != "" {
+		c.status = "warn"
+		if c.detail == "" {
+			c.detail = e.CacheStaleRefetch
+		} else {
+			c.detail = e.CacheStaleRefetch + " · " + c.detail
+		}
+	}
+	if !e.CacheHint.Empty() {
+		msg := formatCacheHint(e.CacheHint)
+		if c.detail == "" {
+			c.detail = msg
+		} else {
+			c.detail = msg + " · " + c.detail
+		}
+	}
 	if e.TaskID != "" {
 		link := "task " + e.TaskID
 		if e.TaskCall != nil {
@@ -875,6 +891,9 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 		return m.styles.warn
 	}
 	if e.Deprecated != "" {
+		return m.styles.warn
+	}
+	if e.CacheStaleRefetch != "" {
 		return m.styles.warn
 	}
 	if e.Call != nil {
@@ -2240,4 +2259,17 @@ func softWrap(s string, width int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// formatCacheHint renders what the server declared, including a ttlMs of 0,
+// which the spec gives the meaning "immediately stale" rather than "unset".
+func formatCacheHint(h store.CacheHint) string {
+	switch {
+	case h.TTLPresent && h.Scope != "":
+		return fmt.Sprintf("cache ttlMs=%d cacheScope=%s", h.TTLMs, h.Scope)
+	case h.TTLPresent:
+		return fmt.Sprintf("cache ttlMs=%d", h.TTLMs)
+	default:
+		return fmt.Sprintf("cache cacheScope=%s", h.Scope)
+	}
 }
