@@ -262,7 +262,12 @@ func TestHTTPProxyForwardsAndCapturesRoutingHeaders(t *testing.T) {
 	}
 }
 
-func TestMCPParamHeadersAreCaseInsensitiveAndSorted(t *testing.T) {
+// TestMCPParamHeadersMatchThePrefixAndSort exercises the prefix match and the
+// ordering on a synthetic map. It is not a statement about the wire: net/http
+// canonicalises every field name before mcpsnoop sees it, so a real request can
+// never produce the uncanonicalised keys below. The test one above sends real
+// bytes and correctly expects the canonical spelling back.
+func TestMCPParamHeadersMatchThePrefixAndSort(t *testing.T) {
 	header := http.Header{
 		"mCp-pArAm-Zone":   {"west"},
 		"MCP-PARAM-Region": {"us", "backup"},

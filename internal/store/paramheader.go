@@ -1,9 +1,7 @@
 package store
 
 import (
-	"encoding/base64"
 	"encoding/json"
-	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -20,6 +18,11 @@ const (
 	// proxy's redaction internals, and a literal that drifts is caught by
 	// TestParamHeaderRedactionMarkerMatchesTheProxy.
 	redactedMarker = "[REDACTED]"
+	// outsideSafeRange names the rule an integer breaks by its magnitude alone.
+	// The spec states the range as its own constraint on an x-mcp-header integer,
+	// separate from being an integer at all, and reporting 2^53 as "not a valid
+	// integer" sends the reader after a type error that is not there.
+	outsideSafeRange = "is outside the safe integer range x-mcp-header requires"
 )
 
 type paramHeaderSchema struct {
@@ -28,9 +31,16 @@ type paramHeaderSchema struct {
 	// string made encoding/json fail the whole tree, and since the caller then
 	// dropped every binding, one union-typed property anywhere in a schema
 	// silently switched off header checking for the entire tool.
-	Type       json.RawMessage              `json:"type"`
-	Header     json.RawMessage              `json:"x-mcp-header"`
-	Properties map[string]paramHeaderSchema `json:"properties"`
+	Type   json.RawMessage `json:"type"`
+	Header json.RawMessage `json:"x-mcp-header"`
+	// Properties holds each subschema raw, and each is decoded on its own, because
+	// a property value need not be an object. JSON Schema 2020-12 allows the
+	// boolean subschemas true and false there, and mcpsnoop's own redaction
+	// replaces a subschema under a key like "token" with a string. Decoding the
+	// map in one go failed the whole tree on either, which took every binding with
+	// it and, once the verdict was reported, accused the server of a violation it
+	// had not committed.
+	Properties map[string]json.RawMessage `json:"properties"`
 }
 
 // paramHeaderType is the single primitive type a property declares, or "" when
@@ -56,6 +66,13 @@ type paramHeaderBinding struct {
 	typ    string
 }
 
+// paramHeaderViolation is one tool whose advertised schema breaks an x-mcp-header
+// constraint, and which one it breaks.
+type paramHeaderViolation struct {
+	tool   string
+	reason string
+}
+
 func sortedMCPParamHeaders(headers []proxy.MCPParamHeader) []proxy.MCPParamHeader {
 	out := slices.Clone(headers)
 	slices.SortStableFunc(out, func(a, b proxy.MCPParamHeader) int {
@@ -67,7 +84,10 @@ func sortedMCPParamHeaders(headers []proxy.MCPParamHeader) []proxy.MCPParamHeade
 	return out
 }
 
-func mcpParamHeaderWarnings(sess *session, msg proxy.RPCMessage, headers []proxy.MCPParamHeader) []string {
+// mcpParamHeaderWarnings compares each bound header against the argument it
+// mirrors. redacted says the frame passed through mcpsnoop's own redaction,
+// which is what makes the placeholder below trustworthy as a placeholder.
+func mcpParamHeaderWarnings(sess *session, msg proxy.RPCMessage, headers []proxy.MCPParamHeader, redacted bool) []string {
 	var params struct {
 		Name      string                     `json:"name"`
 		Arguments map[string]json.RawMessage `json:"arguments"`
@@ -84,18 +104,19 @@ func mcpParamHeaderWarnings(sess *session, msg proxy.RPCMessage, headers []proxy
 		return nil
 	}
 
-	values := make(map[string]string, len(headers))
+	// Every spelling is kept, not just the first. A repeated field with conflicting
+	// values is a request a conforming server must reject, and keeping only the
+	// first made the verdict depend on which line happened to arrive first.
+	values := make(map[string][]string, len(headers))
 	for _, header := range headers {
 		key := strings.ToLower(header.Name)
-		if _, exists := values[key]; !exists {
-			values[key] = header.Value
-		}
+		values[key] = append(values[key], header.Value)
 	}
 
 	var warnings []string
 	for _, binding := range bindings {
 		fullName := mcpParamHeaderPrefix + binding.header
-		headerValue, present := values[strings.ToLower(fullName)]
+		spellings, present := values[strings.ToLower(fullName)]
 		raw, exists := lookupParamArgument(params.Arguments, binding.path)
 		path := strings.Join(binding.path, ".")
 		if !exists || string(raw) == "null" {
@@ -112,43 +133,104 @@ func mcpParamHeaderWarnings(sess *session, msg proxy.RPCMessage, headers []proxy
 		}
 		// Either side scrubbed by mcpsnoop's own redaction makes the pair
 		// unverifiable, not disagreeing. The proxy scrubs the header alongside the
-		// body, but the two are matched by value and a rule can still reach only
-		// one of them, and a capture redacted by an older build has no header copy
-		// at all. Reporting that as a mismatch invents a protocol violation out of
+		// body, but the two are matched by value and a rule can still reach only one
+		// of them. Reporting that as a mismatch invents a protocol violation out of
 		// the user's privacy setting, and it fails a default check run.
-		if headerValue == redactedMarker || string(raw) == strconv.Quote(redactedMarker) {
+		//
+		// Gated on the frame actually having been redacted. "[REDACTED]" is a legal
+		// header value and a legal string argument, so skipping on those bytes alone
+		// let either peer switch the check off by sending them.
+		if redacted && (slices.Contains(spellings, redactedMarker) ||
+			string(raw) == strconv.Quote(redactedMarker)) {
+			continue
+		}
+		if len(spellings) > 1 && !mcpParamHeaderValuesAgree(spellings, binding.typ) {
+			warnings = append(warnings, "routing header "+fullName+
+				" is repeated with conflicting values, so body parameter "+
+				strconv.Quote(path)+" cannot be checked")
 			continue
 		}
 
-		decoded, ok := decodeMCPParamHeaderValue(headerValue)
+		decoded, ok := proxy.DecodeHeaderValue(spellings[0])
 		if !ok {
 			warnings = append(warnings, "routing header "+fullName+" has invalid Base64 encoding")
 			continue
 		}
-		bodyValue, ok := mcpParamPrimitive(raw, binding.typ)
-		if !ok {
+		bodyValue, reason := mcpParamPrimitive(raw, binding.typ)
+		if reason != "" {
 			warnings = append(warnings, "routing header "+fullName+
-				" cannot be compared because body parameter "+strconv.Quote(path)+
-				" is not a valid "+binding.typ)
+				" cannot be compared because body parameter "+strconv.Quote(path)+" "+reason)
 			continue
 		}
-		if !mcpParamValuesEqual(decoded, bodyValue) {
-			warnings = append(warnings, "routing header "+fullName+" "+strconv.Quote(decoded)+
-				" disagrees with body parameter "+strconv.Quote(path)+" "+strconv.Quote(mcpParamString(bodyValue)))
+		if bodyInteger, isInteger := bodyValue.(int64); isInteger {
+			// Compared numerically, as the spec asks, so 42.0 and 42 agree. An integer
+			// too large to be one gets the rule it actually breaks rather than being
+			// reported as merely disagreeing.
+			header := parseMCPInteger(decoded)
+			if header.integer && !header.safe {
+				warnings = append(warnings, "routing header "+fullName+" "+
+					strconv.Quote(decoded)+" "+outsideSafeRange)
+				continue
+			}
+			if header.safe && header.value == bodyInteger {
+				continue
+			}
+		} else if decoded == mcpParamString(bodyValue) {
+			continue
 		}
+		warnings = append(warnings, "routing header "+fullName+" "+strconv.Quote(decoded)+
+			" disagrees with body parameter "+strconv.Quote(path)+" "+strconv.Quote(mcpParamString(bodyValue)))
 	}
 	return warnings
 }
 
-func mcpParamHeaderBindings(schema json.RawMessage) ([]paramHeaderBinding, bool) {
+// mcpParamHeaderValuesAgree reports whether every spelling of one repeated header
+// carries the same value. Decoded first, so the plain and Base64 forms of one
+// value agree, and integers compared numerically, so 42 and 42.0 agree, because
+// neither is a conflict about what the server was asked to do.
+func mcpParamHeaderValuesAgree(spellings []string, typ string) bool {
+	first, ok := proxy.DecodeHeaderValue(spellings[0])
+	if !ok {
+		return false
+	}
+	firstInteger := parseMCPInteger(first)
+	for _, spelling := range spellings[1:] {
+		next, ok := proxy.DecodeHeaderValue(spelling)
+		if !ok {
+			return false
+		}
+		if typ == "integer" && firstInteger.safe {
+			other := parseMCPInteger(next)
+			if !other.safe || other.value != firstInteger.value {
+				return false
+			}
+			continue
+		}
+		if next != first {
+			return false
+		}
+	}
+	return true
+}
+
+// mcpParamHeaderBindings resolves a tool's x-mcp-header annotations. The second
+// return is the violation to report, empty when there is none.
+//
+// A schema that will not decode returns no bindings and no violation. That is an
+// observation limit rather than a server's fault, and the two must not share one
+// answer: the spec makes a violating annotation a definition the client MUST
+// reject, so saying so is right, while saying it about a schema mcpsnoop merely
+// could not read accuses the server of something it did not do, on a signal that
+// fails a default check run.
+func mcpParamHeaderBindings(schema json.RawMessage) ([]paramHeaderBinding, string) {
 	var root paramHeaderSchema
 	if json.Unmarshal(schema, &root) != nil {
-		return nil, false
+		return nil, ""
 	}
 	seen := make(map[string]struct{})
-	bindings, ok := collectMCPParamHeaderBindings(root.Properties, nil, seen, nil)
-	if !ok {
-		return nil, false
+	bindings, violation := collectMCPParamHeaderBindings(root.Properties, nil, seen, nil)
+	if violation != "" {
+		return nil, violation
 	}
 	slices.SortFunc(bindings, func(a, b paramHeaderBinding) int {
 		if n := strings.Compare(strings.ToLower(a.header), strings.ToLower(b.header)); n != 0 {
@@ -156,39 +238,65 @@ func mcpParamHeaderBindings(schema json.RawMessage) ([]paramHeaderBinding, bool)
 		}
 		return strings.Compare(strings.Join(a.path, "."), strings.Join(b.path, "."))
 	})
-	return bindings, true
+	return bindings, ""
 }
 
-func collectMCPParamHeaderBindings(properties map[string]paramHeaderSchema, prefix []string, seen map[string]struct{}, out []paramHeaderBinding) ([]paramHeaderBinding, bool) {
+func collectMCPParamHeaderBindings(properties map[string]json.RawMessage, prefix []string, seen map[string]struct{}, out []paramHeaderBinding) ([]paramHeaderBinding, string) {
 	names := make([]string, 0, len(properties))
 	for name := range properties {
 		names = append(names, name)
 	}
 	slices.Sort(names)
 	for _, name := range names {
-		property := properties[name]
+		var property paramHeaderSchema
+		if json.Unmarshal(properties[name], &property) != nil {
+			continue
+		}
 		path := append(slices.Clone(prefix), name)
 		if len(property.Header) != 0 {
-			var header string
-			if json.Unmarshal(property.Header, &header) != nil || header == "" ||
-				!validMCPParamHeaderName(header) ||
-				!isMCPParamPrimitive(paramHeaderType(property.Type)) {
-				return nil, false
+			binding, violation := paramHeaderAnnotation(property, path, seen)
+			if violation != "" {
+				return nil, violation
 			}
-			key := strings.ToLower(header)
-			if _, duplicate := seen[key]; duplicate {
-				return nil, false
-			}
-			seen[key] = struct{}{}
-			out = append(out, paramHeaderBinding{path: path, header: header, typ: paramHeaderType(property.Type)})
+			out = append(out, binding)
 		}
-		var ok bool
-		out, ok = collectMCPParamHeaderBindings(property.Properties, path, seen, out)
-		if !ok {
-			return nil, false
+		var violation string
+		out, violation = collectMCPParamHeaderBindings(property.Properties, path, seen, out)
+		if violation != "" {
+			return nil, violation
 		}
 	}
-	return out, true
+	return out, ""
+}
+
+// paramHeaderAnnotation validates one x-mcp-header against the constraints the
+// spec puts on it, naming the one it breaks. The name is what turns the report
+// into something a reader can act on, since a single message covering every
+// rejection reason sends them after the wrong rule.
+func paramHeaderAnnotation(property paramHeaderSchema, path []string, seen map[string]struct{}) (paramHeaderBinding, string) {
+	where := " on property " + strconv.Quote(strings.Join(path, "."))
+	var header string
+	if json.Unmarshal(property.Header, &header) != nil {
+		return paramHeaderBinding{}, "an x-mcp-header" + where + " that is not a string"
+	}
+	if header == "" {
+		return paramHeaderBinding{}, "an empty x-mcp-header" + where
+	}
+	if !validMCPParamHeaderName(header) {
+		return paramHeaderBinding{}, "x-mcp-header " + strconv.Quote(header) + where +
+			", which is not a valid header field name"
+	}
+	typ := paramHeaderType(property.Type)
+	if !isMCPParamPrimitive(typ) {
+		return paramHeaderBinding{}, "x-mcp-header " + strconv.Quote(header) + where +
+			", whose type is not one of string, integer or boolean"
+	}
+	key := strings.ToLower(header)
+	if _, duplicate := seen[key]; duplicate {
+		return paramHeaderBinding{}, "x-mcp-header " + strconv.Quote(header) + " on more than one property"
+	}
+	seen[key] = struct{}{}
+	return paramHeaderBinding{path: path, header: header, typ: typ}, ""
 }
 
 // isMCPParamPrimitive reports whether a declared type may carry an
@@ -232,66 +340,71 @@ func lookupParamArgument(arguments map[string]json.RawMessage, path []string) (j
 	return current, ok
 }
 
-func decodeMCPParamHeaderValue(value string) (string, bool) {
-	inner, encoded := strings.CutPrefix(value, base64SentinelPrefix)
-	if !encoded {
-		return value, true
-	}
-	inner, encoded = strings.CutSuffix(inner, base64SentinelSuffix)
-	if !encoded {
-		return value, true
-	}
-	if decoded, err := base64.StdEncoding.DecodeString(inner); err == nil {
-		return string(decoded), true
-	}
-	if decoded, err := base64.RawStdEncoding.DecodeString(inner); err == nil {
-		return string(decoded), true
-	}
-	return "", false
-}
-
-func mcpParamPrimitive(raw json.RawMessage, typ string) (any, bool) {
+// mcpParamPrimitive reads a body argument as the type its binding declares. The
+// second return is why it could not, empty on success, phrased to follow the
+// parameter's name.
+func mcpParamPrimitive(raw json.RawMessage, typ string) (any, string) {
 	switch typ {
 	case "string":
 		var value string
-		return value, json.Unmarshal(raw, &value) == nil
+		if json.Unmarshal(raw, &value) != nil {
+			return nil, "is not a valid string"
+		}
+		return value, ""
 	case "boolean":
 		var value bool
-		return value, json.Unmarshal(raw, &value) == nil
-	case "integer":
-		value, ok := parseSafeMCPInteger(string(raw))
-		if !ok {
-			return nil, false
+		if json.Unmarshal(raw, &value) != nil {
+			return nil, "is not a valid boolean"
 		}
-		return value, true
+		return value, ""
+	case "integer":
+		parsed := parseMCPInteger(string(raw))
+		switch {
+		case !parsed.integer:
+			return nil, "is not a valid integer"
+		case !parsed.safe:
+			return nil, outsideSafeRange
+		}
+		return parsed.value, ""
 	default:
-		return nil, false
+		return nil, "has a type x-mcp-header does not cover"
 	}
 }
 
-func mcpParamValuesEqual(header string, body any) bool {
-	if integer, ok := body.(int64); ok {
-		value, ok := parseSafeMCPInteger(header)
-		return ok && value == integer
-	}
-	return header == mcpParamString(body)
+// mcpInteger is one integer spelling parsed twice over. integer says the value is
+// an integer at all, safe says it also fits the range the spec requires of an
+// x-mcp-header integer. value is meaningful only when safe.
+type mcpInteger struct {
+	value   int64
+	integer bool
+	safe    bool
 }
 
-func parseSafeMCPInteger(value string) (int64, bool) {
+func parseMCPInteger(value string) mcpInteger {
 	value = strings.TrimSpace(value)
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
-		return 0, false
+	// Three spellings big.Rat accepts that no conforming client can produce, the
+	// underscore separator, hex-float notation and the fraction form, all NaN under
+	// JavaScript's Number(). Everything else stays permissive on purpose: the spec
+	// tells servers to compare these numerically, so 42.0, 042 and 4.2e1 must keep
+	// matching a body of 42, and refusing them would warn on correct traffic, which
+	// is the worse failure of the two.
+	if strings.ContainsAny(value, "_xX/") {
+		return mcpInteger{}
 	}
 	exact, ok := new(big.Rat).SetString(value)
-	if !ok || !exact.IsInt() || !exact.Num().IsInt64() {
-		return 0, false
+	if !ok || !exact.IsInt() {
+		return mcpInteger{}
 	}
-	integer := exact.Num().Int64()
-	if integer < -maxSafeMCPInteger || integer > maxSafeMCPInteger {
-		return 0, false
+	number := exact.Num()
+	if !number.IsInt64() {
+		return mcpInteger{integer: true}
 	}
-	return integer, true
+	parsed := number.Int64()
+	return mcpInteger{
+		value:   parsed,
+		integer: true,
+		safe:    parsed >= -maxSafeMCPInteger && parsed <= maxSafeMCPInteger,
+	}
 }
 
 func mcpParamString(value any) string {

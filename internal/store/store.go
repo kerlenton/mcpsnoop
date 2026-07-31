@@ -224,10 +224,11 @@ type session struct {
 	toolDrift    ToolDrift
 	toolDriftSet bool
 	// paramHeaderInvalid names tools whose latest advertised inputSchema carries an
-	// x-mcp-header the spec forbids. applyToolsList runs deep inside completeCall,
-	// which cannot widen its return, so the verdict is parked here and Ingest
-	// drains it onto the tools/list response frame that carried the definitions.
-	paramHeaderInvalid []string
+	// x-mcp-header the spec forbids, and which constraint it breaks. applyToolsList
+	// runs deep inside completeCall, which cannot widen its return, so the verdict
+	// is parked here and Ingest drains it onto the tools/list response frame that
+	// carried the definitions.
+	paramHeaderInvalid []paramHeaderViolation
 
 	command []string
 	cwd     string
@@ -362,10 +363,10 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		}
 		// Drained here rather than returned, because applyToolsList runs inside
 		// completeCall. Each name is reported once, on the frame that advertised it.
-		for _, tool := range sess.paramHeaderInvalid {
+		for _, invalid := range sess.paramHeaderInvalid {
 			ev.warning = appendWarning(ev.warning,
-				"tool "+strconv.Quote(tool)+" advertises an x-mcp-header the specification forbids, "+
-					"so its Mcp-Param headers are not checked")
+				"tool "+strconv.Quote(invalid.tool)+" declares "+invalid.reason+
+					", so its Mcp-Param headers are not checked")
 		}
 		sess.paramHeaderInvalid = nil
 		if c != nil && c.taskID != "" {
@@ -590,7 +591,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	if ev.transport == proxy.TransportHTTP && e.Direction == proxy.ClientToServer &&
 		!ev.batch && msg.Method == "tools/call" && len(msg.ID) > 0 &&
 		requiresRoutingHeaders(requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)) {
-		for _, warning := range mcpParamHeaderWarnings(sess, msg, ev.mcpParamHeaders) {
+		for _, warning := range mcpParamHeaderWarnings(sess, msg, ev.mcpParamHeaders, e.Redacted) {
 			ev.warning = appendWarning(ev.warning, warning)
 			ev.mismatch = true
 		}
@@ -1012,7 +1013,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		sess.advertisedTools = nil
 	}
 
-	var invalidParamHeaderTools []string
+	var invalidParamHeaderTools []paramHeaderViolation
 	for _, rawTool := range r.Tools {
 		var tool struct {
 			Name string `json:"name"`
@@ -1058,9 +1059,15 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		// advertised it and to compare no headers for that tool, which is what a
 		// conforming client would then be doing anyway. Throwing the verdict away
 		// left every one of those constraints computed and never reported.
-		paramHeaders, paramHeadersValid := mcpParamHeaderBindings(schema)
-		if !paramHeadersValid {
-			invalidParamHeaderTools = append(invalidParamHeaderTools, tool.Name)
+		//
+		// Only an actual violation is reported, and it says which constraint. A
+		// schema mcpsnoop could not read is not the server's fault, and reporting the
+		// two the same way turned the user's own --redact-secrets into an accusation
+		// against traffic that was correct.
+		paramHeaders, violation := mcpParamHeaderBindings(schema)
+		if violation != "" {
+			invalidParamHeaderTools = append(invalidParamHeaderTools,
+				paramHeaderViolation{tool: tool.Name, reason: violation})
 		}
 
 		// Measured from the raw bytes, not gated on the decoded string being

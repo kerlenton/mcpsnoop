@@ -21,6 +21,20 @@ func seedParamHeaderTool(s *Store) {
 	listExchange(s, 1, "", toolsListResult("", paramHeaderTool))
 }
 
+// listExchangeView is listExchange keeping the response frame, which is where a
+// verdict about an advertised definition has to land.
+func listExchangeView(s *Store, result string) EventView {
+	now := time.Now()
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`),
+	})
+	return s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":` + result + `}`),
+	})
+}
+
 func paramCall(seq uint64, transport string, batch bool, args string, headers ...proxy.MCPParamHeader) proxy.Envelope {
 	return proxy.Envelope{
 		SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: time.Now(),
@@ -272,9 +286,9 @@ func TestMCPParamHeaderSnapshotsAreIsolated(t *testing.T) {
 // which is what mcpParamHeaderWarnings reads its bindings from.
 func paramSession(t *testing.T, tool, schema string) *session {
 	t.Helper()
-	bindings, ok := mcpParamHeaderBindings(json.RawMessage(schema))
-	if !ok {
-		t.Fatalf("schema %s produced no valid bindings", schema)
+	bindings, violation := mcpParamHeaderBindings(json.RawMessage(schema))
+	if violation != "" {
+		t.Fatalf("schema %s reported %s", schema, violation)
 	}
 	return &session{toolDefinitions: map[string]ToolDefinition{
 		tool: {Name: tool, paramHeaders: bindings},
@@ -332,12 +346,241 @@ func TestParamHeaderRedactionIsNotAMismatch(t *testing.T) {
 			sess := paramSession(t, "fetch", schema)
 			got := mcpParamHeaderWarnings(sess,
 				paramCallMsg("fetch", `{"authKey":`+quoteJSON(tc.body)+`}`),
-				[]proxy.MCPParamHeader{{Name: "Mcp-Param-Auth", Value: tc.header}})
+				[]proxy.MCPParamHeader{{Name: "Mcp-Param-Auth", Value: tc.header}}, true)
 			if len(got) != tc.wantWarnings {
 				t.Fatalf("warnings = %v, want %d", got, tc.wantWarnings)
 			}
 		})
 	}
+}
+
+// TestParamHeaderRedactionGuardNeedsAnActualRedaction. "[REDACTED]" is a legal
+// header value and a legal string argument, so a guard that skips on those bytes
+// alone is a check either peer can switch off by sending them. It is scoped to
+// frames mcpsnoop itself rewrote.
+func TestParamHeaderRedactionGuardNeedsAnActualRedaction(t *testing.T) {
+	const schema = `{"type":"object","properties":{"authKey":{"type":"string","x-mcp-header":"Auth"}}}`
+	for _, tc := range []struct {
+		name         string
+		redacted     bool
+		wantWarnings int
+	}{
+		{"frame was redacted", true, 0},
+		{"frame was not redacted", false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mcpParamHeaderWarnings(paramSession(t, "fetch", schema),
+				paramCallMsg("fetch", `{"authKey":"sk-live-abcdef"}`),
+				[]proxy.MCPParamHeader{{Name: "Mcp-Param-Auth", Value: redactedMarker}}, tc.redacted)
+			if len(got) != tc.wantWarnings {
+				t.Fatalf("warnings = %v, want %d", got, tc.wantWarnings)
+			}
+		})
+	}
+}
+
+// TestParamHeaderRepeatedFieldConflict. HTTP lets a client repeat a field, the
+// spec never blesses it, and a conforming server must reject a request whose
+// header disagrees with the body. Keeping only the first line made the verdict
+// follow wire order, so the same conflicting request passed or failed depending
+// on which line arrived first.
+func TestParamHeaderRepeatedFieldConflict(t *testing.T) {
+	const schema = `{"type":"object","properties":{` +
+		`"region":{"type":"string","x-mcp-header":"Region"},` +
+		`"count":{"type":"integer","x-mcp-header":"Count"}}}`
+	greeting := "=?base64?" + base64.StdEncoding.EncodeToString([]byte("us-west1")) + "?="
+	for _, tc := range []struct {
+		name    string
+		args    string
+		headers []proxy.MCPParamHeader
+		want    string
+	}{
+		{
+			name: "conflicting, agreeing line first",
+			args: `{"region":"us-west1"}`,
+			headers: []proxy.MCPParamHeader{
+				{Name: "Mcp-Param-Region", Value: "us-west1"},
+				{Name: "Mcp-Param-Region", Value: "eu-west1"},
+			},
+			want: "repeated with conflicting values",
+		},
+		{
+			name: "conflicting, disagreeing line first",
+			args: `{"region":"us-west1"}`,
+			headers: []proxy.MCPParamHeader{
+				{Name: "Mcp-Param-Region", Value: "eu-west1"},
+				{Name: "Mcp-Param-Region", Value: "us-west1"},
+			},
+			want: "repeated with conflicting values",
+		},
+		{
+			name: "conflicting across spellings of the name",
+			args: `{"region":"us-west1"}`,
+			headers: []proxy.MCPParamHeader{
+				{Name: "Mcp-Param-Region", Value: "us-west1"},
+				{Name: "mcp-param-region", Value: "eu-west1"},
+			},
+			want: "repeated with conflicting values",
+		},
+		{
+			name: "repeated with the same value is not a conflict",
+			args: `{"region":"us-west1"}`,
+			headers: []proxy.MCPParamHeader{
+				{Name: "Mcp-Param-Region", Value: "us-west1"},
+				{Name: "Mcp-Param-Region", Value: greeting},
+			},
+		},
+		{
+			name: "repeated integer agreeing numerically is not a conflict",
+			args: `{"count":42}`,
+			headers: []proxy.MCPParamHeader{
+				{Name: "Mcp-Param-Count", Value: "42"},
+				{Name: "Mcp-Param-Count", Value: "42.0"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mcpParamHeaderWarnings(paramSession(t, "route", schema),
+				paramCallMsg("route", tc.args), tc.headers, false)
+			if tc.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("warnings = %v, want none", got)
+				}
+				return
+			}
+			if len(got) != 1 || !strings.Contains(got[0], tc.want) {
+				t.Fatalf("warnings = %v, want one containing %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParamHeaderOutOfRangeIntegerNamesItsRule. 2^53 is a perfectly valid JSON
+// integer. What it breaks is the separate rule that an x-mcp-header integer must
+// fit the JavaScript safe range, and reporting it as "not a valid integer" sent
+// the reader after a type error that is not there.
+func TestParamHeaderOutOfRangeIntegerNamesItsRule(t *testing.T) {
+	const schema = `{"type":"object","properties":{"count":{"type":"integer","x-mcp-header":"Count"}}}`
+	for _, tc := range []struct {
+		name         string
+		args, header string
+		want         string
+	}{
+		{"body out of range", `{"count":9007199254740992}`, "9007199254740992", outsideSafeRange},
+		{"header out of range", `{"count":9007199254740991}`, "9007199254740992", outsideSafeRange},
+		{"body at the limit", `{"count":9007199254740991}`, "9007199254740991", ""},
+		{"body is not an integer", `{"count":42.5}`, "42", "is not a valid integer"},
+		{"body is a string", `{"count":"42"}`, "42", "is not a valid integer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mcpParamHeaderWarnings(paramSession(t, "route", schema),
+				paramCallMsg("route", tc.args),
+				[]proxy.MCPParamHeader{{Name: "Mcp-Param-Count", Value: tc.header}}, false)
+			if tc.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("warnings = %v, want none", got)
+				}
+				return
+			}
+			if len(got) != 1 || !strings.Contains(got[0], tc.want) {
+				t.Fatalf("warnings = %v, want one containing %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParamHeaderBindingsReportOnlyRealViolations is the blocker this guards.
+// mcpParamHeaderBindings used to answer "invalid" for anything it could not
+// decode, and the caller turned that into an accusation. A boolean subschema is
+// legal JSON Schema, a tool may carry no inputSchema at all, and mcpsnoop's own
+// --redact-secrets rewrites a subschema under a key like "token" into a string.
+// None of those is a server declaring a forbidden annotation.
+func TestParamHeaderBindingsReportOnlyRealViolations(t *testing.T) {
+	for _, tc := range []struct {
+		name, schema string
+		wantReason   string
+		wantBindings int
+	}{
+		{name: "no schema at all", schema: ``},
+		{name: "schema is not an object", schema: `"gone"`},
+		{name: "boolean subschema", schema: `{"type":"object","properties":{"anything":true}}`},
+		{
+			name:         "redacted subschema beside a live annotation",
+			schema:       `{"type":"object","properties":{"token":"[REDACTED]","region":{"type":"string","x-mcp-header":"Region"}}}`,
+			wantBindings: 1,
+		},
+		{
+			name:         "annotation on a number",
+			schema:       `{"type":"object","properties":{"ratio":{"type":"number","x-mcp-header":"Ratio"}}}`,
+			wantReason:   "whose type is not one of string, integer or boolean",
+			wantBindings: 0,
+		},
+		{
+			name: "same annotation twice",
+			schema: `{"type":"object","properties":{"a":{"type":"string","x-mcp-header":"Region"},` +
+				`"b":{"type":"string","x-mcp-header":"region"}}}`,
+			wantReason: "on more than one property",
+		},
+		{
+			name:       "annotation is not a valid field name",
+			schema:     `{"type":"object","properties":{"a":{"type":"string","x-mcp-header":"A B"}}}`,
+			wantReason: "not a valid header field name",
+		},
+		{
+			name:       "annotation is empty",
+			schema:     `{"type":"object","properties":{"a":{"type":"string","x-mcp-header":""}}}`,
+			wantReason: "an empty x-mcp-header",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bindings, reason := mcpParamHeaderBindings(json.RawMessage(tc.schema))
+			if tc.wantReason == "" {
+				if reason != "" {
+					t.Fatalf("reason = %q, want none", reason)
+				}
+			} else if !strings.Contains(reason, tc.wantReason) {
+				t.Fatalf("reason = %q, want one containing %q", reason, tc.wantReason)
+			}
+			if len(bindings) != tc.wantBindings {
+				t.Fatalf("bindings = %+v, want %d", bindings, tc.wantBindings)
+			}
+		})
+	}
+}
+
+// TestParamHeaderViolationLandsOnTheAdvertisingFrame drives the whole path,
+// since the verdict is parked on the session inside completeCall and drained by
+// Ingest, and asserts the two halves that matter: a real violation is named on
+// the frame that advertised it, and a schema mcpsnoop merely could not read is
+// not reported at all.
+func TestParamHeaderViolationLandsOnTheAdvertisingFrame(t *testing.T) {
+	t.Run("forbidden annotation is named", func(t *testing.T) {
+		s := New()
+		ev := listExchangeView(s, toolsListResult("", `{"name":"route","inputSchema":`+
+			`{"type":"object","properties":{"ratio":{"type":"number","x-mcp-header":"Ratio"}}}}`))
+		if !strings.Contains(ev.Warning, `tool "route" declares`) ||
+			!strings.Contains(ev.Warning, "Ratio") ||
+			!strings.Contains(ev.Warning, "not one of string, integer or boolean") {
+			t.Fatalf("violation not named on the advertising frame: %q", ev.Warning)
+		}
+	})
+
+	t.Run("unreadable schema stays silent", func(t *testing.T) {
+		s := New()
+		ev := listExchangeView(s, toolsListResult("", `{"name":"route","inputSchema":`+
+			`{"type":"object","properties":{"token":"[REDACTED]"}}}`))
+		if strings.Contains(ev.Warning, "x-mcp-header") {
+			t.Fatalf("a schema mcpsnoop could not read was reported as a violation: %q", ev.Warning)
+		}
+	})
+
+	t.Run("a legal schema stays silent", func(t *testing.T) {
+		s := New()
+		ev := listExchangeView(s, toolsListResult("", paramHeaderTool))
+		if strings.Contains(ev.Warning, "x-mcp-header") {
+			t.Fatalf("a legal schema was reported as a violation: %q", ev.Warning)
+		}
+	})
 }
 
 // TestParamHeaderBindingsSurviveAUnionType. A JSON Schema type may be a list,
@@ -349,9 +592,9 @@ func TestParamHeaderBindingsSurviveAUnionType(t *testing.T) {
 	const schema = `{"type":"object","properties":{
 		"region":{"type":"string","x-mcp-header":"Region"},
 		"note":{"type":["string","null"]}}}`
-	bindings, ok := mcpParamHeaderBindings(json.RawMessage(schema))
-	if !ok {
-		t.Fatal("a union type elsewhere in the schema must not invalidate the definition")
+	bindings, violation := mcpParamHeaderBindings(json.RawMessage(schema))
+	if violation != "" {
+		t.Fatalf("a union type elsewhere in the schema must not invalidate the definition: %s", violation)
 	}
 	if len(bindings) != 1 || bindings[0].header != "Region" {
 		t.Fatalf("bindings = %+v, want the one Region binding", bindings)
@@ -360,14 +603,14 @@ func TestParamHeaderBindingsSurviveAUnionType(t *testing.T) {
 	// The violation the old behaviour hid.
 	got := mcpParamHeaderWarnings(paramSession(t, "route", schema),
 		paramCallMsg("route", `{"region":"us-west1"}`),
-		[]proxy.MCPParamHeader{{Name: "Mcp-Param-Region", Value: "eu-west1"}})
+		[]proxy.MCPParamHeader{{Name: "Mcp-Param-Region", Value: "eu-west1"}}, false)
 	if len(got) != 1 {
 		t.Fatalf("a header disagreeing with the body must be reported, got %v", got)
 	}
 
 	// A union is still not a legal place for the annotation itself.
-	if _, ok := mcpParamHeaderBindings(json.RawMessage(
-		`{"properties":{"x":{"type":["string","null"],"x-mcp-header":"X"}}}`)); ok {
+	if _, violation := mcpParamHeaderBindings(json.RawMessage(
+		`{"properties":{"x":{"type":["string","null"],"x-mcp-header":"X"}}}`)); violation == "" {
 		t.Fatal("x-mcp-header on a union type is not permitted")
 	}
 }

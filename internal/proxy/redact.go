@@ -3,8 +3,10 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"math/big"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/ohler55/ojg/jp"
@@ -135,75 +137,124 @@ func (r Redactor) RedactEnvelope(env Envelope) Envelope {
 	if !r.enabled() {
 		return env
 	}
-	// Values a JSONPath rule removed from the body, so the same value can be
-	// removed from a header that mirrors it.
-	var pathReplaced map[string]struct{}
-	if len(r.paths) > 0 && len(env.MCPParamHeaders) > 0 {
-		pathReplaced = make(map[string]struct{}, len(r.paths))
+	// The two halves of the link between a scrubbed body value and the header
+	// that mirrors it. A rule addresses the body and has no expression for a
+	// header, so matching the value is the only link there is; see mirrorsScrubbed
+	// for why the surviving half is needed to keep that link honest. Both are
+	// collected for every rule, not only for paths, because a key rule reaches a
+	// mirrored header no more directly than a path does.
+	var scrubbed, survived map[string]struct{}
+	if len(env.MCPParamHeaders) > 0 {
+		scrubbed = make(map[string]struct{})
+		survived = make(map[string]struct{})
 	}
+	changed := false
 	if len(env.Raw) > 0 {
-		if redacted, ok := r.redactRaw(env.Raw, pathReplaced); ok {
+		if redacted, ok := r.redactRaw(env.Raw, scrubbed, survived); ok {
 			env.Raw = redacted
+			changed = true
 		}
 	}
 	if env.Text != "" && len(r.valuePatterns) > 0 {
-		env.Text = r.redactString(env.Text)
+		if redacted := r.redactString(env.Text); redacted != env.Text {
+			env.Text = redacted
+			changed = true
+		}
 	}
 	// Gated on redaction being on at all, not on keys or values specifically. A
 	// path rule scrubs the body and used to leave the header untouched, which
 	// leaked the secret and made the store report the pair as disagreeing.
 	if len(env.MCPParamHeaders) > 0 {
-		env.MCPParamHeaders = r.redactMCPParamHeaders(env.MCPParamHeaders, pathReplaced)
+		headers, headersChanged := r.redactMCPParamHeaders(env.MCPParamHeaders, scrubbed, survived)
+		env.MCPParamHeaders = headers
+		changed = changed || headersChanged
 	}
+	// Recorded on the frame so the store can tell mcpsnoop's own placeholder from
+	// a client that sent those bytes itself.
+	env.Redacted = env.Redacted || changed
 	return env
 }
 
-// redactMCPParamHeaders scrubs a header three ways. By the annotation name, for
-// a key rule; by the value a path rule already removed from the body, which is
-// the only way a JSONPath can reach a header at all; and by the value patterns.
+// redactMCPParamHeaders scrubs a header three ways. By the value a body rule
+// already removed, which is the only way a rule addressing the body can reach a
+// header at all; by the annotation name, for a key rule; and by the value
+// patterns.
 //
 // The name a key rule matches here is the x-mcp-header annotation, while the
 // body side matches the JSON property name, and the two are independent by
 // design. The spec's own example pairs property "region" with header "Region",
 // so a rule naming one does not name the other. Both spellings are tried for
-// that reason, and the path-replaced set covers the pairs neither spelling hits.
-func (r Redactor) redactMCPParamHeaders(headers []MCPParamHeader, pathReplaced map[string]struct{}) []MCPParamHeader {
-	redacted := slices.Clone(headers)
-	for i := range redacted {
-		if _, mirrored := pathReplaced[redacted[i].Value]; mirrored {
-			redacted[i].Value = redactedValue
+// that reason, and the scrubbed-value set covers the pairs neither spelling hits.
+func (r Redactor) redactMCPParamHeaders(headers []MCPParamHeader, scrubbed, survived map[string]struct{}) ([]MCPParamHeader, bool) {
+	out := slices.Clone(headers)
+	changed := false
+	for i := range out {
+		if mirrorsScrubbed(out[i].Value, scrubbed, survived) {
+			out[i].Value = redactedValue
+			changed = true
 			continue
 		}
-		name := strings.ToLower(redacted[i].Name)
+		name := strings.ToLower(out[i].Name)
 		name, ok := strings.CutPrefix(name, "mcp-param-")
 		_, exactKey := r.keys[name]
 		_, normalizedKey := r.keys[strings.ReplaceAll(name, "-", "_")]
 		if ok && (exactKey || normalizedKey) {
-			redacted[i].Value = redactedValue
+			out[i].Value = redactedValue
+			changed = true
 			continue
 		}
-		redacted[i].Value = r.redactString(redacted[i].Value)
+		if scrubbedValue := r.redactString(out[i].Value); scrubbedValue != out[i].Value {
+			out[i].Value = scrubbedValue
+			changed = true
+		}
 	}
-	return redacted
+	return out, changed
 }
 
-// redactRaw rewrites a frame's payload. replaced, when non-nil, records the
-// scalar values a JSONPath rule removed, so the caller can scrub the same value
-// out of an Mcp-Param header that mirrors it. A JSONPath addresses the body and
-// has no expression for a header, so that list is the only link between them.
-func (r Redactor) redactRaw(raw json.RawMessage, replaced map[string]struct{}) (json.RawMessage, bool) {
+// mirrorsScrubbed reports whether a header carries a value a body rule removed
+// and nothing else in the redacted body still spells.
+//
+// The second half is what keeps the link honest. Two arguments routinely share a
+// spelling, which is the normal case for booleans and small integers, and
+// scrubbing every header that matches would wipe headers bound to properties no
+// rule named, hiding a real disagreement on those. When the spelling is still in
+// the stored body in clear, removing it from the header protects nothing and
+// only costs a check, so the two cases are exactly the ones to separate.
+//
+// The header is decoded first, because a value outside visible ASCII may only
+// travel wrapped in the Base64 sentinel while the body holds it plain.
+func mirrorsScrubbed(value string, scrubbed, survived map[string]struct{}) bool {
+	decoded, ok := DecodeHeaderValue(value)
+	if !ok {
+		return false
+	}
+	if _, removed := scrubbed[decoded]; !removed {
+		return false
+	}
+	_, kept := survived[decoded]
+	return !kept
+}
+
+// redactRaw rewrites a frame's payload. scrubbed, when non-nil, records the
+// scalar values the rules removed and survived records which of those spellings
+// are still somewhere in the rewritten body, so the caller can decide whether
+// scrubbing a header that mirrors one of them buys anything.
+func (r Redactor) redactRaw(raw json.RawMessage, scrubbed, survived map[string]struct{}) (json.RawMessage, bool) {
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	if err := dec.Decode(&v); err != nil {
 		return nil, false
 	}
-	changed := r.redactPaths(&v, replaced)
-	if r.redactValue(v) {
+	changed := r.redactPaths(&v, scrubbed)
+	if r.redactValue(v, scrubbed) {
 		changed = true
 	}
 	if !changed {
 		return nil, false
+	}
+	if len(scrubbed) > 0 {
+		collectSurviving(v, scrubbed, survived)
 	}
 	// Not json.Marshal: it would escape <, > and & and hand back a payload the
 	// server never sent. The sink no longer re-escapes either, so this survives
@@ -215,22 +266,23 @@ func (r Redactor) redactRaw(raw json.RawMessage, replaced map[string]struct{}) (
 	return b, true
 }
 
-// redactPaths rewrites every JSONPath match to the placeholder. replaced collects
+// redactPaths rewrites every JSONPath match to the placeholder. scrubbed collects
 // the original scalar spellings it removed, because an Mcp-Param header mirrors
 // an argument value and a JSONPath has no expression for a header. Without that
 // list the body is scrubbed while its mirror in the header keeps the secret, and
 // the store then reports the pair as disagreeing on traffic that was correct.
-func (r Redactor) redactPaths(value *any, replaced map[string]struct{}) bool {
+func (r Redactor) redactPaths(value *any, scrubbed map[string]struct{}) bool {
 	changed := false
 	for _, path := range r.paths {
 		matched := false
+		// Held aside until the rewrite is adopted below. Modify can still fail after
+		// the callback ran, and recording straight into scrubbed would then claim a
+		// value was removed from a body that still holds it, which scrubs the header
+		// mirroring it for nothing.
+		removed := make(map[string]struct{}, 1)
 		modified, err := path.expr.Modify(*value, func(old any) (any, bool) {
 			matched = true
-			if replaced != nil {
-				if s, ok := scalarSpelling(old); ok {
-					replaced[s] = struct{}{}
-				}
-			}
+			recordSpellings(old, removed)
 			return redactedValue, true
 		})
 		// Only adopt the rewritten tree when the path actually hit something, so a
@@ -239,36 +291,77 @@ func (r Redactor) redactPaths(value *any, replaced map[string]struct{}) bool {
 		if err != nil || !matched {
 			continue
 		}
+		for spelling := range removed {
+			if scrubbed != nil {
+				scrubbed[spelling] = struct{}{}
+			}
+		}
 		*value = modified
 		changed = true
 	}
 	return changed
 }
 
-// scalarSpelling is how a JSON scalar would appear as a header value, or false
-// when the value is not a scalar. json.Number keeps the spelling the wire used,
-// which is what the header carries.
-func scalarSpelling(v any) (string, bool) {
+// recordSpellings adds every way a JSON scalar could appear as a header value to
+// set, and does nothing for a non-scalar or a nil set.
+//
+// A number contributes two spellings when they differ, the one the wire used and
+// its plain integer form. The spec has servers compare an x-mcp-header integer
+// numerically, so a body of 4.2e1 and a header of 42 are the same value, and
+// matching only the wire spelling would leave that header holding a number the
+// body no longer shows.
+func recordSpellings(v any, set map[string]struct{}) {
+	if set == nil {
+		return
+	}
 	switch t := v.(type) {
 	case string:
-		return t, true
-	case json.Number:
-		return t.String(), true
+		set[t] = struct{}{}
 	case bool:
-		if t {
-			return "true", true
+		set[strconv.FormatBool(t)] = struct{}{}
+	case json.Number:
+		set[t.String()] = struct{}{}
+		if exact, ok := new(big.Rat).SetString(t.String()); ok && exact.IsInt() {
+			set[exact.Num().String()] = struct{}{}
 		}
-		return "false", true
 	}
-	return "", false
 }
 
-func (r Redactor) redactValue(v any) bool {
+// collectSurviving records which of the scrubbed spellings the rewritten body
+// still contains. Only those are of interest, so a large payload cannot grow the
+// set beyond what was removed.
+func collectSurviving(v any, scrubbed, survived map[string]struct{}) {
+	switch x := v.(type) {
+	case map[string]any:
+		for _, child := range x {
+			collectSurviving(child, scrubbed, survived)
+		}
+	case []any:
+		for _, child := range x {
+			collectSurviving(child, scrubbed, survived)
+		}
+	default:
+		spellings := make(map[string]struct{}, 2)
+		recordSpellings(v, spellings)
+		for spelling := range spellings {
+			if _, removed := scrubbed[spelling]; removed {
+				survived[spelling] = struct{}{}
+			}
+		}
+	}
+}
+
+func (r Redactor) redactValue(v any, scrubbed map[string]struct{}) bool {
 	switch x := v.(type) {
 	case map[string]any:
 		changed := false
 		for key, child := range x {
 			if _, ok := r.keys[strings.ToLower(key)]; ok {
+				// Recorded for the same reason a path match is. A key rule reaches a
+				// mirrored Mcp-Param header no more directly than a path does, and
+				// leaving it unrecorded left --redact-key and --redact-secrets scrubbing
+				// the body while the header kept the secret.
+				recordSpellings(child, scrubbed)
 				x[key] = redactedValue
 				changed = true
 				continue
@@ -281,7 +374,7 @@ func (r Redactor) redactValue(v any) bool {
 				}
 				continue
 			}
-			if r.redactValue(child) {
+			if r.redactValue(child, scrubbed) {
 				changed = true
 			}
 		}
@@ -291,7 +384,7 @@ func (r Redactor) redactValue(v any) bool {
 		for i := 0; i < len(x); i++ {
 			s, ok := x[i].(string)
 			if !ok {
-				if r.redactValue(x[i]) {
+				if r.redactValue(x[i], scrubbed) {
 					changed = true
 				}
 				continue
