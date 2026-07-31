@@ -149,13 +149,16 @@ type EventExport struct {
 	Mismatch  bool            `json:"mismatch,omitempty"`
 	// Status is the HTTP status the frame arrived on and AuthChallenge that
 	// response's WWW-Authenticate header, both absent on stdio.
-	Status        int             `json:"http_status,omitempty"`
-	AuthChallenge string          `json:"auth_challenge,omitempty"`
-	Truncated     bool            `json:"truncated,omitempty"`
-	Deprecated    string          `json:"deprecated,omitempty"`
-	CallIndex     *int            `json:"call_index,omitempty"`
-	Raw           json.RawMessage `json:"raw,omitempty"`
-	Text          string          `json:"text,omitempty"`
+	Status            int             `json:"http_status,omitempty"`
+	AuthChallenge     string          `json:"auth_challenge,omitempty"`
+	Truncated         bool            `json:"truncated,omitempty"`
+	Deprecated        string          `json:"deprecated,omitempty"`
+	CacheTTLMs        int             `json:"cache_ttl_ms,omitempty"`
+	CacheScope        string          `json:"cache_scope,omitempty"`
+	CacheStaleRefetch string          `json:"cache_stale_refetch,omitempty"`
+	CallIndex         *int            `json:"call_index,omitempty"`
+	Raw               json.RawMessage `json:"raw,omitempty"`
+	Text              string          `json:"text,omitempty"`
 }
 
 func ParseFormat(s string) (Format, error) {
@@ -767,20 +770,23 @@ func exportCall(index int, c store.CallView) CallExport {
 
 func exportEvent(ev store.EventView, callIndex map[string]int) EventExport {
 	out := EventExport{
-		Seq:           ev.Seq,
-		Timestamp:     ev.TS,
-		Direction:     ev.Dir,
-		Kind:          eventKind(ev.Kind),
-		Method:        ev.Method,
-		ID:            ev.ID,
-		Warning:       ev.Warning,
-		Mismatch:      ev.RoutingMismatch,
-		Status:        ev.HTTPStatus,
-		AuthChallenge: ev.AuthChallenge,
-		Truncated:     ev.Truncated,
-		Deprecated:    ev.Deprecated,
-		Raw:           ev.Raw,
-		Text:          ev.Text,
+		Seq:               ev.Seq,
+		Timestamp:         ev.TS,
+		Direction:         ev.Dir,
+		Kind:              eventKind(ev.Kind),
+		Method:            ev.Method,
+		ID:                ev.ID,
+		Warning:           ev.Warning,
+		Mismatch:          ev.RoutingMismatch,
+		Status:            ev.HTTPStatus,
+		AuthChallenge:     ev.AuthChallenge,
+		Truncated:         ev.Truncated,
+		Deprecated:        ev.Deprecated,
+		CacheTTLMs:        ev.CacheHint.TTLMs,
+		CacheScope:        ev.CacheHint.Scope,
+		CacheStaleRefetch: ev.CacheStaleRefetch,
+		Raw:               ev.Raw,
+		Text:              ev.Text,
 	}
 	if ev.Call != nil {
 		if idx, ok := callIndex[callKey(*ev.Call)]; ok {
@@ -816,6 +822,12 @@ func writeText(w io.Writer, data SessionExport) error {
 		}
 		if ev.Deprecated != "" {
 			title += " deprecated"
+		}
+		if ev.CacheStaleRefetch != "" {
+			title += " cache_stale_refetch"
+		}
+		if ev.CacheTTLMs > 0 || ev.CacheScope != "" {
+			title += " cache"
 		}
 		if ev.CallIndex != nil {
 			c := data.Calls[*ev.CallIndex]

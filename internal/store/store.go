@@ -179,6 +179,8 @@ type event struct {
 	mismatch           bool   // a routing header disagrees with the body (structured flag for warning)
 	truncated          bool   // the observed copy was capped at the frame-size limit
 	deprecated         string // a deprecated MCP feature was used (structured, not a protocol warning)
+	cacheHint          CacheHint
+	cacheStaleRefetch  string // client re-fetched inside a declared ttlMs window (structured, not a protocol warning)
 	call               *call  // set for request/response events
 	taskCall           *call  // originating call for a task lifecycle frame
 	taskID             string
@@ -236,6 +238,9 @@ type session struct {
 
 	lastSeq uint64 // highest per-session Seq seen, for gap detection
 	missing uint64 // envelopes dropped upstream, inferred from Seq gaps
+
+	// cacheFresh records the most recent cacheable response per key (SEP-2549).
+	cacheFresh map[string]cacheEntry
 }
 
 // Store is the concurrency-safe collector the hub feeds and the TUI reads.
@@ -354,6 +359,15 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		if note := missingResultTypeWarning(msg, c); note != "" {
 			ev.warning = appendWarning(ev.warning, note)
 		}
+		if c != nil {
+			hint, scopeWarn := sess.recordCacheFromResponse(c, msg.Result, e.TS)
+			if hint.TTLMs > 0 || hint.Scope != "" {
+				ev.cacheHint = hint
+			}
+			if scopeWarn != "" {
+				ev.warning = appendWarning(ev.warning, scopeWarn)
+			}
+		}
 		if c != nil && c.taskID != "" {
 			ev.taskID = c.taskID
 			if c.method != "tools/call" {
@@ -430,6 +444,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		}
 		if msg.Method == "initialize" {
 			sess.caps.applyRequest(msg.Params)
+		}
+		if ev.mrtrRoot == "" && cacheableMethod(msg.Method) {
+			if note := sess.checkCacheStale(msg.Method, msg.Params, e.TS, requestProtocolVersion(msg.Params, e.MCPProtocolVersion)); note != "" {
+				ev.cacheStaleRefetch = note
+			}
 		}
 	case msg.Method != "":
 		ev.kind = EventNotification
