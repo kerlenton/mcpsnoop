@@ -198,11 +198,15 @@ func redactConfig(commonSecrets bool, keys redactKeysFlag, values redactValuesFl
 
 func main() { os.Exit(execute(os.Args[1:])) }
 
-// runShimFn and runHubFn are indirected so tests can check how the root command
-// routes the wrapped command without spawning a server or launching the TUI.
+// runShimFn, runHubFn and runHTTPFn are indirected so tests can check how a
+// command routes without spawning a server, launching the TUI, or binding a
+// port. The http seam matters most: without it a test that reaches RunHTTP
+// binds the real --listen address and blocks until the package timeout, which
+// fails the whole package rather than the one test.
 var (
 	runShimFn = runShim
 	runHubFn  = runHub
+	runHTTPFn = proxy.RunHTTP
 )
 
 // exitCode carries a command's process exit code out through cobra's error
@@ -273,6 +277,12 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 				return exitCode(1)
 			}
 			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths)
+			// After applyConfig, so a label from a shared .mcpsnoop.toml is held
+			// to the same rule as the flag.
+			if err := paths.CheckLabel(label); err != nil {
+				fmt.Fprintln(os.Stderr, "mcpsnoop:", err)
+				return exitCode(2)
+			}
 			trace, err := parseTraceOptions(otlpEndpoint, otlpHeaders)
 			if err != nil {
 				return err
@@ -566,6 +576,10 @@ func newHTTPCmd() *cobra.Command {
 				return exitCode(1)
 			}
 			applyConfig(cmd.Flags(), cfg, ok, &label, nil, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths)
+			if err := paths.CheckLabel(label); err != nil {
+				fmt.Fprintln(os.Stderr, "mcpsnoop http:", err)
+				return exitCode(2)
+			}
 			if target == "" {
 				fmt.Fprintln(os.Stderr, "mcpsnoop http: --target is required")
 				return exitCode(2)
@@ -591,7 +605,7 @@ func newHTTPCmd() *cobra.Command {
 			defer stop()
 
 			fmt.Fprintf(os.Stderr, "mcpsnoop: proxying %s → %s (session %s)\n", listen, target, sessionID)
-			if err := proxy.RunHTTP(ctx, proxy.HTTPConfig{
+			if err := runHTTPFn(ctx, proxy.HTTPConfig{
 				Listen:    listen,
 				Target:    target,
 				Label:     lbl,

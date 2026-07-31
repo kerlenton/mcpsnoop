@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode"
 )
 
 // maxSocketPathLen is a conservative unix-domain socket path limit. sun_path is
@@ -31,6 +33,64 @@ func CheckSocketPath(path string) error {
 			path, len(path), maxSocketPathLen)
 	}
 	return nil
+}
+
+// maxLabelLen bounds a label so the file name it ends up in stays within the
+// 255-byte limit every mainstream filesystem enforces. The label is only part of
+// that name: newSessionID appends a pid and a nonce, and SessionLogPath appends
+// ".jsonl", so the budget has to leave room for both. 200 is comfortably clear
+// of the boundary, which matters because the pid width varies, so an unbounded
+// label can be accepted on one run and rejected on the next.
+//
+// Without this the failure is silent rather than loud. OpenFile returns
+// ENAMETOOLONG, the trace sink warns once and carries on, the process exits 0,
+// and the whole session goes unrecorded.
+const maxLabelLen = 200
+
+// CheckLabel returns an actionable error when a label cannot safely name files
+// under the state directory. An explicit --label flows verbatim into the
+// session id and from there into SessionLogPath's file name, so a path
+// separator would write the trace outside SessionsDir, and the other cases here
+// produce a session that open and export cannot address again. labelFor already
+// strips separators when it derives a label from the wrapped command; this is
+// the same guarantee for the label the user supplies. Rejecting rather than
+// sanitising is deliberate: --label is documented as needing to be stable and
+// unique for baselines, and a silently rewritten label is neither.
+//
+// ".." is deliberately NOT rejected. Once separators are banned it cannot
+// traverse anything, and newSessionID always appends "-<pid>-<nonce>", so the
+// id is never the bare ".." that a Join would resolve. Rejecting it would turn
+// away ordinary values like "v1..v2" and "foo..bar" for no gain, and refusing
+// correct input is the failure mode this project keeps having to undo.
+func CheckLabel(label string) error {
+	switch {
+	case strings.ContainsAny(label, `/\`):
+		return fmt.Errorf("label %q contains a path separator; a label names files under the mcpsnoop state dir", label)
+	case strings.ContainsRune(label, 0):
+		return fmt.Errorf("label contains a NUL byte; a label names files under the mcpsnoop state dir")
+	case containsControl(label):
+		// A control character reaches the file name and the startup banner raw. A
+		// carriage return in particular rewrites the line the user is reading, so
+		// the banner can name a label the session does not have. The OTLP header
+		// flag already refuses CR and LF for the same reason.
+		return fmt.Errorf("label %q contains a control character; a label names files under the mcpsnoop state dir", label)
+	case strings.HasPrefix(label, "-"):
+		// The label becomes the session id, and the id is a positional argument to
+		// open, export and diff. One starting with a dash is parsed as a flag
+		// there, so the session can be recorded and then never addressed again,
+		// which is the harm this check exists to prevent.
+		return fmt.Errorf("label %q starts with a dash; the session id it forms would parse as a flag in mcpsnoop open and export", label)
+	case len(label) > maxLabelLen:
+		return fmt.Errorf("label is %d bytes, over the %d-byte limit; the session id it forms must still fit a file name", len(label), maxLabelLen)
+	}
+	return nil
+}
+
+// containsControl reports whether s holds a C0 or C1 control character. unicode
+// .IsControl covers both, which matters because a lone C1 byte is as damaging in
+// a terminal as an ESC.
+func containsControl(s string) bool {
+	return strings.ContainsFunc(s, unicode.IsControl)
 }
 
 // Base returns the mcpsnoop state directory, creating it if needed.
