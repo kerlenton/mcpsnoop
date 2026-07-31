@@ -391,3 +391,43 @@ func TestRedactRawPreservesMarkupInUntouchedFields(t *testing.T) {
 		t.Fatalf("the secret should still be redacted: %s", got)
 	}
 }
+
+// TestRedactPathAlsoScrubsTheMirroredParamHeader is the blocker this closes. A
+// JSONPath addresses the body and has no expression for a header, so path
+// redaction used to scrub the argument and leave its mirror in the Mcp-Param
+// header verbatim. That leaked the secret into the log and made the store report
+// the pair as disagreeing, which fails a default check run on correct traffic.
+func TestRedactPathAlsoScrubsTheMirroredParamHeader(t *testing.T) {
+	path, err := ParseRedactPath("$.params.arguments.authKey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureSink{}
+	NewRedactingSink(sink, RedactConfig{Paths: []RedactPath{path}}).Emit(Envelope{
+		Direction: ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+			`{"name":"fetch","arguments":{"region":"us-west1","authKey":"sk-live-abcdef"}}}`),
+		MCPParamHeaders: []MCPParamHeader{
+			{Name: "Mcp-Param-Region", Value: "us-west1"},
+			{Name: "Mcp-Param-Auth", Value: "sk-live-abcdef"},
+		},
+	})
+
+	got := sink.byDir(ClientToServer)
+	if len(got) != 1 {
+		t.Fatalf("want one envelope, got %d", len(got))
+	}
+	if strings.Contains(string(got[0].Raw), "sk-live-abcdef") {
+		t.Fatalf("the body should be scrubbed: %s", got[0].Raw)
+	}
+	for _, h := range got[0].MCPParamHeaders {
+		if strings.Contains(h.Value, "sk-live-abcdef") {
+			t.Fatalf("header %s still carries the secret the path rule removed: %q", h.Name, h.Value)
+		}
+		// A header the rule never named keeps its value, or redaction has turned
+		// into a blanket wipe and the comparison it feeds becomes useless.
+		if h.Name == "Mcp-Param-Region" && h.Value != "us-west1" {
+			t.Fatalf("an unrelated header must survive, got %q", h.Value)
+		}
+	}
+}

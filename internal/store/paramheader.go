@@ -15,12 +15,39 @@ import (
 const (
 	mcpParamHeaderPrefix = "Mcp-Param-"
 	maxSafeMCPInteger    = int64(1<<53 - 1)
+	// redactedMarker is what proxy.Redactor writes in place of a scrubbed value.
+	// Duplicated rather than imported because the store must not depend on the
+	// proxy's redaction internals, and a literal that drifts is caught by
+	// TestParamHeaderRedactionMarkerMatchesTheProxy.
+	redactedMarker = "[REDACTED]"
 )
 
 type paramHeaderSchema struct {
-	Type       string                       `json:"type"`
+	// Type is raw because JSON Schema allows both "string" and ["string","null"],
+	// and the union form is common in generated tool schemas. Decoding it into a
+	// string made encoding/json fail the whole tree, and since the caller then
+	// dropped every binding, one union-typed property anywhere in a schema
+	// silently switched off header checking for the entire tool.
+	Type       json.RawMessage              `json:"type"`
 	Header     json.RawMessage              `json:"x-mcp-header"`
 	Properties map[string]paramHeaderSchema `json:"properties"`
+}
+
+// paramHeaderType is the single primitive type a property declares, or "" when
+// it declares none, several, or something that is not a primitive. The spec
+// permits x-mcp-header only on integer, string and boolean, so a union is not a
+// legal place for the annotation, but it is a legal thing to appear elsewhere in
+// the schema and must not poison the walk.
+func paramHeaderType(raw json.RawMessage) string {
+	var single string
+	if json.Unmarshal(raw, &single) == nil {
+		return single
+	}
+	var union []string
+	if json.Unmarshal(raw, &union) == nil && len(union) == 1 {
+		return union[0]
+	}
+	return ""
 }
 
 type paramHeaderBinding struct {
@@ -83,6 +110,15 @@ func mcpParamHeaderWarnings(sess *session, msg proxy.RPCMessage, headers []proxy
 				" is missing for body parameter "+strconv.Quote(path))
 			continue
 		}
+		// Either side scrubbed by mcpsnoop's own redaction makes the pair
+		// unverifiable, not disagreeing. The proxy scrubs the header alongside the
+		// body, but the two are matched by value and a rule can still reach only
+		// one of them, and a capture redacted by an older build has no header copy
+		// at all. Reporting that as a mismatch invents a protocol violation out of
+		// the user's privacy setting, and it fails a default check run.
+		if headerValue == redactedMarker || string(raw) == strconv.Quote(redactedMarker) {
+			continue
+		}
 
 		decoded, ok := decodeMCPParamHeaderValue(headerValue)
 		if !ok {
@@ -136,7 +172,7 @@ func collectMCPParamHeaderBindings(properties map[string]paramHeaderSchema, pref
 			var header string
 			if json.Unmarshal(property.Header, &header) != nil || header == "" ||
 				!validMCPParamHeaderName(header) ||
-				(property.Type != "string" && property.Type != "integer" && property.Type != "boolean") {
+				!isMCPParamPrimitive(paramHeaderType(property.Type)) {
 				return nil, false
 			}
 			key := strings.ToLower(header)
@@ -144,7 +180,7 @@ func collectMCPParamHeaderBindings(properties map[string]paramHeaderSchema, pref
 				return nil, false
 			}
 			seen[key] = struct{}{}
-			out = append(out, paramHeaderBinding{path: path, header: header, typ: property.Type})
+			out = append(out, paramHeaderBinding{path: path, header: header, typ: paramHeaderType(property.Type)})
 		}
 		var ok bool
 		out, ok = collectMCPParamHeaderBindings(property.Properties, path, seen, out)
@@ -153,6 +189,13 @@ func collectMCPParamHeaderBindings(properties map[string]paramHeaderSchema, pref
 		}
 	}
 	return out, true
+}
+
+// isMCPParamPrimitive reports whether a declared type may carry an
+// x-mcp-header. The spec names integer, string and boolean, and excludes number
+// explicitly, because a float has no single decimal spelling to compare against.
+func isMCPParamPrimitive(typ string) bool {
+	return typ == "string" || typ == "integer" || typ == "boolean"
 }
 
 func validMCPParamHeaderName(name string) bool {

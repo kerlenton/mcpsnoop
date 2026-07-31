@@ -223,6 +223,11 @@ type session struct {
 	toolListSeen bool
 	toolDrift    ToolDrift
 	toolDriftSet bool
+	// paramHeaderInvalid names tools whose latest advertised inputSchema carries an
+	// x-mcp-header the spec forbids. applyToolsList runs deep inside completeCall,
+	// which cannot widen its return, so the verdict is parked here and Ingest
+	// drains it onto the tools/list response frame that carried the definitions.
+	paramHeaderInvalid []string
 
 	command []string
 	cwd     string
@@ -355,6 +360,14 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		if note := missingResultTypeWarning(msg, c); note != "" {
 			ev.warning = appendWarning(ev.warning, note)
 		}
+		// Drained here rather than returned, because applyToolsList runs inside
+		// completeCall. Each name is reported once, on the frame that advertised it.
+		for _, tool := range sess.paramHeaderInvalid {
+			ev.warning = appendWarning(ev.warning,
+				"tool "+strconv.Quote(tool)+" advertises an x-mcp-header the specification forbids, "+
+					"so its Mcp-Param headers are not checked")
+		}
+		sess.paramHeaderInvalid = nil
 		if c != nil && c.taskID != "" {
 			ev.taskID = c.taskID
 			if c.method != "tools/call" {
@@ -999,6 +1012,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		sess.advertisedTools = nil
 	}
 
+	var invalidParamHeaderTools []string
 	for _, rawTool := range r.Tools {
 		var tool struct {
 			Name string `json:"name"`
@@ -1037,7 +1051,17 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		sess.advertisedSet[tool.Name] = struct{}{}
 		sess.advertisedTools = append(sess.advertisedTools, tool.Name)
 		schema := append(json.RawMessage(nil), tool.InputSchema...)
-		paramHeaders, _ := mcpParamHeaderBindings(schema)
+		// The validity verdict is reported, not discarded. The spec makes an
+		// x-mcp-header violating its constraints a definition a client MUST reject,
+		// excluding the tool from the list and logging why. mcpsnoop observes rather
+		// than serves, so the analogous answer is to say so on the frame that
+		// advertised it and to compare no headers for that tool, which is what a
+		// conforming client would then be doing anyway. Throwing the verdict away
+		// left every one of those constraints computed and never reported.
+		paramHeaders, paramHeadersValid := mcpParamHeaderBindings(schema)
+		if !paramHeadersValid {
+			invalidParamHeaderTools = append(invalidParamHeaderTools, tool.Name)
+		}
 
 		// Measured from the raw bytes, not gated on the decoded string being
 		// non-empty: whatever the description field holds, those bytes were spent
@@ -1064,6 +1088,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		}
 	}
 	sess.toolListComplete = r.NextCursor == ""
+	sess.paramHeaderInvalid = append(sess.paramHeaderInvalid, invalidParamHeaderTools...)
 }
 
 // hasListCursor reports whether a tools/list request carries a pagination cursor,
