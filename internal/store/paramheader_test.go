@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -738,4 +739,64 @@ func TestParseMCPIntegerGrammarAndMagnitude(t *testing.T) {
 func quoteJSON(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// TestRoutingComparisonsRespectRedaction. The Mcp-Param comparison was gated on
+// mcpsnoop's own placeholder, and the three routing fields beside it were not,
+// so scrubbing a tool name or a protocol version made a correct exchange read as
+// a routing mismatch. That is a warning on correct traffic, which fails a
+// default check run.
+func TestRoutingComparisonsRespectRedaction(t *testing.T) {
+	const meta = `"_meta":{"io.modelcontextprotocol/protocolVersion":%s,` +
+		`"io.modelcontextprotocol/clientCapabilities":{}}`
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*proxy.Envelope)
+		warning string
+	}{
+		{
+			name: "Mcp-Name",
+			mutate: func(e *proxy.Envelope) {
+				e.Raw = json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{` +
+					`"name":"[REDACTED]","arguments":{},` + fmt.Sprintf(meta, `"2026-07-28"`) + `}}`)
+			},
+			warning: "Mcp-Name",
+		},
+		{
+			name:    "Mcp-Method",
+			mutate:  func(e *proxy.Envelope) { e.MCPMethod = redactedMarker },
+			warning: "Mcp-Method",
+		},
+		{
+			name: "MCP-Protocol-Version",
+			mutate: func(e *proxy.Envelope) {
+				e.Raw = json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{` +
+					`"name":"route","arguments":{},` + fmt.Sprintf(meta, `"[REDACTED]"`) + `}}`)
+			},
+			warning: "MCP-Protocol-Version",
+		},
+	} {
+		for _, redacted := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s redacted=%v", tc.name, redacted), func(t *testing.T) {
+				s := New()
+				e := proxy.Envelope{
+					SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+					Direction: proxy.ClientToServer, Transport: proxy.TransportHTTP,
+					MCPMethod: "tools/call", MCPName: "route", MCPProtocolVersion: "2026-07-28",
+					Redacted: redacted,
+					Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{` +
+						`"name":"route","arguments":{},` + fmt.Sprintf(meta, `"2026-07-28"`) + `}}`),
+				}
+				tc.mutate(&e)
+				ev := s.Ingest(e)
+				got := strings.Contains(ev.Warning, tc.warning)
+				if redacted && got {
+					t.Fatalf("a scrubbed side was reported as a disagreement: %q", ev.Warning)
+				}
+				if !redacted && !got {
+					t.Fatalf("the same bytes with no redaction must still be reported, got %q", ev.Warning)
+				}
+			})
+		}
+	}
 }

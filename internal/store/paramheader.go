@@ -103,6 +103,18 @@ func sortedMCPParamHeaders(headers []proxy.MCPParamHeader) []proxy.MCPParamHeade
 	return out
 }
 
+// unverifiableAfterRedaction reports whether a header-versus-body comparison
+// cannot be judged because mcpsnoop's own redaction scrubbed one side of it.
+// Reporting that as a disagreement invents a protocol violation out of the
+// user's privacy setting, on a signal that fails a default check run.
+//
+// Gated on the frame having actually been rewritten, because "[REDACTED]" is a
+// value either peer may send and a check that stops at those bytes alone is a
+// check the traffic can switch off.
+func unverifiableAfterRedaction(redacted bool, values ...string) bool {
+	return redacted && slices.Contains(values, redactedMarker)
+}
+
 // mcpParamHeaderWarnings compares each bound header against the argument it
 // mirrors. redacted says the frame passed through mcpsnoop's own redaction,
 // which is what makes the placeholder below trustworthy as a placeholder.

@@ -492,7 +492,8 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			ev.warning = appendWarning(ev.warning, "routing headers are invalid on a JSON-RPC batch")
 			ev.mismatch = true
 		default:
-			if ev.mcpMethod != "" && msg.Method != "" && ev.mcpMethod != msg.Method {
+			if ev.mcpMethod != "" && msg.Method != "" && ev.mcpMethod != msg.Method &&
+				!unverifiableAfterRedaction(e.Redacted, ev.mcpMethod, msg.Method) {
 				ev.warning = appendWarning(ev.warning, "routing header Mcp-Method "+ev.mcpMethod+" disagrees with body method "+msg.Method)
 				ev.mismatch = true
 			}
@@ -508,7 +509,8 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			// traffic. The message reports the decoded value, because base64 in a
 			// warning tells a reader nothing.
 			if name := operationName(msg); ev.mcpName != "" && name != "" {
-				if header := decodeHeaderValue(ev.mcpName); header != name {
+				if header := decodeHeaderValue(ev.mcpName); header != name &&
+					!unverifiableAfterRedaction(e.Redacted, header, name) {
 					// Quoted, because a decoded value has none of the guarantees the
 					// raw header had: the sentinel exists to carry what an HTTP field
 					// value cannot, so this can hold newlines, control characters, or
@@ -530,7 +532,8 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	// mismatch. This is request-scoped, so unlike the routing headers it is valid on
 	// a batch and gated only on the header being present.
 	if ev.mcpProtocolVersion != "" {
-		if mv := metaProtocolVersion(msg.Params); mv != "" && mv != ev.mcpProtocolVersion {
+		if mv := metaProtocolVersion(msg.Params); mv != "" && mv != ev.mcpProtocolVersion &&
+			!unverifiableAfterRedaction(e.Redacted, mv, ev.mcpProtocolVersion) {
 			ev.warning = appendWarning(ev.warning,
 				"MCP-Protocol-Version header "+ev.mcpProtocolVersion+
 					" disagrees with _meta protocolVersion "+mv)
