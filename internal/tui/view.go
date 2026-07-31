@@ -746,7 +746,7 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = e.CacheStaleRefetch + " · " + c.detail
 		}
 	}
-	if e.CacheHint.TTLMs > 0 || e.CacheHint.Scope != "" {
+	if !e.CacheHint.Empty() {
 		msg := formatCacheHint(e.CacheHint)
 		if c.detail == "" {
 			c.detail = msg
@@ -2261,11 +2261,13 @@ func softWrap(s string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+// formatCacheHint renders what the server declared, including a ttlMs of 0,
+// which the spec gives the meaning "immediately stale" rather than "unset".
 func formatCacheHint(h store.CacheHint) string {
 	switch {
-	case h.TTLMs > 0 && h.Scope != "":
+	case h.TTLPresent && h.Scope != "":
 		return fmt.Sprintf("cache ttlMs=%d cacheScope=%s", h.TTLMs, h.Scope)
-	case h.TTLMs > 0:
+	case h.TTLPresent:
 		return fmt.Sprintf("cache ttlMs=%d", h.TTLMs)
 	default:
 		return fmt.Sprintf("cache cacheScope=%s", h.Scope)

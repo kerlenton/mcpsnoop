@@ -248,6 +248,9 @@ type session struct {
 
 	// cacheFresh records the most recent cacheable response per key (SEP-2549).
 	cacheFresh map[string]cacheEntry
+	// cacheListScope records the cacheScope the cursorless first page of a list
+	// run declared, which every later page of that run must repeat.
+	cacheListScope map[string]string
 }
 
 // Store is the concurrency-safe collector the hub feeds and the TUI reads.
@@ -375,12 +378,12 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		}
 		sess.paramHeaderInvalid = nil
 		if c != nil {
-			hint, scopeWarn := sess.recordCacheFromResponse(c, msg.Result, e.TS)
-			if hint.TTLMs > 0 || hint.Scope != "" {
+			hint, cacheWarnings := sess.recordCacheFromResponse(c, msg.Result, e.TS)
+			if !hint.Empty() {
 				ev.cacheHint = hint
 			}
-			if scopeWarn != "" {
-				ev.warning = appendWarning(ev.warning, scopeWarn)
+			for _, note := range cacheWarnings {
+				ev.warning = appendWarning(ev.warning, note)
 			}
 		}
 		if c != nil && c.taskID != "" {
@@ -470,6 +473,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.method = msg.Method
 		ev.warning = validationWarning(msg)
 		sess.notifications++
+		sess.invalidateCache(msg.Method, msg.Params)
 		if msg.Method == "notifications/cancelled" {
 			if id := cancelledRequestID(msg.Params); id != "" {
 				sess.closeStreamingCall(id, e.TS)
