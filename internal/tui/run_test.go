@@ -1,8 +1,14 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
@@ -59,5 +65,34 @@ func TestObserveAndNudgeSurfacesBaselineError(t *testing.T) {
 	}
 	if !nudged {
 		t.Fatal("a baseline error should still nudge the UI")
+	}
+}
+
+// TestRunReportsAnAlreadyRunningHub. hub.Run returns before it backfills when
+// the socket is taken, so throwing the error away left the second instance on an
+// empty screen with the footer still claiming to listen and nothing on stderr.
+func TestRunReportsAnAlreadyRunningHub(t *testing.T) {
+	// A short base, since a unix socket path is capped near 104 bytes and the
+	// default temp dir on macOS is already most of that.
+	dir, err := os.MkdirTemp("/tmp", "mcs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	socket := filepath.Join(dir, "s.sock")
+	held, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Skipf("unix sockets unavailable: %v", err)
+	}
+	defer held.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = RunWithHistoryLimit(ctx, socket, dir, 0)
+	if err == nil {
+		t.Fatal("a second hub on a taken socket must report it rather than show an empty view")
+	}
+	if !strings.Contains(err.Error(), socket) {
+		t.Fatalf("the error should name the socket, got %v", err)
 	}
 }

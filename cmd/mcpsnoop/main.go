@@ -641,14 +641,16 @@ func runShim(command []string, label, traceFile string, noTrace bool, redaction 
 	}
 	sessionID := newSessionID(label)
 
-	sink := traceSink(sessionID, traceFile, noTrace, redaction, trace)
+	sink, file := traceSink(sessionID, traceFile, noTrace, redaction, trace)
 	defer func() {
 		_ = sink.Close()
-		// If any sink dropped envelopes under load, the trace is incomplete, so say
-		// so once on shutdown rather than let the user believe every call was saved.
-		if d, ok := sink.(proxy.DropCounter); ok {
-			if n := d.Dropped(); n > 0 {
-				fmt.Fprintf(os.Stderr, "mcpsnoop: dropped %d envelope(s) under load, the trace is incomplete\n", n)
+		// Only the file sink losing an envelope leaves a hole in the saved trace,
+		// so only that is reported. A live socket with no hub listening fills its
+		// buffer on every ordinary run, and saying the trace is incomplete then
+		// spent the one signal that means the capture cannot be trusted.
+		if file != nil {
+			if n := file.Dropped(); n > 0 {
+				fmt.Fprintf(os.Stderr, "mcpsnoop: dropped %d envelope(s) under load, the saved trace is incomplete\n", n)
 			}
 		}
 	}()
@@ -676,18 +678,29 @@ func runShim(command []string, label, traceFile string, noTrace bool, redaction 
 
 // traceSink builds the shared sink, a durable per-session JSONL log plus a
 // best-effort live stream to the hub. Returns a no-op sink when disabled.
-func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.RedactConfig, trace traceOptions) proxy.Sink {
+// traceSink builds the fan-out of sinks a proxy run writes to. The second return
+// is the durable file sink alone, because only that one losing an envelope makes
+// the capture incomplete. The live socket fills its buffer whenever no hub is
+// running, which is the ordinary case, and an OTLP endpoint that is down is a
+// delivery problem rather than a hole in the trace, so totalling every child made
+// the one signal meaning "this capture cannot be trusted" fire on perfect ones.
+func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.RedactConfig, trace traceOptions) (proxy.Sink, proxy.DropCounter) {
 	if noTrace {
-		return proxy.NopSink()
+		return proxy.NopSink(), nil
 	}
 	if traceFile == "" {
 		traceFile = paths.SessionLogPath(sessionID)
 	}
-	var sinks []proxy.Sink
+	var (
+		sinks []proxy.Sink
+		file  proxy.DropCounter
+	)
 	if f, err := os.OpenFile(traceFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: cannot open trace file %q: %v (continuing without file trace)\n", traceFile, err)
 	} else {
-		sinks = append(sinks, proxy.NewAsyncSink(f, 0))
+		async := proxy.NewAsyncSink(f, 0)
+		file = async
+		sinks = append(sinks, async)
 	}
 	// The live stream is best effort, so a too-long socket path degrades to a
 	// file-only trace with an explanation rather than aborting the whole proxy.
@@ -707,7 +720,7 @@ func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.Redact
 	if redaction.Enabled() {
 		sink = proxy.NewRedactingSink(sink, redaction)
 	}
-	return sink
+	return sink, file
 }
 
 // newHTTPCmd runs the transparent HTTP proxy for a streamable-HTTP MCP server.
@@ -754,8 +767,15 @@ func newHTTPCmd() *cobra.Command {
 			}
 			sessionID := newSessionID(lbl)
 
-			sink := traceSink(sessionID, "", noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths), trace)
-			defer sink.Close()
+			sink, file := traceSink(sessionID, "", noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths), trace)
+			defer func() {
+				_ = sink.Close()
+				if file != nil {
+					if n := file.Dropped(); n > 0 {
+						fmt.Fprintf(os.Stderr, "mcpsnoop: dropped %d envelope(s) under load, the saved trace is incomplete\n", n)
+					}
+				}
+			}()
 
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()

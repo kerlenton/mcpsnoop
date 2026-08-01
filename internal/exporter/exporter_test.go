@@ -1145,3 +1145,39 @@ func TestParamHeadersSurviveTheJSONLRoundTrip(t *testing.T) {
 		t.Fatalf("a reloaded scrubbed frame was reported as a mismatch: warning=%q", scrubbed.Warning)
 	}
 }
+
+// TestResolveSessionPathSkipsAnEmptyLog. The trace file is created before the
+// wrapped server is started, so a launch that fails leaves a zero-byte log which
+// is then the newest thing in the directory. A bare `check` or `export` meaning
+// the last real capture resolved to it and answered "no envelopes found", which
+// in CI reads as a failure caused by an unrelated run.
+func TestResolveSessionPathSkipsAnEmptyLog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MCPSNOOP_HOME", home)
+	dir := paths.SessionsDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(dir, "real.jsonl")
+	writeEnv(t, real, proxy.Envelope{
+		SessionID: "real", ServerLabel: "demo", Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`),
+	})
+	failed := filepath.Join(dir, "failedstart.jsonl")
+	if err := os.WriteFile(failed, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Minute)
+	if err := os.Chtimes(failed, later, later); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ResolveSessionPath("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != real {
+		t.Fatalf("resolved %q, want the last real capture %q", got, real)
+	}
+}

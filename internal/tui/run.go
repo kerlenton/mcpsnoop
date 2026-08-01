@@ -3,7 +3,9 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -71,7 +73,26 @@ func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, hi
 		},
 	})
 
-	go func() { _ = h.Run(hubCtx) }()
+	// A second hub on one MCPSNOOP_HOME cannot take the socket, and Run returns
+	// before it backfills, so swallowing the error left the user staring at an
+	// empty screen with the footer still claiming to listen. Say which socket is
+	// taken and stop, rather than pretend to be the hub.
+	hubErr := make(chan error, 1)
+	go func() { hubErr <- h.Run(hubCtx) }()
+	select {
+	case err := <-hubErr:
+		if errors.Is(err, hub.ErrHubRunning) {
+			cancel()
+			return fmt.Errorf("another mcpsnoop hub already owns %s; close it, or point this one at another MCPSNOOP_HOME", socketPath)
+		}
+		if err != nil {
+			cancel()
+			return err
+		}
+	case <-time.After(150 * time.Millisecond):
+		// It took the socket, so it is the hub. Anything it reports later is a
+		// shutdown, which the program exit already covers.
+	}
 
 	_, err := p.Run()
 	cancel() // stop the hub and the observation worker once the UI exits

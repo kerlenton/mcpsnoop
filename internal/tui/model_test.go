@@ -2,6 +2,8 @@ package tui
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +34,14 @@ func envAt(seq uint64, dir proxy.Direction, ts time.Time, raw string) proxy.Enve
 func sessionEnv(id, label string) proxy.Envelope {
 	return proxy.Envelope{SessionID: id, ServerLabel: label, Seq: 1, TS: time.Now(),
 		Direction: proxy.ClientToServer, Raw: []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`)}
+}
+
+// metaEnv is the control frame the shim writes first, carrying the command the
+// replay key would run.
+func metaEnv(id string, command []string) proxy.Envelope {
+	raw, _ := json.Marshal(proxy.SessionMeta{Command: command, CWD: "/tmp"})
+	return proxy.Envelope{SessionID: id, ServerLabel: "demo", Seq: 0, TS: time.Now(),
+		Direction: proxy.DirectionMeta, Raw: raw}
 }
 
 func seed(st *store.Store) {
@@ -920,7 +930,8 @@ func TestReplayAgainFromResult(t *testing.T) {
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector on the last frame (a response)
 	m = typeRunes(t, m, "x")                        // jump to the request
-	m = typeRunes(t, m, "r")                        // start the replay
+	m = typeRunes(t, m, "r")                        // ask, then confirm
+	m = typeRunes(t, m, "y")
 
 	// r starts an async replay shown as a footer spinner, not a placeholder window.
 	if !m.replaying {
@@ -962,7 +973,8 @@ func TestReplayAbandonedOnNavigation(t *testing.T) {
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector on the response
 	m = typeRunes(t, m, "x")                        // to the request
-	m = typeRunes(t, m, "r")                        // start replaying
+	m = typeRunes(t, m, "r")                        // ask, then confirm
+	m = typeRunes(t, m, "y")
 	if !m.replaying {
 		t.Fatal("r should start replaying")
 	}
@@ -1523,6 +1535,7 @@ func TestDeleteSession(t *testing.T) {
 	}
 	// ctrl-d deletes the selected session immediately, no confirmation.
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 	if len(m.sessions) != 1 {
 		t.Fatalf("ctrl-d should remove the selected session, got %d", len(m.sessions))
 	}
@@ -1567,8 +1580,13 @@ func TestDeleteFlashSurvivesViewChange(t *testing.T) {
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the streamed session
 
 	// Deleting the streamed session drops back to the sessions list but keeps its
-	// own flash, since delete does not route through the navigation helpers.
+	// own flash, since delete does not route through the navigation helpers. The
+	// delete is irreversible and removes a file, so it asks first.
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	if m.confirm == "" {
+		t.Fatal("deleting a session must ask before removing its log")
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 	if m.view != viewSessions {
 		t.Fatal("deleting the streamed session should return to the sessions list")
 	}
@@ -1744,5 +1762,62 @@ func TestStreamRowLeavesAnImplementationCodeUnnamed(t *testing.T) {
 	got := rpcErrorText(proxy.RPCError{Code: -32001, Message: "rate limited"})
 	if got != "-32001: rate limited" {
 		t.Fatalf("an implementation-defined code should render bare, got %q", got)
+	}
+}
+
+// TestDeleteRefusesAnEscapingSessionID. The id is read out of the log's own
+// session_id field, so it is data rather than a name mcpsnoop chose, and a log
+// is a file people hand around. One spelling "../../x" made filepath.Join
+// resolve outside the sessions directory, and the delete key passed that
+// straight to os.Remove.
+func TestDeleteRefusesAnEscapingSessionID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MCPSNOOP_HOME", home)
+	victim := filepath.Join(home, "victim.jsonl")
+	if err := os.WriteFile(victim, []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := store.New()
+	st.Ingest(sessionEnv("../victim", "hostile"))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("a session id that leaves the sessions directory must not delete a file: %v", err)
+	}
+	if len(m.sessions) != 0 {
+		t.Fatalf("the session should still leave the view, got %d", len(m.sessions))
+	}
+}
+
+// TestReplayAsksBeforeRunningTheRecordedCommand. The command comes out of the
+// log's meta frame, so replaying executes whatever that file says, and the hub
+// backfills any .jsonl left in the sessions directory. The command is shown and
+// answered for before any process starts.
+func TestReplayAsksBeforeRunningTheRecordedCommand(t *testing.T) {
+	st := store.New()
+	seed(st)
+	st.Ingest(metaEnv("s1", []string{"/bin/sh", "-c", "touch /tmp/PWNED"}))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = typeRunes(t, m, "x")
+	m = typeRunes(t, m, "r")
+
+	if m.confirm == "" {
+		t.Fatal("replay must show the command and ask before running it")
+	}
+	if !strings.Contains(m.confirm, "/bin/sh") {
+		t.Fatalf("the prompt must name the command that would run, got %q", m.confirm)
+	}
+	if m.replaying {
+		t.Fatal("nothing may start before the question is answered")
+	}
+	// Declining runs nothing.
+	m = typeRunes(t, m, "n")
+	if m.replaying {
+		t.Fatal("declining must not start a replay")
 	}
 }
