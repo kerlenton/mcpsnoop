@@ -943,3 +943,51 @@ func TestParamHeaderDuplicateSurvivesRedaction(t *testing.T) {
 		t.Fatalf("a duplicate must survive redaction to be reported, got %q", ev.Warning)
 	}
 }
+
+// TestParamHeaderReachabilityReadsSchemaNotData. The scan walked arbitrary JSON,
+// so a JSON object sitting in default, const, examples or enum was read as a
+// subschema and a key spelled x-mcp-header in it as an annotation. A registry
+// server whose tool takes a schema as an argument and documents it is an ordinary
+// shape, and it was accused of a violation and had every real check switched off.
+func TestParamHeaderReachabilityReadsSchemaNotData(t *testing.T) {
+	t.Run("instance keywords hold data", func(t *testing.T) {
+		for _, kw := range []string{"default", "const", "examples", "enum"} {
+			inner := `{"type":"string","x-mcp-header":"Region"}`
+			if kw == "examples" || kw == "enum" {
+				inner = "[" + inner + "]"
+			}
+			schema := `{"type":"object","properties":{"s":{"type":"object","` + kw + `":` + inner + `}}}`
+			if _, violation := mcpParamHeaderBindings(json.RawMessage(schema)); violation != "" {
+				t.Errorf("%s holds data, not a subschema, got %q", kw, violation)
+			}
+		}
+	})
+
+	// The keys of these are names the server chose, not schema keywords.
+	t.Run("a definition named x-mcp-header is a name", func(t *testing.T) {
+		for _, kw := range []string{"$defs", "definitions", "dependentSchemas", "patternProperties"} {
+			schema := `{"type":"object","` + kw + `":{"x-mcp-header":{"type":"string"}},` +
+				`"properties":{"r":{"type":"string","x-mcp-header":"R"}}}`
+			bindings, violation := mcpParamHeaderBindings(json.RawMessage(schema))
+			if violation != "" || len(bindings) != 1 {
+				t.Errorf("%s: bindings=%d violation=%q, want one binding and no violation",
+					kw, len(bindings), violation)
+			}
+		}
+	})
+
+	// And the rule it exists for still fires, including through a $defs whose
+	// entry really does carry an annotation.
+	t.Run("a genuinely unreachable annotation still fires", func(t *testing.T) {
+		for _, tc := range []struct{ keyword, schema string }{
+			{"items", `{"type":"object","properties":{"xs":{"items":{"properties":{"r":{"type":"string","x-mcp-header":"R"}}}}}}`},
+			{"oneOf", `{"oneOf":[{"properties":{"r":{"type":"string","x-mcp-header":"R"}}}]}`},
+			{"$defs", `{"$defs":{"I":{"properties":{"r":{"type":"string","x-mcp-header":"R"}}}}}`},
+		} {
+			_, violation := mcpParamHeaderBindings(json.RawMessage(tc.schema))
+			if !strings.Contains(violation, tc.keyword) {
+				t.Errorf("%s: violation = %q, want it named", tc.keyword, violation)
+			}
+		}
+	})
+}

@@ -789,3 +789,62 @@ func TestRedactLeavesToolSchemasAlone(t *testing.T) {
 		}
 	})
 }
+
+// TestRedactSchemaExemptionIsScopedToAToolDefinition. Exempting any key called
+// inputSchema anywhere left a secret in a log the user was told was scrubbed,
+// because a tools/call argument may carry that name and a schema is data there.
+func TestRedactSchemaExemptionIsScopedToAToolDefinition(t *testing.T) {
+	t.Run("an argument named inputSchema is still data", func(t *testing.T) {
+		sink := &captureSink{}
+		NewRedactingSink(sink, RedactConfig{CommonSecrets: true}).Emit(Envelope{
+			Direction: ClientToServer,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"register",` +
+				`"arguments":{"inputSchema":{"token":"sk-ARGS-LEAK"},"outputSchema":{"password":"pw-ARGS-LEAK"}}}}`),
+		})
+		got := string(sink.byDir(ClientToServer)[0].Raw)
+		if strings.Contains(got, "sk-ARGS-LEAK") || strings.Contains(got, "pw-ARGS-LEAK") {
+			t.Fatalf("a secret survived under an argument named like a schema keyword: %s", got)
+		}
+	})
+
+	// Inside a real tool schema, default, const, examples and enum hold values
+	// rather than structure, so the exemption stops at them.
+	t.Run("instance data inside a real schema is still scrubbed", func(t *testing.T) {
+		sink := &captureSink{}
+		NewRedactingSink(sink, RedactConfig{CommonSecrets: true}).Emit(Envelope{
+			Direction: ServerToClient,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"route","inputSchema":` +
+				`{"type":"object","properties":{"tok":{"type":"string","x-mcp-header":"Tok",` +
+				`"default":{"password":"pw-DEFAULT-LEAK"}}}}}],"resultType":"complete"}}`),
+		})
+		got := string(sink.byDir(ServerToClient)[0].Raw)
+		if strings.Contains(got, "pw-DEFAULT-LEAK") {
+			t.Fatalf("a secret inside a schema default survived: %s", got)
+		}
+		if !strings.Contains(got, `"x-mcp-header":"Tok"`) {
+			t.Fatalf("the annotation must still survive: %s", got)
+		}
+	})
+}
+
+// TestRedactLeavesParsedSchemaKeywordsAlone. A value pattern is written against
+// text and knows nothing about schema keywords, so a pattern as ordinary as the
+// word region rewrote the annotation mcpsnoop itself reads, and the store then
+// reported the server for the user's own privacy setting.
+func TestRedactLeavesParsedSchemaKeywordsAlone(t *testing.T) {
+	sink := &captureSink{}
+	NewRedactingSink(sink, RedactConfig{ValuePatterns: []string{`(?i)region|string`}}).Emit(Envelope{
+		Direction: ServerToClient,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"sql","inputSchema":` +
+			`{"type":"object","properties":{"region":{"type":"string","description":"the region",` +
+			`"x-mcp-header":"Region"}}}}],"resultType":"complete"}}`),
+	})
+	got := string(sink.byDir(ServerToClient)[0].Raw)
+	if !strings.Contains(got, `"x-mcp-header":"Region"`) || !strings.Contains(got, `"type":"string"`) {
+		t.Fatalf("a pattern rewrote a keyword mcpsnoop parses: %s", got)
+	}
+	// A description is prose the server wrote, so it stays reachable.
+	if !strings.Contains(got, `"description":"the [REDACTED]"`) {
+		t.Fatalf("a pattern must still reach prose inside a schema: %s", got)
+	}
+}

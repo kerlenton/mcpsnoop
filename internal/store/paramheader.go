@@ -319,6 +319,32 @@ func unreachableAnnotation(schema json.RawMessage) string {
 	return scanForUnreachable(document, "")
 }
 
+// instanceKeywords hold example or default data rather than subschemas, so an
+// object inside one is the server's own data and a key spelled x-mcp-header in
+// it is not an annotation. A registry server whose tool takes a schema as an
+// argument and documents it with examples is an ordinary shape, and reading that
+// data as schema accused it of a violation and switched off every real check the
+// tool had.
+var instanceKeywords = map[string]struct{}{
+	"default":  {},
+	"const":    {},
+	"examples": {},
+	"enum":     {},
+}
+
+// nameKeyedSchemaMaps are objects whose keys the server chooses, a property name
+// or a pattern, rather than schema keywords. Their keys are stepped over and only
+// their values are read, or a definition named x-mcp-header reads as an
+// annotation. Only "properties" keeps the chain to an annotated property; the
+// rest break it, which is the whole point of the rule.
+var nameKeyedSchemaMaps = map[string]bool{
+	"properties":        true,
+	"$defs":             false,
+	"definitions":       false,
+	"dependentSchemas":  false,
+	"patternProperties": false,
+}
+
 func scanForUnreachable(node any, under string) string {
 	switch value := node.(type) {
 	case map[string]any:
@@ -334,17 +360,22 @@ func scanForUnreachable(node any, under string) string {
 		}
 		slices.Sort(keys)
 		for _, key := range keys {
-			if key == "properties" {
-				// One step further along the reachable chain. Its keys are names, so
-				// descend past them into each subschema keeping the current reach.
+			if _, instance := instanceKeywords[key]; instance {
+				continue
+			}
+			if keepsReach, named := nameKeyedSchemaMaps[key]; named {
 				if names, ok := value[key].(map[string]any); ok {
+					reach := under
+					if !keepsReach && reach == "" {
+						reach = key
+					}
 					childKeys := make([]string, 0, len(names))
 					for name := range names {
 						childKeys = append(childKeys, name)
 					}
 					slices.Sort(childKeys)
 					for _, name := range childKeys {
-						if note := scanForUnreachable(names[name], under); note != "" {
+						if note := scanForUnreachable(names[name], reach); note != "" {
 							return note
 						}
 					}
