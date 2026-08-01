@@ -232,37 +232,97 @@ func TestMCPParamHeadersAvoidUnsupportedContextFalsePositives(t *testing.T) {
 	})
 }
 
-func TestMCPParamHeaderIgnoresNonStaticSchemaPath(t *testing.T) {
+// TestMCPParamHeaderRejectsNonStaticSchemaPath. The annotation is permitted only
+// on a property reachable through a chain consisting solely of "properties" keys,
+// and the spec says of anything else that it "makes the annotation, and thus the
+// tool definition, invalid". Two halves to that. The definition is reported on
+// the frame that advertised it, and no header of that tool is compared, which is
+// what a conforming client excluding the tool would be doing anyway.
+func TestMCPParamHeaderRejectsNonStaticSchemaPath(t *testing.T) {
 	tests := map[string]struct {
-		schema string
-		args   string
+		schema  string
+		args    string
+		keyword string
 	}{
 		"items": {
 			schema: `{"type":"object","properties":{"items":{"type":"array","items":` +
 				`{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"}}}}}}`,
-			args: `{"items":[{"region":"us-west1"}]}`,
+			args:    `{"items":[{"region":"us-west1"}]}`,
+			keyword: "items",
 		},
 		"oneOf": {
 			schema: `{"oneOf":[{"type":"object","properties":` +
 				`{"region":{"type":"string","x-mcp-header":"Region"}}}]}`,
-			args: `{"region":"us-west1"}`,
+			args:    `{"region":"us-west1"}`,
+			keyword: "oneOf",
 		},
 		"ref": {
 			schema: `{"$ref":"#/$defs/Input","$defs":{"Input":{"type":"object","properties":` +
 				`{"region":{"type":"string","x-mcp-header":"Region"}}}}}`,
-			args: `{"region":"us-west1"}`,
+			args:    `{"region":"us-west1"}`,
+			keyword: "$defs",
 		},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			tool := `{"name":"route","inputSchema":` + test.schema + `}`
 			s := New()
-			listExchange(s, 1, "", toolsListResult("", tool))
+			list := listExchangeView(s, toolsListResult("", tool))
+			if !strings.Contains(list.Warning, test.keyword) ||
+				!strings.Contains(list.Warning, `tool "route" declares`) {
+				t.Fatalf("the advertising frame must name the keyword, got %q", list.Warning)
+			}
 			ev := s.Ingest(paramCall(3, proxy.TransportHTTP, false, test.args,
 				proxy.MCPParamHeader{Name: "Mcp-Param-Region", Value: "wrong"},
 			))
 			if ev.RoutingMismatch || strings.Contains(ev.Warning, "Mcp-Param") {
-				t.Fatalf("non-static schema path warned: mismatch=%v warning=%q", ev.RoutingMismatch, ev.Warning)
+				t.Fatalf("a rejected definition must have no headers compared: mismatch=%v warning=%q",
+					ev.RoutingMismatch, ev.Warning)
+			}
+		})
+	}
+}
+
+// TestMCPParamHeaderStaticReachabilityBoundaries pins what the scan must not
+// report. A legal nested chain, an unused $defs carrying no annotation, and a
+// tool whose argument is genuinely named x-mcp-header, which a scan keyed on the
+// literal string alone would accuse of an annotation it does not have.
+func TestMCPParamHeaderStaticReachabilityBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, schema string
+		wantBindings int
+	}{
+		{
+			name: "nested properties chain is reachable",
+			schema: `{"type":"object","properties":{"options":{"type":"object","properties":` +
+				`{"region":{"type":"string","x-mcp-header":"Region"}}}}}`,
+			wantBindings: 1,
+		},
+		{
+			name: "unused defs carrying no annotation",
+			schema: `{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"}},` +
+				`"$defs":{"Unused":{"type":"string"}}}`,
+			wantBindings: 1,
+		},
+		{
+			name:         "an argument named x-mcp-header",
+			schema:       `{"type":"object","properties":{"x-mcp-header":{"type":"string"}}}`,
+			wantBindings: 0,
+		},
+		{
+			name: "an argument named x-mcp-header beside a real annotation",
+			schema: `{"type":"object","properties":{"x-mcp-header":{"type":"string"},` +
+				`"region":{"type":"string","x-mcp-header":"Region"}}}`,
+			wantBindings: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bindings, violation := mcpParamHeaderBindings(json.RawMessage(tc.schema))
+			if violation != "" {
+				t.Fatalf("a legal schema was reported: %s", violation)
+			}
+			if len(bindings) != tc.wantBindings {
+				t.Fatalf("bindings = %+v, want %d", bindings, tc.wantBindings)
 			}
 		})
 	}
