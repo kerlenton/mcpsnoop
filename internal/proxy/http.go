@@ -79,9 +79,14 @@ type route struct {
 	protocolVersion string // MCP-Protocol-Version (request-scoped, not per operation)
 	params          []MCPParamHeader
 	batch           bool
-	truncated       bool   // the observed copy was cut at the frame-size cap
-	status          int    // HTTP status of the response carrying this frame
-	challenge       string // WWW-Authenticate on that response
+	// conn identifies the client connection this frame was observed on. One proxy
+	// process carries every client that connects to it, and JSON-RPC id
+	// uniqueness is scoped to the sender rather than to the wire, so two
+	// conforming clients both starting at id 1 collided in one id space.
+	conn      string
+	truncated bool   // the observed copy was cut at the frame-size cap
+	status    int    // HTTP status of the response carrying this frame
+	challenge string // WWW-Authenticate on that response
 }
 
 // wwwAuthenticateHeader carries the challenge on a 401. It is kept verbatim
@@ -107,6 +112,7 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 			MCPProtocolVersion: r.protocolVersion,
 			MCPParamHeaders:    slices.Clone(r.params),
 			Batch:              r.batch,
+			ConnID:             r.conn,
 			Truncated:          r.truncated,
 			Status:             r.status,
 			AuthChallenge:      r.challenge,
@@ -243,6 +249,9 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			// The status and the challenge ride every frame observed on this
 			// response, so the transport layer is visible even when the body is not.
 			rt := route{status: resp.StatusCode, challenge: resp.Header.Get(wwwAuthenticateHeader)}
+			if resp.Request != nil {
+				rt.conn = resp.Request.RemoteAddr
+			}
 			// Defensive fallback. If the target ignored the identity request and
 			// still compressed the body, skip observation rather than push binary
 			// into a frame. Forwarding is untouched, the client gets the original body.
@@ -279,7 +288,7 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 		// reaches ModifyResponse: the reverse proxy synthesises a 502 and writes it
 		// straight to the client. Pointing mcpsnoop at the wrong port is a common
 		// first mistake, and an empty screen is the worst possible answer to it.
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			// A cancelled context means the client went away or mcpsnoop is shutting
 			// down, not that the target failed. ReverseProxy routes both through here
 			// because a cancelled request context surfaces as a RoundTrip error, and
@@ -288,7 +297,7 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			// session, which is the failure mode this whole change exists to avoid.
 			// A deadline is not excluded: a target that timed out did fail.
 			if !errors.Is(err, context.Canceled) {
-				emit(ServerToClient, nil, route{status: http.StatusBadGateway})
+				emit(ServerToClient, nil, route{status: http.StatusBadGateway, conn: req.RemoteAddr})
 			}
 			w.WriteHeader(http.StatusBadGateway)
 		},
@@ -301,6 +310,7 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 				name:            r.Header.Get(mcpNameHeader),
 				protocolVersion: r.Header.Get(mcpProtocolVersionHeader),
 				params:          mcpParamHeaders(r.Header),
+				conn:            r.RemoteAddr,
 			}
 			// Same streaming tap for the request body, so a large upload is forwarded
 			// without being held in memory whole.
@@ -332,7 +342,8 @@ func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte,
 				// to one operation in it, so unlike the routing headers they ride every
 				// element. Dropping them here would make a batched response the one
 				// place the transport layer went missing again.
-				er := route{batch: true, protocolVersion: rt.protocolVersion, status: rt.status, challenge: rt.challenge}
+				er := route{batch: true, protocolVersion: rt.protocolVersion, status: rt.status,
+					challenge: rt.challenge, conn: rt.conn}
 				if i == 0 {
 					er.method, er.name, er.params = rt.method, rt.name, rt.params
 				}

@@ -81,6 +81,13 @@ type Envelope struct {
 	// Batch marks a frame that was one element of a JSON-RPC batch array. Routing
 	// headers address a single operation, so they cannot describe a batch.
 	Batch bool `json:"batch,omitempty"`
+	// ConnID identifies the client connection an HTTP frame was observed on, empty
+	// on stdio where there is only ever one peer. The store folds it into the key
+	// it correlates a request with its response by, because one proxy process
+	// carries every client that connects to it while JSON-RPC scopes id
+	// uniqueness to the sender, so two conforming clients both starting at id 1
+	// were reported for reusing an id in flight.
+	ConnID string `json:"conn_id,omitempty"`
 	// Truncated marks a frame whose observed copy was cut at the frame-size cap.
 	// The bytes still forwarded to the other side in full; only this copy is short.
 	Truncated bool `json:"truncated,omitempty"`

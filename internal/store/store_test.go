@@ -2044,3 +2044,53 @@ func TestResultTypeSurvivesAnMRTRRetry(t *testing.T) {
 		t.Fatalf("the retry's answer is judged by the retry's own revision: %q", ev.Warning)
 	}
 }
+
+// TestTruncatedRequestDoesNotOrphanItsResponse. A request past the frame-size cap
+// is stored as a truncated frame and opens no call, so its ordinary response had
+// nothing to match and was reported as orphaned. The traffic was correct in both
+// directions and the gap was mcpsnoop's own, which is the same reasoning that
+// keeps truncation itself out of the warning field.
+func TestTruncatedRequestDoesNotOrphanItsResponse(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	capped := req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"big"}`)
+	capped.Truncated = true
+	s.Ingest(capped)
+	if ev := s.Ingest(resp(2, t0, proxy.ServerToClient, "1", `"result":{}`)); ev.Warning != "" {
+		t.Fatalf("the response to a capped request must be silent, got %q", ev.Warning)
+	}
+	// A genuinely orphaned response after it is still reported.
+	if ev := s.Ingest(resp(3, t0, proxy.ServerToClient, "99", `"result":{}`)); ev.Warning == "" {
+		t.Fatal("a response with no request at all must still be reported")
+	}
+}
+
+// TestTwoClientsThroughOneProxyKeepSeparateIDSpaces. One `mcpsnoop http` run
+// carries every client that connects to it, and JSON-RPC scopes id uniqueness to
+// the sender rather than to the wire, so two conforming clients both starting at
+// id 1 were reported for reusing an id in flight and for answering it twice.
+func TestTwoClientsThroughOneProxyKeepSeparateIDSpaces(t *testing.T) {
+	conn := func(e proxy.Envelope, id string) proxy.Envelope {
+		e.Transport = proxy.TransportHTTP
+		e.ConnID = id
+		return e
+	}
+	s := New()
+	t0 := time.Now()
+	a := s.Ingest(conn(req(1, t0, proxy.ClientToServer, "1", "tools/list", `{}`), "10.0.0.1:5001"))
+	b := s.Ingest(conn(req(2, t0, proxy.ClientToServer, "1", "tools/list", `{}`), "10.0.0.2:5002"))
+	ra := s.Ingest(conn(resp(3, t0, proxy.ServerToClient, "1", `"result":{}`), "10.0.0.1:5001"))
+	rb := s.Ingest(conn(resp(4, t0, proxy.ServerToClient, "1", `"result":{}`), "10.0.0.2:5002"))
+	for name, ev := range map[string]EventView{"A req": a, "B req": b, "A resp": ra, "B resp": rb} {
+		if ev.Warning != "" {
+			t.Fatalf("%s warned on two conforming clients: %q", name, ev.Warning)
+		}
+	}
+
+	// One client genuinely reusing an id in flight is still reported.
+	s2 := New()
+	s2.Ingest(conn(req(1, t0, proxy.ClientToServer, "1", "tools/list", `{}`), "10.0.0.1:5001"))
+	if ev := s2.Ingest(conn(req(2, t0, proxy.ClientToServer, "1", "tools/list", `{}`), "10.0.0.1:5001")); ev.Warning == "" {
+		t.Fatal("one sender reusing an id in flight must still be reported")
+	}
+}

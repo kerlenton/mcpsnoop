@@ -977,3 +977,38 @@ func TestExportFromAPipeDoesNotZeroTheSource(t *testing.T) {
 		t.Fatalf("the source holds neither its own contents nor a complete export:\n%s", got)
 	}
 }
+
+// TestExportIntoANonWritableDirectory. The atomic write needs to create a
+// temporary file beside the destination, which a directory that is not writable
+// refuses even when the destination file itself is. A CI artifact directory with
+// a pre-created placeholder is that shape, and it worked before the atomic write.
+func TestExportIntoANonWritableDirectory(t *testing.T) {
+	input, original := writeUnredactedSession(t)
+	dir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "out.json")
+	if err := os.WriteFile(output, []byte("placeholder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o700) }()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+
+	if code := execute([]string{"export", input, "--output", output}); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(got) {
+		t.Fatalf("the export did not reach the destination:\n%s", got)
+	}
+	assertFileUnchanged(t, input, original)
+}

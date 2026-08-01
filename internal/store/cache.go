@@ -231,23 +231,69 @@ func (sess *session) invalidateCache(method string, params json.RawMessage) {
 // the rest of it must repeat; keying on the method alone without that reset
 // would report two independent single-page listings whose scope legitimately
 // differs, which is traffic the spec permits.
-func (sess *session) checkCacheScopeAcrossPages(c *call, scope string) string {
+func (sess *session) checkCacheScopeAcrossPages(c *call, result json.RawMessage, scope string) string {
 	if !paginatedListMethod(c.method) {
 		return ""
 	}
-	if !hasListCursor(c.params) {
+	note := ""
+	if cursor := listCursor(c.params); cursor != "" {
+		// A continuation. The run it continues is the one that issued this cursor,
+		// not merely the last listing of this method, because one proxy process
+		// carries every client that connects to it and two runs of the same method
+		// legitimately overlap. Keying on the method alone let a second run take
+		// over the first one's slot and each report the other.
+		if first, ok := sess.cacheListScope[cacheScopeKey(c.method, cursor)]; ok &&
+			first != "" && scope != "" && first != scope {
+			note = "cacheScope " + strconv.Quote(scope) + " on a later page of " + c.method +
+				" disagrees with " + strconv.Quote(first) +
+				" on the first, and 2026-07-28 requires one scope per list request"
+		}
+	}
+	// Chain the run forward onto the cursor this page issued, so the next
+	// continuation finds it. A cursor mcpsnoop never saw issued yields nothing and
+	// the check stays silent, the same answer it already gives for a first page it
+	// did not observe.
+	if next := nextListCursor(result); next != "" {
 		if sess.cacheListScope == nil {
 			sess.cacheListScope = make(map[string]string)
 		}
-		sess.cacheListScope[c.method] = scope
-		return ""
+		sess.cacheListScope[cacheScopeKey(c.method, next)] = scope
 	}
-	first, ok := sess.cacheListScope[c.method]
-	if !ok || first == "" || scope == "" || first == scope {
-		return ""
+	return note
+}
+
+func cacheScopeKey(method, cursor string) string { return method + "\x00" + cursor }
+
+func listCursor(params json.RawMessage) string {
+	var p struct {
+		Cursor string `json:"cursor"`
 	}
-	return "cacheScope " + strconv.Quote(scope) + " on a later page of " + c.method +
-		" disagrees with " + strconv.Quote(first) + " on the first, and 2026-07-28 requires one scope per list request"
+	_ = json.Unmarshal(params, &p)
+	return p.Cursor
+}
+
+func nextListCursor(result json.RawMessage) string {
+	var r struct {
+		NextCursor string `json:"nextCursor"`
+	}
+	_ = json.Unmarshal(result, &r)
+	return r.NextCursor
+}
+
+// mrtrRetry reports whether a request continued a multi round-trip exchange. The
+// caching page says outright that a result produced by one "MUST NOT be cached,
+// as they depend on inputs that are not part of the cache key", so recording it
+// invented a freshness window and demanding its ttlMs accused a server of
+// omitting a hint the spec never asked it for.
+func mrtrRetry(params json.RawMessage) bool {
+	var p struct {
+		InputResponses json.RawMessage `json:"inputResponses"`
+		RequestState   json.RawMessage `json:"requestState"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return false
+	}
+	return declared(p.InputResponses) || declared(p.RequestState)
 }
 
 func (sess *session) recordCacheFromResponse(c *call, result json.RawMessage, ts time.Time) (CacheHint, []string) {
@@ -257,7 +303,7 @@ func (sess *session) recordCacheFromResponse(c *call, result json.RawMessage, ts
 	if !atLeastRevision(c.protocolVersion, cacheRequiredFrom) {
 		return CacheHint{}, nil
 	}
-	if !isCompleteCacheableResult(result) {
+	if !isCompleteCacheableResult(result) || mrtrRetry(c.params) {
 		return CacheHint{}, nil
 	}
 	hint, warnings := parseCacheHints(result)
@@ -270,7 +316,7 @@ func (sess *session) recordCacheFromResponse(c *call, result json.RawMessage, ts
 		warnings = append(warnings, "cacheable "+c.method+
 			" result declares no ttlMs, which 2026-07-28 requires")
 	}
-	if note := sess.checkCacheScopeAcrossPages(c, hint.Scope); note != "" {
+	if note := sess.checkCacheScopeAcrossPages(c, result, hint.Scope); note != "" {
 		warnings = append(warnings, note)
 	}
 	if hint.TTLMs > 0 {

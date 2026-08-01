@@ -23,17 +23,55 @@ func seedParamHeaderTool(s *Store) {
 }
 
 // listExchangeView is listExchange keeping the response frame, which is where a
-// verdict about an advertised definition has to land.
+// verdict about an advertised definition has to land. Streamable HTTP on
+// 2026-07-28, because that is the only context the x-mcp-header rules apply in.
 func listExchangeView(s *Store, result string) EventView {
+	return listExchangeOn(s, result, proxy.TransportHTTP, "2026-07-28")
+}
+
+func listExchangeOn(s *Store, result, transport, revision string) EventView {
 	now := time.Now()
+	meta := "{}"
+	if revision != "" {
+		meta = `{"_meta":{"io.modelcontextprotocol/protocolVersion":"` + revision + `",` +
+			`"io.modelcontextprotocol/clientCapabilities":{}}}`
+	}
 	s.Ingest(proxy.Envelope{
 		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
-		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`),
+		Transport: transport, MCPMethod: "tools/list", MCPProtocolVersion: revision,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":` + meta + `}`),
 	})
 	return s.Ingest(proxy.Envelope{
 		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ServerToClient,
-		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":` + result + `}`),
+		Transport: transport,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":` + result + `}`),
 	})
+}
+
+// TestParamHeaderVerdictIsScopedToTheRuleItReports. x-mcp-header does not exist
+// before 2026-07-28, and the released text scopes the duty to reject to clients
+// using Streamable HTTP, saying the rest "MAY ignore x-mcp-header annotations
+// entirely". Reporting it anywhere else accuses a server of a rule it is not
+// under, on a signal a default check run fails.
+func TestParamHeaderVerdictIsScopedToTheRuleItReports(t *testing.T) {
+	const tool = `{"name":"t","inputSchema":{"type":"object","properties":` +
+		`{"ratio":{"type":"number","x-mcp-header":"Ratio"}}}}`
+	for _, tc := range []struct {
+		name, transport, revision string
+		want                      bool
+	}{
+		{"http on 2026-07-28", proxy.TransportHTTP, "2026-07-28", true},
+		{"http on an older revision", proxy.TransportHTTP, "2025-11-25", false},
+		{"stdio on 2026-07-28", proxy.TransportStdio, "2026-07-28", false},
+		{"stdio with no revision", proxy.TransportStdio, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := listExchangeOn(New(), toolsListResult("", tool), tc.transport, tc.revision)
+			if got := strings.Contains(ev.Warning, "x-mcp-header"); got != tc.want {
+				t.Fatalf("warning = %q, want the verdict reported = %v", ev.Warning, tc.want)
+			}
+		})
+	}
 }
 
 func paramCall(seq uint64, transport string, batch bool, args string, headers ...proxy.MCPParamHeader) proxy.Envelope {
@@ -416,28 +454,52 @@ func TestParamHeaderRedactionIsNotAMismatch(t *testing.T) {
 	}
 }
 
-// TestParamHeaderRedactionGuardIsNotForgeable. "[REDACTED]" is a legal header
-// value and a legal string argument, so the header side is decided by the flag
-// the shim set and never by the bytes. The frame-wide flag is not enough either,
-// since any rule matching anything on the frame would otherwise unlock the skip
-// for a header no rule touched.
+// TestParamHeaderRedactionGuardIsNotForgeable states exactly how far the guard
+// goes, because it cannot go all the way. "[REDACTED]" is a legal header value,
+// so the header side is decided by the flag the shim sets. But v0.17.0 shipped
+// the Mcp-Param capture without that flag, so a capture from it carries the
+// frame-level mark and nothing else, and reading only the flag turned every one
+// of those correct captures into a mismatch.
+//
+// The reading is therefore: a frame that was rewritten and yet flagged no header
+// at all can only come from that older writer, so the bytes are believed. Once
+// any header on the frame carries the flag, the writer is known to set them and
+// a bare placeholder is the peer's own. The residue is a peer sending the
+// placeholder on a frame where a rule fired but touched no header, which costs
+// the peer the routing it was attacking with, since that header routes nowhere.
 func TestParamHeaderRedactionGuardIsNotForgeable(t *testing.T) {
 	const schema = `{"type":"object","properties":{"authKey":{"type":"string","x-mcp-header":"Auth"}}}`
 	for _, tc := range []struct {
-		name           string
-		frameRedacted  bool
-		headerScrubbed bool
-		wantWarnings   int
+		name          string
+		frameRedacted bool
+		headers       []proxy.MCPParamHeader
+		wantWarnings  int
 	}{
-		{"mcpsnoop scrubbed this header", true, true, 0},
-		{"a peer sent the placeholder itself", true, false, 1},
-		{"no redaction anywhere", false, false, 1},
+		{
+			name: "mcpsnoop scrubbed this header", frameRedacted: true,
+			headers: []proxy.MCPParamHeader{{Name: "Mcp-Param-Auth", Value: redactedMarker, Redacted: true}},
+		},
+		{
+			name: "no redaction anywhere", frameRedacted: false,
+			headers:      []proxy.MCPParamHeader{{Name: "Mcp-Param-Auth", Value: redactedMarker}},
+			wantWarnings: 1,
+		},
+		{
+			name: "a writer that does set flags, so a bare placeholder is the peer's", frameRedacted: true,
+			headers: []proxy.MCPParamHeader{
+				{Name: "Mcp-Param-Auth", Value: redactedMarker},
+				{Name: "Mcp-Param-Other", Value: redactedMarker, Redacted: true},
+			},
+			wantWarnings: 1,
+		},
+		{
+			name: "a v0.17.0 capture, flags nowhere on a rewritten frame", frameRedacted: true,
+			headers: []proxy.MCPParamHeader{{Name: "Mcp-Param-Auth", Value: redactedMarker}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := mcpParamHeaderWarnings(paramSession(t, "fetch", schema),
-				paramCallMsg("fetch", `{"authKey":"sk-live-abcdef"}`),
-				[]proxy.MCPParamHeader{{Name: "Mcp-Param-Auth", Value: redactedMarker, Redacted: tc.headerScrubbed}},
-				tc.frameRedacted)
+				paramCallMsg("fetch", `{"authKey":"sk-live-abcdef"}`), tc.headers, tc.frameRedacted)
 			if len(got) != tc.wantWarnings {
 				t.Fatalf("warnings = %v, want %d", got, tc.wantWarnings)
 			}
@@ -932,11 +994,14 @@ func TestParamHeaderDuplicateSurvivesRedaction(t *testing.T) {
 	s := New()
 	s.Ingest(proxy.Envelope{
 		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
-		Direction: proxy.ClientToServer,
-		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`),
+		Direction: proxy.ClientToServer, Transport: proxy.TransportHTTP,
+		MCPMethod: "tools/list", MCPProtocolVersion: "2026-07-28",
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":` +
+			`{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",` +
+			`"io.modelcontextprotocol/clientCapabilities":{}}}}`),
 	})
 	ev := s.Ingest(proxy.Envelope{
-		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(),
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(), Transport: proxy.TransportHTTP,
 		Direction: proxy.ServerToClient, Raw: sink.envs[0].Raw, Redacted: sink.envs[0].Redacted,
 	})
 	if !strings.Contains(ev.Warning, "on more than one property") {
@@ -990,4 +1055,70 @@ func TestParamHeaderReachabilityReadsSchemaNotData(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestParamHeaderAnyOfCarriesTheType. A property whose type is expressed through
+// a single non-null anyOf or oneOf branch declares no "type" keyword, which is
+// what pydantic Optional[str] and zod .nullable() generate. Reading only "type"
+// dropped the binding in silence, so a genuine header-versus-body disagreement
+// on that property was reported by nothing at all.
+func TestParamHeaderAnyOfCarriesTheType(t *testing.T) {
+	for _, tc := range []struct {
+		name, schema string
+		wantTyp      string
+		wantViolate  string
+	}{
+		{
+			name:    "anyOf string or null",
+			schema:  `{"type":"object","properties":{"r":{"anyOf":[{"type":"string"},{"type":"null"}],"x-mcp-header":"R"}}}`,
+			wantTyp: "string",
+		},
+		{
+			name:    "oneOf integer or null",
+			schema:  `{"type":"object","properties":{"r":{"oneOf":[{"type":"integer"},{"type":"null"}],"x-mcp-header":"R"}}}`,
+			wantTyp: "integer",
+		},
+		// Two real branches cannot be judged, so nothing is bound and nobody is
+		// accused, the same answer an absent type keyword already gets.
+		{
+			name:   "anyOf string or integer",
+			schema: `{"type":"object","properties":{"r":{"anyOf":[{"type":"string"},{"type":"integer"}],"x-mcp-header":"R"}}}`,
+		},
+		{
+			name:        "anyOf number is still forbidden",
+			schema:      `{"type":"object","properties":{"r":{"anyOf":[{"type":"number"},{"type":"null"}],"x-mcp-header":"R"}}}`,
+			wantViolate: `whose type "number" is not one of`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bindings, violation := mcpParamHeaderBindings(json.RawMessage(tc.schema))
+			if tc.wantViolate != "" {
+				if !strings.Contains(violation, tc.wantViolate) {
+					t.Fatalf("violation = %q, want one containing %q", violation, tc.wantViolate)
+				}
+				return
+			}
+			if violation != "" {
+				t.Fatalf("unexpected violation %q", violation)
+			}
+			if tc.wantTyp == "" {
+				if len(bindings) != 0 {
+					t.Fatalf("bindings = %+v, want none", bindings)
+				}
+				return
+			}
+			if len(bindings) != 1 || bindings[0].typ != tc.wantTyp {
+				t.Fatalf("bindings = %+v, want one of type %q", bindings, tc.wantTyp)
+			}
+		})
+	}
+
+	// And the annotation is still compared, which is the whole point.
+	sess := paramSession(t, "route",
+		`{"type":"object","properties":{"region":{"anyOf":[{"type":"string"},{"type":"null"}],"x-mcp-header":"Region"}}}`)
+	got := mcpParamHeaderWarnings(sess, paramCallMsg("route", `{"region":"us-west1"}`),
+		[]proxy.MCPParamHeader{{Name: "Mcp-Param-Region", Value: "eu-west1"}}, false)
+	if len(got) != 1 {
+		t.Fatalf("a disagreement on an anyOf-typed property must be reported, got %v", got)
+	}
 }

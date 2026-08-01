@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
@@ -85,12 +84,21 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 		return 1, err
 	}
 
-	var seq atomic.Uint64
+	// The number and the handoff are taken together under one lock. Three pumps
+	// call emit at once, the client, the server and stderr, and an atomic counter
+	// only makes each number unique, not the order they reach the sink in. The
+	// store infers a dropped frame from a forward jump in Seq, so a pair that
+	// arrived swapped was counted as loss on a capture that had lost nothing, and
+	// that invented figure reached check --fail-on incomplete, the JSON export,
+	// the HAR comment, the OTLP attributes and the TUI banner alike.
+	var (
+		seqMu sync.Mutex
+		seq   uint64
+	)
 	emit := func(dir Direction, raw []byte, text string, truncated bool) {
 		env := Envelope{
 			SessionID:   cfg.SessionID,
 			ServerLabel: cfg.Label,
-			Seq:         seq.Add(1),
 			TS:          time.Now(),
 			Direction:   dir,
 			Transport:   TransportStdio,
@@ -101,6 +109,10 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 			env.Raw = append([]byte(nil), raw...)
 		}
 		env.Text = text
+		seqMu.Lock()
+		defer seqMu.Unlock()
+		seq++
+		env.Seq = seq
 		sink.Emit(env)
 	}
 

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -588,7 +589,21 @@ func openExportTarget(path string) (*exportTarget, error) {
 	// look like a finished one to whatever is watching the directory.
 	file, err := os.CreateTemp(dir, ".mcpsnoop-export-*")
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, fs.ErrPermission) {
+			return nil, err
+		}
+		// A writable file inside a directory that is not writable, which is what a
+		// CI artifact directory with a pre-created placeholder looks like. That
+		// worked before the atomic write and refusing it now would be a regression,
+		// so fall back to writing the destination directly. The cost is that an
+		// interrupted run leaves a partial file, which the caller says out loud.
+		direct, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if openErr != nil {
+			return nil, err
+		}
+		fmt.Fprintln(os.Stderr, "mcpsnoop export: writing "+path+" in place, "+
+			"the directory does not allow a temporary file, so an interrupted run may leave it partial")
+		return &exportTarget{file: direct}, nil
 	}
 	return &exportTarget{file: file, temp: file.Name(), dest: path}, nil
 }

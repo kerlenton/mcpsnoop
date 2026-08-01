@@ -33,6 +33,11 @@ type paramHeaderSchema struct {
 	// silently switched off header checking for the entire tool.
 	Type   json.RawMessage `json:"type"`
 	Header json.RawMessage `json:"x-mcp-header"`
+	// AnyOf and OneOf are read only to recover a type the property expresses
+	// through a single non-null branch. They are not a path to an annotation, and
+	// scanForUnreachable still rejects one that hides under them.
+	AnyOf []json.RawMessage `json:"anyOf"`
+	OneOf []json.RawMessage `json:"oneOf"`
 	// Properties holds each subschema raw, and each is decoded on its own, because
 	// a property value need not be an object. JSON Schema 2020-12 allows the
 	// boolean subschemas true and false there, and mcpsnoop's own redaction
@@ -66,8 +71,14 @@ func paramHeaderType(raw json.RawMessage) (string, bool) {
 	if json.Unmarshal(raw, &union) != nil {
 		return "", false
 	}
+	return singleNamedType(union)
+}
+
+// singleNamedType is the one non-null member of a type union, or nothing when
+// there is more than one.
+func singleNamedType(members []string) (string, bool) {
 	named := ""
-	for _, member := range union {
+	for _, member := range members {
 		if member == "null" {
 			continue
 		}
@@ -75,6 +86,34 @@ func paramHeaderType(raw json.RawMessage) (string, bool) {
 			return "", false
 		}
 		named = member
+	}
+	return named, named != ""
+}
+
+// branchType reads the type out of a single-branch anyOf or oneOf, dropping null
+// branches. That shape carries no "type" keyword of its own and is what pydantic
+// Optional[str] and zod .nullable() generate, so reading only "type" dropped the
+// binding in silence and a real header-versus-body disagreement went unreported.
+func branchType(branches []json.RawMessage) (string, bool) {
+	named := ""
+	for _, branch := range branches {
+		var member struct {
+			Type json.RawMessage `json:"type"`
+		}
+		if json.Unmarshal(branch, &member) != nil {
+			return "", false
+		}
+		typ, declared := paramHeaderType(member.Type)
+		if !declared || typ == "null" {
+			if !declared {
+				return "", false
+			}
+			continue
+		}
+		if named != "" {
+			return "", false
+		}
+		named = typ
 	}
 	return named, named != ""
 }
@@ -143,11 +182,25 @@ func mcpParamHeaderWarnings(sess *session, msg proxy.RPCMessage, headers []proxy
 	// read back out of the value. "[REDACTED]" is a legal header value a peer
 	// controls, so a guess made from the bytes cannot tell the two apart.
 	scrubbed := make(map[string]struct{})
+	flagged := false
 	for _, header := range headers {
 		key := strings.ToLower(header.Name)
 		values[key] = append(values[key], header.Value)
 		if header.Redacted {
 			scrubbed[key] = struct{}{}
+			flagged = true
+		}
+	}
+	// A capture written before the per-header flag existed carries the frame-level
+	// mark and nothing else, so the evidence is there and reading only the flag
+	// ignored it, turning a correct old capture into a mismatch. The bytes are a
+	// second chance rather than the answer: a frame that was rewritten and yet
+	// flagged no header at all can only be an older writer, since every scrub since
+	// sets the flag.
+	byBytes := redacted && !flagged
+	for _, header := range headers {
+		if byBytes && header.Value == redactedMarker {
+			scrubbed[strings.ToLower(header.Name)] = struct{}{}
 		}
 	}
 
@@ -468,6 +521,13 @@ func paramHeaderAnnotation(property paramHeaderSchema, path []string, seen map[s
 	}
 	seen[key] = struct{}{}
 	typ, declared := paramHeaderType(property.Type)
+	if !declared {
+		if branches := property.AnyOf; len(branches) > 0 {
+			typ, declared = branchType(branches)
+		} else if branches := property.OneOf; len(branches) > 0 {
+			typ, declared = branchType(branches)
+		}
+	}
 	if declared && !isMCPParamPrimitive(typ) {
 		return paramHeaderBinding{}, false, "x-mcp-header " + strconv.Quote(header) + where +
 			", whose type " + strconv.Quote(typ) + " is not one of string, integer or boolean"
