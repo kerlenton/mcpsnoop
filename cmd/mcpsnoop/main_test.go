@@ -723,7 +723,7 @@ func TestTraceSinkStreamsCompletedCallToOTLP(t *testing.T) {
 	defer server.Close()
 
 	traceFile := filepath.Join(t.TempDir(), "session.jsonl")
-	sink := traceSink("s1", traceFile, false, proxy.RedactConfig{}, traceOptions{
+	sink, _ := traceSink("s1", traceFile, false, proxy.RedactConfig{}, traceOptions{
 		OTLPEndpoint: server.URL,
 		OTLPHeaders:  http.Header{"Authorization": {"Bearer test-token"}},
 	})
@@ -789,7 +789,7 @@ func TestTraceSinkRedactsFileAndLiveSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sink := traceSink("s1", traceFile, false, proxy.RedactConfig{Paths: []proxy.RedactPath{path}}, traceOptions{})
+	sink, _ := traceSink("s1", traceFile, false, proxy.RedactConfig{Paths: []proxy.RedactPath{path}}, traceOptions{})
 	closed := false
 	t.Cleanup(func() {
 		if !closed {
@@ -976,4 +976,78 @@ func TestExportFromAPipeDoesNotZeroTheSource(t *testing.T) {
 	if !json.Valid(got) {
 		t.Fatalf("the source holds neither its own contents nor a complete export:\n%s", got)
 	}
+}
+
+// TestExportIntoANonWritableDirectory. The atomic write needs to create a
+// temporary file beside the destination, which a directory that is not writable
+// refuses even when the destination file itself is. A CI artifact directory with
+// a pre-created placeholder is that shape, and it worked before the atomic write.
+func TestExportIntoANonWritableDirectory(t *testing.T) {
+	input, original := writeUnredactedSession(t)
+	dir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "out.json")
+	if err := os.WriteFile(output, []byte("placeholder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o700) }()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+
+	if code := execute([]string{"export", input, "--output", output}); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(got) {
+		t.Fatalf("the export did not reach the destination:\n%s", got)
+	}
+	assertFileUnchanged(t, input, original)
+}
+
+// TestTraceSinkReportsOnlyTheFileSinkDrops. The shim's "the trace is incomplete"
+// line is the one signal that means a capture cannot be trusted, and it was
+// totalling every child sink. The live socket fills its buffer whenever no hub is
+// running, which is the ordinary case, and an OTLP endpoint that is down is a
+// delivery problem rather than a hole in the trace, so the message fired
+// routinely on captures whose file held every frame.
+func TestTraceSinkReportsOnlyTheFileSinkDrops(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+
+	t.Run("the file sink is reported apart from the fan-out", func(t *testing.T) {
+		sink, file := traceSink("sess-1", "", false, proxy.RedactConfig{}, traceOptions{})
+		defer sink.Close()
+		if file == nil {
+			t.Fatal("the durable file sink must be reported separately")
+		}
+		if any(file) == any(sink) {
+			t.Fatal("reporting the fan-out is what made a live socket with no hub read as a hole in the trace")
+		}
+	})
+
+	// With no file to write, nothing can be missing from it, so the shim has
+	// nothing to say however much the other sinks drop.
+	t.Run("no file sink means nothing to call incomplete", func(t *testing.T) {
+		sink, file := traceSink("sess-2", filepath.Join(t.TempDir(), "no", "such", "dir", "t.jsonl"),
+			false, proxy.RedactConfig{}, traceOptions{})
+		defer sink.Close()
+		if file != nil {
+			t.Fatal("there is no durable trace here, so there is no drop count to report")
+		}
+	})
+
+	t.Run("tracing off has no sinks at all", func(t *testing.T) {
+		_, file := traceSink("sess-3", "", true, proxy.RedactConfig{}, traceOptions{})
+		if file != nil {
+			t.Fatal("--no-trace writes nothing, so nothing can be incomplete")
+		}
+	})
 }

@@ -12,6 +12,7 @@
 package paths
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -138,7 +139,44 @@ func ToolBaselinesDir() string {
 	return d
 }
 
-// SessionLogPath returns the JSONL trace path for a given session id.
+// SessionLogPath returns the JSONL trace path for a given session id. Use it
+// only for an id mcpsnoop minted itself, where CheckLabel has already run on the
+// label the id is built from.
 func SessionLogPath(sessionID string) string {
 	return filepath.Join(SessionsDir(), sessionID+".jsonl")
+}
+
+// SessionLogPathFrom is SessionLogPath for an id that came out of a log rather
+// than out of newSessionID, and it refuses one that cannot name a file under the
+// sessions directory.
+//
+// The difference matters because the two ids have different provenance. A label
+// is typed by the user and CheckLabel guards it up front, but a session id is
+// read straight out of a log's own session_id field, and a log is a file people
+// hand around, export and `open -` exist for exactly that, and the hub backfills
+// any .jsonl dropped into the sessions directory. An id spelling "../../x"
+// therefore made filepath.Join resolve anywhere on disk, which the TUI's delete
+// key then passed to os.Remove.
+func SessionLogPathFrom(sessionID string) (string, error) {
+	if err := CheckSessionID(sessionID); err != nil {
+		return "", err
+	}
+	return SessionLogPath(sessionID), nil
+}
+
+// CheckSessionID rejects a session id that cannot safely name a file under the
+// sessions directory. The rules are CheckLabel's, since an id is a label with a
+// pid and a nonce appended, plus a refusal of "." and ".." which a label may
+// legitimately contain in the middle but which are the whole of a traversal.
+func CheckSessionID(id string) error {
+	switch {
+	case id == "":
+		return errors.New("session id is empty; it names a file under the mcpsnoop state dir")
+	case id == "." || id == "..":
+		return fmt.Errorf("session id %q names a directory rather than a session log", id)
+	}
+	if err := CheckLabel(id); err != nil {
+		return fmt.Errorf("session id %q cannot name a file under the mcpsnoop state dir", id)
+	}
+	return nil
 }

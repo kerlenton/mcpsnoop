@@ -109,9 +109,15 @@ func (m Model) replaySpinner() string {
 // toastLine is a transient notification one row above the footer, flat colored
 // text right-aligned to sit above the footer counters. It carries the replay
 // spinner while a replay is in flight, then a flash, and is blank when idle.
+// confirmStyle renders a pending question, which unlike a flash does not fade
+// and is the only thing the next keystroke can answer.
+func (m Model) confirmStyle() lipgloss.Style { return m.flashStyle() }
+
 func (m Model) toastLine() string {
 	var msg string
 	switch {
+	case m.confirm != "":
+		msg = m.confirmStyle().Render(m.confirm)
 	case m.replaying:
 		msg = m.replaySpinner()
 	case m.flashActive():
@@ -1313,6 +1319,8 @@ func (m Model) overlayFooter(w int) string {
 	}
 	right := ""
 	switch {
+	case m.confirm != "":
+		right = m.confirmStyle().Render(m.confirm)
 	case m.replaying:
 		right = m.replaySpinner()
 	case m.flashActive():

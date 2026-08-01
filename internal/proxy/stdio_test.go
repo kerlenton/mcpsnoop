@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -298,3 +299,64 @@ func TestTruncatedFrameSurvivesTheSink(t *testing.T) {
 		t.Fatalf("the fragment should survive in Text, got %q", env.Text)
 	}
 }
+
+// TestStdioSeqReachesTheSinkInOrder. Three pumps call emit at once, the client,
+// the server and stderr. An atomic counter only makes each number unique, not the
+// order they reach the sink in, and the store infers a dropped frame from a
+// forward jump in Seq, so a pair that arrived swapped was counted as loss on a
+// capture that had lost nothing. That invented figure reached
+// `check --fail-on incomplete`, the JSON export, the HAR comment, the OTLP
+// attributes and the TUI banner alike.
+func TestStdioSeqReachesTheSinkInOrder(t *testing.T) {
+	const frames = 8000
+	var input strings.Builder
+	for i := range frames {
+		fmt.Fprintf(&input, `{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"ping"}}`+"\n", i+1)
+	}
+	// A wrapped server that echoes every line and writes to stderr at the same
+	// time, so all three pumps are live together.
+	script := `while IFS= read -r line; do printf '%s\n' "$line"; printf 'noise\n' >&2; done`
+
+	sink := &orderedSink{}
+	code, err := RunStdio(context.Background(), StdioConfig{
+		Command:   []string{"/bin/sh", "-c", script},
+		Label:     "test",
+		SessionID: "order-1",
+		Sink:      sink,
+		In:        strings.NewReader(input.String()),
+		Out:       io.Discard,
+		Err:       io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("RunStdio: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if sink.outOfOrder > 0 {
+		t.Fatalf("%d of %d envelopes reached the sink out of Seq order, which the store counts as dropped frames",
+			sink.outOfOrder, sink.count)
+	}
+	if sink.count < frames {
+		t.Fatalf("only %d envelopes observed, want at least %d", sink.count, frames)
+	}
+}
+
+type orderedSink struct {
+	mu         sync.Mutex
+	last       uint64
+	count      int
+	outOfOrder int
+}
+
+func (s *orderedSink) Emit(e Envelope) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e.Seq <= s.last {
+		s.outOfOrder++
+	}
+	s.last = e.Seq
+	s.count++
+}
+
+func (s *orderedSink) Close() error { return nil }

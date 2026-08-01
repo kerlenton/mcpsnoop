@@ -113,6 +113,13 @@ func httpFailed(status int) bool { return status >= 400 }
 type callKey struct {
 	dir proxy.Direction
 	id  string
+	// conn separates the id spaces of two clients that share one proxy process.
+	// JSON-RPC scopes id uniqueness to the sender, "the ID MUST NOT match the ID
+	// of any other request the sender has issued and not yet received a response
+	// for", and one `mcpsnoop http` run carries every client that connects to it,
+	// so two conforming clients both starting at id 1 collided here. Empty on
+	// stdio, where there is only ever one peer.
+	conn string
 }
 
 // call is the mutable internal record for one request/response pair.
@@ -156,6 +163,10 @@ type call struct {
 	mrtrState    string
 	mrtrHasState bool
 	mrtrKeys     string
+	// progressToken is what this request asked progress to be reported under,
+	// remembered so completion can close it and a later notification under the
+	// same token is read as reuse rather than a violation.
+	progressToken string
 }
 
 // event is the mutable internal timeline entry.
@@ -248,9 +259,23 @@ type session struct {
 
 	// cacheFresh records the most recent cacheable response per key (SEP-2549).
 	cacheFresh map[string]cacheEntry
-	// cacheListScope records the cacheScope the cursorless first page of a list
-	// run declared, which every later page of that run must repeat.
+	// cacheListScope records the cacheScope a page declared, keyed by the cursor
+	// that page issued, so a continuation finds the run it actually continues.
 	cacheListScope map[string]string
+	// truncatedRequests counts client frames mcpsnoop capped at its own frame-size
+	// limit. Each opened no call, so each owes one response that will find none.
+	truncatedRequests int
+	// progress is the last value seen per progress token, and whether the request
+	// that issued it has finished.
+	progress map[string]progressTracker
+	// subscriptions is what each observed subscriptions/listen asked for, keyed by
+	// that request's own JSON-RPC id, which is the subscription id every message on
+	// its stream carries.
+	subscriptions map[string]*subscription
+	// stateless records that this session was observed carrying at least one
+	// request declaring 2026-07-28 or later, which is what makes the rules that
+	// revision introduced applicable to the frames around it.
+	stateless bool
 }
 
 // Store is the concurrency-safe collector the hub feeds and the TUI reads.
@@ -327,6 +352,14 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		// default `check --fail-on warn` over a perfectly valid oversized body.
 		ev.kind = EventOther
 		ev.truncated = true
+		if e.Direction == proxy.ClientToServer {
+			// A capped request opens no call, so its perfectly ordinary response has
+			// nothing to match. Remembered so that response is not reported as
+			// unmatched, for the same reason truncation itself is kept out of the
+			// warning field four lines above: the gap is mcpsnoop's own doing and the
+			// traffic was correct in both directions.
+			sess.truncatedRequests++
+		}
 		sess.events = append(sess.events, ev)
 		return ev.view(sess)
 	}
@@ -345,6 +378,13 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	}
 
 	msg, ok := proxy.ParseRPC(e.Raw)
+	// Read before the switch, since the direction rule is about the frame rather
+	// than about what it classifies as, but applied after it, because several
+	// branches assign ev.warning outright.
+	wrongDirection := ""
+	if ok && !ev.batch {
+		wrongDirection = wrongDirectionWarning(e.Direction, msg, sess.stateless)
+	}
 	switch {
 	case !ok:
 		if httpFailed(e.Status) {
@@ -362,8 +402,19 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.id = string(msg.ID)
 		ev.warning = validationWarning(msg)
 		sess.caps.applyResponseMeta(msg.Result)
-		c, matched := sess.completeCall(ev.id, e.Direction, e.TS, msg)
+		c, matched := sess.completeCall(ev.id, e.Direction, e.ConnID, e.TS, msg)
 		ev.call = c
+		if c != nil && c.state != Pending && c.state != Streaming {
+			sess.closeProgressToken(c.progressToken)
+		}
+		if state, ok := parseInputRequired(msg.Result); ok {
+			for _, note := range inputRequiredWarnings(state, c) {
+				ev.warning = appendWarning(ev.warning, note)
+			}
+			for _, note := range undeclaredInputRequestWarnings(state, c) {
+				ev.warning = appendWarning(ev.warning, note)
+			}
+		}
 		// After completeCall, because that is what supplies the call, and the call
 		// is what carries the revision this response is judged by.
 		if note := missingResultTypeWarning(msg, c); note != "" {
@@ -371,10 +422,22 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		}
 		// Drained here rather than returned, because applyToolsList runs inside
 		// completeCall. Each name is reported once, on the frame that advertised it.
-		for _, invalid := range sess.paramHeaderInvalid {
-			ev.warning = appendWarning(ev.warning,
-				"tool "+strconv.Quote(invalid.tool)+" declares "+invalid.reason+
-					", so its Mcp-Param headers are not checked")
+		//
+		// Gated the same two ways every other x-mcp-header check is, by the revision
+		// the listing request itself declared and by the transport. The annotation
+		// does not exist before 2026-07-28, where an x- prefixed key is only the JSON
+		// Schema vendor-extension convention, and the released text scopes the duty
+		// to reject to "clients using the Streamable HTTP transport", saying of the
+		// rest that they "MAY ignore x-mcp-header annotations entirely". Without the
+		// gates a stdio server, or any server on an older revision, was accused of
+		// breaking a rule it is not under.
+		if ev.transport == proxy.TransportHTTP && c != nil &&
+			requiresRoutingHeaders(requestProtocolVersion(c.params, "")) {
+			for _, invalid := range sess.paramHeaderInvalid {
+				ev.warning = appendWarning(ev.warning,
+					"tool "+strconv.Quote(invalid.tool)+" declares "+invalid.reason+
+						", so its Mcp-Param headers are not checked")
+			}
 		}
 		sess.paramHeaderInvalid = nil
 		if c != nil {
@@ -403,7 +466,14 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.responses++
 		switch {
 		case c == nil:
-			ev.warning = appendWarning(ev.warning, "response id has no matching request")
+			if sess.truncatedRequests > 0 {
+				// One capped request accounted for. Counting down rather than latching
+				// keeps the check alive for the rest of the session, so a genuinely
+				// unmatched response after it is still reported.
+				sess.truncatedRequests--
+			} else {
+				ev.warning = appendWarning(ev.warning, "response id has no matching request")
+			}
 			if msg.Error != nil {
 				sess.errors++
 			}
@@ -424,7 +494,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			// A continuation, not a new call. Mapping the retry id onto the same
 			// call object lets completeCall find it, so the operation keeps one
 			// pending slot and one duration however many round trips it takes.
-			sess.calls[callKey{dir: e.Direction, id: ev.id}] = root
+			sess.calls[callKey{dir: e.Direction, id: ev.id, conn: e.ConnID}] = root
 			root.mrtrState, root.mrtrKeys = "", ""
 			root.mrtrHasState = false
 			sess.unpark(root)
@@ -446,6 +516,10 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			break
 		}
 		ev.call, reused = sess.openCall(ev.id, msg, e)
+		ev.call.progressToken = sess.noteProgressToken(msg.Params)
+		if msg.Method == "subscriptions/listen" && e.Direction == proxy.ClientToServer {
+			sess.noteSubscription(ev.id, msg.Params)
+		}
 		if ev.call.taskID != "" {
 			ev.taskID = ev.call.taskID
 			ev.taskCall = sess.tasks[ev.taskID]
@@ -474,9 +548,22 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.warning = validationWarning(msg)
 		sess.notifications++
 		sess.invalidateCache(msg.Method, msg.Params)
+		for _, note := range sess.subscriptionWarnings(e.Direction, msg.Method, msg.Params) {
+			ev.warning = appendWarning(ev.warning, note)
+		}
+		if msg.Method == "notifications/progress" {
+			if note := sess.progressWarning(msg.Params); note != "" {
+				ev.warning = appendWarning(ev.warning, note)
+			}
+		}
 		if msg.Method == "notifications/cancelled" {
 			if id := cancelledRequestID(msg.Params); id != "" {
-				sess.closeStreamingCall(id, e.TS)
+				if note := serverCancelWarning(e.Direction, sess.calls[callKey{
+					dir: opposite(e.Direction), id: id, conn: e.ConnID,
+				}]); note != "" {
+					ev.warning = appendWarning(ev.warning, note)
+				}
+				sess.closeStreamingCall(id, e.ConnID, e.TS)
 			}
 		}
 		if msg.Method == "notifications/tasks" {
@@ -607,11 +694,22 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	//
 	// Same two guards as the headers, for the same reasons. Requests with an id
 	// only, and judged by the revision this request declared, never the session's.
+	if wrongDirection != "" {
+		ev.warning = appendWarning(ev.warning, wrongDirection)
+	}
 	if e.Direction == proxy.ClientToServer && !ev.batch && msg.Method != "" && len(msg.ID) > 0 &&
-		requiresRequestMeta(requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)) &&
-		!declaresClientCapabilities(msg.Params) {
-		ev.warning = appendWarning(ev.warning,
-			"request _meta is missing required io.modelcontextprotocol/clientCapabilities")
+		requiresRequestMeta(requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)) {
+		if !declaresClientCapabilities(msg.Params) {
+			ev.warning = appendWarning(ev.warning,
+				"request _meta is missing required io.modelcontextprotocol/clientCapabilities")
+		}
+		// The sibling field, checked the same way. It escaped notice because
+		// requestProtocolVersion falls back to the header, so an absent field still
+		// opens the revision gate and nothing then asked whether it was there.
+		if note := missingProtocolVersionWarning(msg.Params); note != "" {
+			ev.warning = appendWarning(ev.warning, note)
+		}
+		sess.stateless = true
 	}
 
 	if ev.transport == proxy.TransportHTTP && e.Direction == proxy.ClientToServer &&
@@ -683,7 +781,7 @@ func (s *Store) sessionFor(e proxy.Envelope) *session {
 // a still-pending call for the same id and direction, meaning the client reused
 // an id while its earlier request was in flight. Caller holds the write lock.
 func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope) (*call, bool) {
-	key := callKey{dir: e.Direction, id: id}
+	key := callKey{dir: e.Direction, id: id, conn: e.ConnID}
 	prev, ok := sess.calls[key]
 	reused := ok && (prev.state == Pending || prev.state == Streaming)
 	if reused {
@@ -729,8 +827,8 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 // completeCall matches a response to its pending request. The bool reports
 // whether it completed a pending call, where false means the response was unmatched or
 // a duplicate of an already-answered id. Caller holds the lock.
-func (sess *session) completeCall(id string, respDir proxy.Direction, ts time.Time, msg proxy.RPCMessage) (*call, bool) {
-	c := sess.calls[callKey{dir: opposite(respDir), id: id}]
+func (sess *session) completeCall(id string, respDir proxy.Direction, conn string, ts time.Time, msg proxy.RPCMessage) (*call, bool) {
+	c := sess.calls[callKey{dir: opposite(respDir), id: id, conn: conn}]
 	if c == nil {
 		return nil, false // unmatched response (request missed or before backfill)
 	}
@@ -1353,9 +1451,9 @@ func cancelledRequestID(params json.RawMessage) string {
 	return string(bytes.TrimSpace(p.RequestID))
 }
 
-func (sess *session) closeStreamingCall(id string, ts time.Time) {
+func (sess *session) closeStreamingCall(id, conn string, ts time.Time) {
 	for _, dir := range []proxy.Direction{proxy.ClientToServer, proxy.ServerToClient} {
-		key := callKey{dir: dir, id: id}
+		key := callKey{dir: dir, id: id, conn: conn}
 		c := sess.calls[key]
 		if c != nil && c.state == Streaming {
 			c.end = ts

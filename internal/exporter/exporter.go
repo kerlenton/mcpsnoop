@@ -219,6 +219,14 @@ func ResolveSessionPath(arg string) (string, error) {
 		if err != nil {
 			continue
 		}
+		// An empty log holds no session. The trace file is created before the
+		// wrapped server is started, so a launch that fails leaves one behind, and
+		// it is the newest thing in the directory. Resolving to it answered "no
+		// envelopes found" for a bare `check` or `export` that meant the last real
+		// capture, which in CI reads as a failure caused by an unrelated run.
+		if info.Size() == 0 {
+			continue
+		}
 		if latest == "" || info.ModTime().After(latestMod) {
 			latest = f
 			latestMod = info.ModTime()

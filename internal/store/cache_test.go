@@ -158,7 +158,12 @@ func TestIngestWarnsOnCacheScopeChangingMidRun(t *testing.T) {
 		if cursor != "" {
 			params = `{"cursor":` + strconv.Quote(cursor) + `,` + cacheMeta[1:]
 		}
-		return params, `"result":{"resultType":"complete","tools":[],"ttlMs":1000,"cacheScope":"` + scope + `"}`
+		next := ""
+		if cursor == "" {
+			next = `,"nextCursor":"p2"`
+		}
+		return params, `"result":{"resultType":"complete","tools":[],"ttlMs":1000,"cacheScope":"` +
+			scope + `"` + next + `}`
 	}
 
 	t.Run("later page disagrees", func(t *testing.T) {
@@ -287,5 +292,74 @@ func TestIngestIgnoresCacheHintsBeforeRevision(t *testing.T) {
 	}
 	if ev.Warning != "" {
 		t.Fatalf("pre-2026-07-28 revision must not be judged by this revision's rules, got %q", ev.Warning)
+	}
+}
+
+// TestIngestSeparatesInterleavedListRuns. One mcpsnoop http process carries every
+// client that connects to it, so two runs of the same method overlap routinely
+// and the spec's tools page lets the set "vary by the authorization presented on
+// the request". Identifying a run by its method alone let the second take over
+// the first one's slot and each report the other.
+func TestIngestSeparatesInterleavedListRuns(t *testing.T) {
+	page := func(cursor, scope, next string) (string, string) {
+		params := cacheMeta
+		if cursor != "" {
+			params = `{"cursor":` + strconv.Quote(cursor) + `,` + cacheMeta[1:]
+		}
+		result := `"result":{"resultType":"complete","tools":[],"ttlMs":1000,"cacheScope":"` + scope + `"`
+		if next != "" {
+			result += `,"nextCursor":` + strconv.Quote(next)
+		}
+		return params, result + `}`
+	}
+	s := New()
+	now := time.Now()
+
+	// Client A opens a run and is issued cursor a2. Client B opens its own run
+	// under a different authorization and is issued b2.
+	params, result := page("", "public", "a2")
+	s.Ingest(req(1, now, proxy.ClientToServer, "1", "tools/list", params))
+	s.Ingest(resp(2, now, proxy.ServerToClient, "1", result))
+	params, result = page("", "private", "b2")
+	s.Ingest(req(3, now, proxy.ClientToServer, "2", "tools/list", params))
+	s.Ingest(resp(4, now, proxy.ServerToClient, "2", result))
+
+	// A continues its own run, still public, which is correct traffic.
+	params, result = page("a2", "public", "")
+	s.Ingest(req(5, now, proxy.ClientToServer, "3", "tools/list", params))
+	if ev := s.Ingest(resp(6, now, proxy.ServerToClient, "3", result)); ev.Warning != "" {
+		t.Fatalf("a run continuing its own cursor must be silent, got %q", ev.Warning)
+	}
+
+	// And B continuing its own run with a changed scope is still caught.
+	params, result = page("b2", "public", "")
+	s.Ingest(req(7, now, proxy.ClientToServer, "4", "tools/list", params))
+	if ev := s.Ingest(resp(8, now, proxy.ServerToClient, "4", result)); !strings.Contains(ev.Warning, "one scope per list request") {
+		t.Fatalf("a scope change within one run must still be reported, got %q", ev.Warning)
+	}
+}
+
+// TestIngestDoesNotCacheAnMRTRResult. The caching page says a result produced by
+// retrying through the multi round-trip mechanism MUST NOT be cached, so
+// recording one invented a freshness window and demanding its ttlMs accused the
+// server of omitting a hint it was never asked for.
+func TestIngestDoesNotCacheAnMRTRResult(t *testing.T) {
+	retry := `{"uri":"file:///a","inputResponses":[],` + cacheMeta[1:]
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "resources/read", retry))
+	ev := s.Ingest(resp(2, t0, proxy.ServerToClient, "1",
+		`"result":{"resultType":"complete","contents":[]}`))
+	if strings.Contains(ev.Warning, "declares no ttlMs") {
+		t.Fatalf("an MRTR result is not cacheable, so no hint is owed: %q", ev.Warning)
+	}
+
+	// And it must not have seeded a freshness window for the next plain read.
+	s.Ingest(req(3, t0.Add(time.Second), proxy.ClientToServer, "2", "resources/read",
+		`{"uri":"file:///a",`+cacheMeta[1:]))
+	plain := s.Ingest(resp(4, t0.Add(time.Second), proxy.ServerToClient, "2",
+		`"result":{"resultType":"complete","contents":[],"ttlMs":1000}`))
+	if plain.CacheStaleRefetch != "" {
+		t.Fatalf("an MRTR result must not seed a cache entry: %q", plain.CacheStaleRefetch)
 	}
 }

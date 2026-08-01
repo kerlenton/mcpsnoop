@@ -33,6 +33,13 @@ type checkJUnitCase struct {
 	Name      string             `xml:"name,attr"`
 	Time      string             `xml:"time,attr"`
 	Failure   *checkJUnitFailure `xml:"failure,omitempty"`
+	Skipped   *checkJUnitSkipped `xml:"skipped,omitempty"`
+}
+
+// checkJUnitSkipped marks a case that ran but verified nothing, which is what a
+// first-seen tool baseline is.
+type checkJUnitSkipped struct {
+	Message string `xml:"message,attr"`
 }
 
 type checkJUnitFailure struct {
@@ -67,6 +74,19 @@ func buildCheckJUnit(summaries []checkSummary, selected map[checkSignal]bool, as
 			Time:  "0",
 			Cases: make([]checkJUnitCase, 0, len(checkSignalOrder)),
 		}
+		// A first-seen baseline is recorded rather than verified, which the text
+		// format says out loud. Without its own case the junit reader sees a fully
+		// green suite for a run that checked nothing, which is the state the whole
+		// baseline mechanism exists to make visible.
+		if summary.baselineCreated {
+			suite.Tests++
+			suite.Cases = append(suite.Cases, checkJUnitCase{
+				Classname: "mcpsnoop.check",
+				Name:      summary.sessionID + "/baseline",
+				Time:      "0",
+				Skipped:   &checkJUnitSkipped{Message: "recorded first-seen tool baseline (trusted, not verified)"},
+			})
+		}
 		for _, signal := range checkSignalOrder {
 			count := summary.count(signal)
 			testcase := checkJUnitCase{
@@ -76,6 +96,12 @@ func buildCheckJUnit(summaries []checkSummary, selected map[checkSignal]bool, as
 			}
 			if selected[signal] && count > 0 {
 				reason := checkSignalFailureReason(summary.sessionID, signal, count)
+				// A baseline that could not be read is not a tool change, and telling a
+				// CI reader to go looking for one sends them after something that never
+				// happened. The text format already says which it is.
+				if signal == checkDrift && summary.drift.BaselineError != "" {
+					reason = "tool baseline error: " + summary.drift.BaselineError
+				}
 				testcase.Failure = &checkJUnitFailure{
 					Message: reason,
 					Type:    "mcpsnoop.check." + string(signal),

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -672,5 +673,40 @@ func checkEnvelope(seq uint64, direction proxy.Direction, raw string) proxy.Enve
 		TS:          time.Unix(int64(seq), 0),
 		Direction:   direction,
 		Raw:         json.RawMessage(raw),
+	}
+}
+
+// TestCheckJUnitSurfacesTheBaselineState. junit rendered only the signal counts,
+// so a run that recorded a first-seen baseline and verified nothing came out a
+// fully green suite, which is the state the baseline mechanism exists to make
+// visible, and a corrupt baseline was reported as a tool definition change,
+// sending the reader after something that never happened.
+func TestCheckJUnitSurfacesTheBaselineState(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","inputSchema":{"type":"object"}}]}}`),
+	)
+
+	_, stdout, _ := executeCheck(t, []string{"--format", "junit", "--baseline", dir, "-"}, log)
+	if !strings.Contains(stdout, `<skipped message="recorded first-seen tool baseline`) {
+		t.Fatalf("junit must say the run only recorded a baseline:\n%s", stdout)
+	}
+
+	// A baseline that cannot be read is not a tool change.
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("the first run should have written a baseline: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, entries[0].Name()), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stdout, _ = executeCheck(t, []string{"--format", "junit", "--fail-on", "drift", "--baseline", dir, "-"}, log)
+	if !strings.Contains(stdout, "tool baseline error:") {
+		t.Fatalf("junit must name the baseline error rather than report drift:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "tool definition change") {
+		t.Fatalf("a baseline error must not be reported as a tool change:\n%s", stdout)
 	}
 }

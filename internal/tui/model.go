@@ -152,11 +152,44 @@ type Model struct {
 
 	flash      string // transient status message ("copied", "deleted", …)
 	flashUntil time.Time
+	// confirm holds a prompt and the action it gates. Delete removes a file and
+	// replay executes a command, both irreversible and both driven off data that
+	// arrived in a session log, which is a file people hand around.
+	confirm string
+	// The action takes the live model rather than closing over one, since the
+	// answer arrives in a later Update and a captured copy would drop every
+	// mutation the action makes.
+	confirmAction func(*Model) tea.Cmd
+	// replayConfirmed is the session whose recorded command the user has already
+	// seen and accepted. Asking once per session rather than once per replay keeps
+	// "replay again" a single key while still showing the command before the first
+	// process is ever started.
+	replayConfirmed string
 
 	width, height int
 	ready         bool
 	spin          int  // shared spinner frame, advanced by tickMsg
 	dirty         bool // a frame arrived since the last refresh, set by frameMsg
+}
+
+// ask puts a yes-or-no question in the status bar and holds the action until it
+// is answered. Anything other than y or enter cancels, so a stray keystroke can
+// only ever decline.
+func (m *Model) ask(prompt string, action func(*Model) tea.Cmd) {
+	m.confirm = prompt
+	m.confirmAction = action
+	m.flash = ""
+	m.flashUntil = time.Time{}
+}
+
+func (m *Model) answer(yes bool) tea.Cmd {
+	action := m.confirmAction
+	m.confirm, m.confirmAction = "", nil
+	if !yes || action == nil {
+		m.setFlash("cancelled")
+		return nil
+	}
+	return action(m)
 }
 
 // setFlash shows a transient message in the status bar for ~2s.
@@ -271,6 +304,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 
+	// A pending confirmation captures the next key. It is answered before anything
+	// else, so an irreversible action cannot be reached by a keystroke aimed at
+	// something the user thought was on screen.
+	if m.confirm != "" {
+		switch {
+		case key.Matches(msg, m.keys.Enter), msg.String() == "y", msg.String() == "Y":
+			return m, m.answer(true)
+		default:
+			return m, m.answer(false)
+		}
+	}
+
 	// Bottom prompt (":" command / "/" filter) captures input while open.
 	if m.inputMode != inputNone {
 		return m.handleInput(msg)
@@ -383,7 +428,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Export):
 		m.exportCurrent("", "")
 	case key.Matches(msg, m.keys.Delete):
-		m.deleteCurrentSession()
+		if label := m.deleteTargetLabel(); m.currentSessionID() != "" {
+			m.ask("delete "+valueOr(label, "session")+" and its log? y/n", func(m *Model) tea.Cmd {
+				m.deleteCurrentSession()
+				return nil
+			})
+		}
 
 	case key.Matches(msg, m.keys.Up):
 		m.step(-1)
@@ -743,9 +793,21 @@ func (m *Model) runReplay(call store.CallView) tea.Cmd {
 		m.setFlash("no recorded server command to replay")
 		return nil
 	}
-	m.replayReq = call
-	m.replaying = true
-	return replayCmd(command, cwd, call.Method, call.Params)
+	// The command comes out of the log's meta frame, so replaying runs whatever
+	// that file says. A log is data people hand around, and the hub backfills any
+	// .jsonl left in the sessions directory, so the command is shown and answered
+	// for before anything is executed.
+	start := func(m *Model) tea.Cmd {
+		m.replayConfirmed = m.streamSessionID
+		m.replayReq = call
+		m.replaying = true
+		return replayCmd(command, cwd, call.Method, call.Params)
+	}
+	if m.replayConfirmed == m.streamSessionID {
+		return start(m)
+	}
+	m.ask("replay runs: "+strings.Join(command, " ")+"  y/n", start)
+	return nil
 }
 
 // applySortKey maps a shift+<letter> to a column sort for the current view.
@@ -1265,9 +1327,20 @@ func (m *Model) deleteCurrentSession() {
 	if id == "" {
 		return
 	}
+	// The id is read out of the log's own session_id field, so it is data rather
+	// than a name mcpsnoop chose, and one carrying ".." resolved to a path outside
+	// the sessions directory. The store entry still goes, since that is in memory
+	// and keyed by the id itself.
+	path, err := paths.SessionLogPathFrom(id)
+	if err != nil {
+		m.store.Delete(id)
+		m.refresh()
+		m.setFlash("removed from view, the log is not under the sessions directory")
+		return
+	}
 	label := valueOr(m.deleteTargetLabel(), "session")
 	m.store.Delete(id)
-	_ = os.Remove(paths.SessionLogPath(id))
+	_ = os.Remove(path)
 	if m.view == viewStream {
 		m.view = viewSessions
 	}
