@@ -163,6 +163,10 @@ type call struct {
 	mrtrState    string
 	mrtrHasState bool
 	mrtrKeys     string
+	// progressToken is what this request asked progress to be reported under,
+	// remembered so completion can close it and a later notification under the
+	// same token is read as reuse rather than a violation.
+	progressToken string
 }
 
 // event is the mutable internal timeline entry.
@@ -261,6 +265,13 @@ type session struct {
 	// truncatedRequests counts client frames mcpsnoop capped at its own frame-size
 	// limit. Each opened no call, so each owes one response that will find none.
 	truncatedRequests int
+	// progress is the last value seen per progress token, and whether the request
+	// that issued it has finished.
+	progress map[string]progressTracker
+	// stateless records that this session was observed carrying at least one
+	// request declaring 2026-07-28 or later, which is what makes the rules that
+	// revision introduced applicable to the frames around it.
+	stateless bool
 }
 
 // Store is the concurrency-safe collector the hub feeds and the TUI reads.
@@ -363,6 +374,13 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	}
 
 	msg, ok := proxy.ParseRPC(e.Raw)
+	// Read before the switch, since the direction rule is about the frame rather
+	// than about what it classifies as, but applied after it, because several
+	// branches assign ev.warning outright.
+	wrongDirection := ""
+	if ok && !ev.batch {
+		wrongDirection = wrongDirectionWarning(e.Direction, msg, sess.stateless)
+	}
 	switch {
 	case !ok:
 		if httpFailed(e.Status) {
@@ -382,6 +400,17 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.ConnID, e.TS, msg)
 		ev.call = c
+		if c != nil && c.state != Pending && c.state != Streaming {
+			sess.closeProgressToken(c.progressToken)
+		}
+		if state, ok := parseInputRequired(msg.Result); ok {
+			for _, note := range inputRequiredWarnings(state, c) {
+				ev.warning = appendWarning(ev.warning, note)
+			}
+			for _, note := range undeclaredInputRequestWarnings(state, c) {
+				ev.warning = appendWarning(ev.warning, note)
+			}
+		}
 		// After completeCall, because that is what supplies the call, and the call
 		// is what carries the revision this response is judged by.
 		if note := missingResultTypeWarning(msg, c); note != "" {
@@ -483,6 +512,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			break
 		}
 		ev.call, reused = sess.openCall(ev.id, msg, e)
+		ev.call.progressToken = sess.noteProgressToken(msg.Params)
 		if ev.call.taskID != "" {
 			ev.taskID = ev.call.taskID
 			ev.taskCall = sess.tasks[ev.taskID]
@@ -511,8 +541,18 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.warning = validationWarning(msg)
 		sess.notifications++
 		sess.invalidateCache(msg.Method, msg.Params)
+		if msg.Method == "notifications/progress" {
+			if note := sess.progressWarning(msg.Params); note != "" {
+				ev.warning = appendWarning(ev.warning, note)
+			}
+		}
 		if msg.Method == "notifications/cancelled" {
 			if id := cancelledRequestID(msg.Params); id != "" {
+				if note := serverCancelWarning(e.Direction, sess.calls[callKey{
+					dir: opposite(e.Direction), id: id, conn: e.ConnID,
+				}]); note != "" {
+					ev.warning = appendWarning(ev.warning, note)
+				}
 				sess.closeStreamingCall(id, e.ConnID, e.TS)
 			}
 		}
@@ -644,11 +684,22 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	//
 	// Same two guards as the headers, for the same reasons. Requests with an id
 	// only, and judged by the revision this request declared, never the session's.
+	if wrongDirection != "" {
+		ev.warning = appendWarning(ev.warning, wrongDirection)
+	}
 	if e.Direction == proxy.ClientToServer && !ev.batch && msg.Method != "" && len(msg.ID) > 0 &&
-		requiresRequestMeta(requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)) &&
-		!declaresClientCapabilities(msg.Params) {
-		ev.warning = appendWarning(ev.warning,
-			"request _meta is missing required io.modelcontextprotocol/clientCapabilities")
+		requiresRequestMeta(requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)) {
+		if !declaresClientCapabilities(msg.Params) {
+			ev.warning = appendWarning(ev.warning,
+				"request _meta is missing required io.modelcontextprotocol/clientCapabilities")
+		}
+		// The sibling field, checked the same way. It escaped notice because
+		// requestProtocolVersion falls back to the header, so an absent field still
+		// opens the revision gate and nothing then asked whether it was there.
+		if note := missingProtocolVersionWarning(msg.Params); note != "" {
+			ev.warning = appendWarning(ev.warning, note)
+		}
+		sess.stateless = true
 	}
 
 	if ev.transport == proxy.TransportHTTP && e.Direction == proxy.ClientToServer &&
