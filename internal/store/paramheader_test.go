@@ -914,3 +914,32 @@ func TestRoutingComparisonsRespectRedaction(t *testing.T) {
 		}
 	}
 }
+
+// TestParamHeaderDuplicateSurvivesRedaction. A duplicate x-mcp-header is only
+// visible while both annotations are, and scrubbing a subschema removed one of
+// them outright, so mcpsnoop accepted an invalid definition and then validated
+// the surviving half of the duplicate against the wrong property.
+func TestParamHeaderDuplicateSurvivesRedaction(t *testing.T) {
+	const tool = `{"name":"route","inputSchema":{"type":"object","properties":{` +
+		`"token":{"type":"string","x-mcp-header":"Token"},` +
+		`"auth":{"type":"string","x-mcp-header":"token"}}}}`
+	sink := &paramCaptureSink{}
+	proxy.NewRedactingSink(sink, proxy.RedactConfig{CommonSecrets: true}).Emit(proxy.Envelope{
+		Direction: proxy.ServerToClient,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":` + toolsListResult("", tool) + `}`),
+	})
+
+	s := New()
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`),
+	})
+	ev := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(),
+		Direction: proxy.ServerToClient, Raw: sink.envs[0].Raw, Redacted: sink.envs[0].Redacted,
+	})
+	if !strings.Contains(ev.Warning, "on more than one property") {
+		t.Fatalf("a duplicate must survive redaction to be reported, got %q", ev.Warning)
+	}
+}

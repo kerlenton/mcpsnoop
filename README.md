@@ -289,6 +289,13 @@ source JSONL. `export` refuses an output that names the same file as its input,
 and writes through a temporary file that is renamed into place, so a run that
 fails leaves the previous file whole.
 
+A tool's `inputSchema` and `outputSchema` are left alone by `--redact-key` and
+`--redact-secrets`. A name inside a schema is a type declaration rather than a
+value, the name itself stays in the log either way, and scrubbing the subschema
+under a property called `token` would take the tool's own checks with it. Use
+`--redact-path` to name something inside a schema, or `--redact-value`, which
+matches text wherever it sits.
+
 What each flag reaches differs, so check the result rather than assuming. All
 four scrub JSON-RPC payloads, and `--redact-key`, `--redact-path` and
 `--redact-secrets` reach only those. Only `--redact-value` also scrubs stderr,
