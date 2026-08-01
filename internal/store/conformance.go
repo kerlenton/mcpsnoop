@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"slices"
 	"strconv"
@@ -255,6 +256,134 @@ func undeclaredInputRequestWarnings(state inputRequired, c *call) []string {
 			warnings = append(warnings, "inputRequests asks for "+strconv.Quote(method)+
 				" while the request declared no "+capability+" capability")
 		}
+	}
+	return warnings
+}
+
+// subscriptionIDKey is where every message on a listen stream carries the id of
+// the subscriptions/listen request that opened it. The value is that request's
+// own JSON-RPC id.
+const subscriptionIDKey = "io.modelcontextprotocol/subscriptionId"
+
+// subscription is what one observed subscriptions/listen asked for, and whether
+// its acknowledgment has arrived.
+type subscription struct {
+	filter       notificationFilter
+	acknowledged bool
+}
+
+// notificationFilter is the params.notifications object of a listen request. All
+// fields are optional and "Omitting a field is equivalent to not subscribing to
+// that notification type."
+type notificationFilter struct {
+	ToolsListChanged      bool     `json:"toolsListChanged"`
+	PromptsListChanged    bool     `json:"promptsListChanged"`
+	ResourcesListChanged  bool     `json:"resourcesListChanged"`
+	ResourceSubscriptions []string `json:"resourceSubscriptions"`
+}
+
+// wants reports whether the filter asked for a notification method. Only the four
+// types the filter can name are answered; anything else is not carried on a
+// listen stream and is nobody's business here.
+func (f notificationFilter) wants(method string) (asked, covered bool) {
+	switch method {
+	case "notifications/tools/list_changed":
+		return f.ToolsListChanged, true
+	case "notifications/prompts/list_changed":
+		return f.PromptsListChanged, true
+	case "notifications/resources/list_changed":
+		return f.ResourcesListChanged, true
+	case "notifications/resources/updated":
+		// Judged on whether resource updates were asked for at all, not per URI. A
+		// server may legitimately normalise a URI or answer a subscription the
+		// client expressed differently, and the rule the spec states is about
+		// notification types.
+		return len(f.ResourceSubscriptions) > 0, true
+	}
+	return false, false
+}
+
+// noteSubscription records what a subscriptions/listen asked for, keyed by the
+// request's own JSON-RPC id, which is what every message on the stream carries.
+func (sess *session) noteSubscription(id string, params json.RawMessage) {
+	var p struct {
+		Notifications notificationFilter `json:"notifications"`
+	}
+	_ = json.Unmarshal(params, &p)
+	if sess.subscriptions == nil {
+		sess.subscriptions = make(map[string]*subscription)
+	}
+	sess.subscriptions[id] = &subscription{filter: p.Notifications}
+}
+
+// metaSubscriptionID is the subscription a message says it belongs to, as the raw
+// JSON of the id so it compares with the request id the same way every other id
+// in the store does.
+func metaSubscriptionID(params json.RawMessage) string {
+	var p struct {
+		Meta map[string]json.RawMessage `json:"_meta"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return ""
+	}
+	raw, ok := p.Meta[subscriptionIDKey]
+	if !ok {
+		return ""
+	}
+	return string(bytes.TrimSpace(raw))
+}
+
+// subscriptionWarnings reports the three rules a listen stream carries, each
+// decided only from a subscriptions/listen mcpsnoop actually observed. A capture
+// that starts mid-stream, or never saw the client half, therefore says nothing.
+func (sess *session) subscriptionWarnings(dir proxy.Direction, method string, params json.RawMessage) []string {
+	if dir != proxy.ServerToClient || len(sess.subscriptions) == 0 {
+		return nil
+	}
+	id := metaSubscriptionID(params)
+
+	if method == "notifications/subscriptions/acknowledged" {
+		if sub, ok := sess.subscriptions[id]; ok {
+			sub.acknowledged = true
+		}
+		return nil
+	}
+	_, carried := notificationFilter{}.wants(method)
+	if !carried {
+		// Not a type a listen stream delivers. Progress and logging ride the
+		// response stream of the request they belong to, so they carry no
+		// subscription id and are not judged here.
+		return nil
+	}
+
+	if id == "" {
+		// "All notifications delivered on the stream carry
+		// io.modelcontextprotocol/subscriptionId in _meta". These four types are
+		// delivered only on a listen stream, so once a listen has been observed an
+		// omitted id is the server failing to say which subscription this is.
+		return []string{"notification " + strconv.Quote(method) +
+			" carries no " + subscriptionIDKey + ", which 2026-07-28 requires on a subscription stream"}
+	}
+	sub, ok := sess.subscriptions[id]
+	if !ok {
+		// An id belonging to a subscriptions/listen mcpsnoop never saw.
+		return nil
+	}
+
+	var warnings []string
+	// "MUST NOT send any notification on the subscription before it", the
+	// acknowledgment being the first message.
+	if !sub.acknowledged {
+		warnings = append(warnings, "notification "+strconv.Quote(method)+
+			" arrived on subscription "+id+" before its acknowledgment, which 2026-07-28 requires first")
+	}
+	// "The server MUST NOT send notification types the client has not explicitly
+	// requested." Compared against what the client asked for rather than what the
+	// acknowledgment agreed to, since the acknowledged set is a subset and the
+	// rule is stated about the request.
+	if asked, _ := sub.filter.wants(method); !asked {
+		warnings = append(warnings, "notification "+strconv.Quote(method)+
+			" was not requested by subscription "+id+", and 2026-07-28 forbids sending a type the client did not ask for")
 	}
 	return warnings
 }

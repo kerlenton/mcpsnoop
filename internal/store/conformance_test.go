@@ -288,3 +288,95 @@ func TestRequestMetaMustCarryTheProtocolVersion(t *testing.T) {
 		t.Fatalf("stdio with no header must stay silent, got %q", quiet.Warning)
 	}
 }
+
+// TestSubscriptionStreamRules covers the three rules a listen stream carries.
+// The filter shape is the one the spec prints, params.notifications with
+// toolsListChanged, promptsListChanged, resourcesListChanged and
+// resourceSubscriptions, and the subscription id is the JSON-RPC id of the
+// subscriptions/listen request itself.
+func TestSubscriptionStreamRules(t *testing.T) {
+	listen := func(s *Store, filter string) {
+		s.Ingest(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: time.Now(),
+			Direction: proxy.ClientToServer, Transport: proxy.TransportHTTP,
+			MCPProtocolVersion: "2026-07-28",
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{` +
+				`"notifications":` + filter + `,` + modernMeta + `}}`),
+		})
+	}
+	ack := func(s *Store, seq uint64) {
+		serverFrame(s, seq, `{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged",`+
+			`"params":{"_meta":{"io.modelcontextprotocol/subscriptionId":1}}}`)
+	}
+	note := func(s *Store, seq uint64, method, meta string) EventView {
+		params := `{"_meta":{"io.modelcontextprotocol/subscriptionId":1}}`
+		if meta == "" {
+			params = `{}`
+		}
+		return serverFrame(s, seq, `{"jsonrpc":"2.0","method":"`+method+`","params":`+params+`}`)
+	}
+
+	t.Run("before the acknowledgment", func(t *testing.T) {
+		s := New()
+		listen(s, `{"toolsListChanged":true}`)
+		ev := note(s, 2, "notifications/tools/list_changed", "id")
+		if !strings.Contains(ev.Warning, "before its acknowledgment") {
+			t.Fatalf("warning = %q, want the ordering rule reported", ev.Warning)
+		}
+	})
+
+	t.Run("a type the client never asked for", func(t *testing.T) {
+		s := New()
+		listen(s, `{"toolsListChanged":true}`)
+		ack(s, 2)
+		ev := note(s, 3, "notifications/resources/updated", "id")
+		if !strings.Contains(ev.Warning, "was not requested") {
+			t.Fatalf("warning = %q, want the filter rule reported", ev.Warning)
+		}
+	})
+
+	t.Run("no subscription id at all", func(t *testing.T) {
+		s := New()
+		listen(s, `{"toolsListChanged":true}`)
+		ack(s, 2)
+		ev := note(s, 3, "notifications/tools/list_changed", "")
+		if !strings.Contains(ev.Warning, "carries no io.modelcontextprotocol/subscriptionId") {
+			t.Fatalf("warning = %q, want the correlation rule reported", ev.Warning)
+		}
+	})
+
+	t.Run("a conforming stream is silent", func(t *testing.T) {
+		s := New()
+		listen(s, `{"toolsListChanged":true,"resourceSubscriptions":["file:///a"]}`)
+		ack(s, 2)
+		for seq, method := range map[uint64]string{
+			3: "notifications/tools/list_changed",
+			4: "notifications/resources/updated",
+		} {
+			if ev := note(s, seq, method, "id"); ev.Warning != "" {
+				t.Fatalf("%s on a conforming stream warned: %q", method, ev.Warning)
+			}
+		}
+	})
+
+	// Nothing is decided without a subscriptions/listen mcpsnoop observed, which
+	// is the answer for a capture that starts mid-stream.
+	t.Run("no listen observed", func(t *testing.T) {
+		s := New()
+		modern(s, 1, "tools/call", "")
+		if ev := note(s, 2, "notifications/tools/list_changed", ""); ev.Warning != "" {
+			t.Fatalf("without an observed listen nothing can be judged, got %q", ev.Warning)
+		}
+	})
+
+	// A notification that is not carried on a listen stream is not judged here.
+	// Progress and logging ride the response stream of their own request.
+	t.Run("a request-scoped notification is not a stream notification", func(t *testing.T) {
+		s := New()
+		listen(s, `{"toolsListChanged":true}`)
+		ev := serverFrame(s, 2, `{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}`)
+		if ev.Warning != "" {
+			t.Fatalf("a request-scoped notification must not be judged as a stream one, got %q", ev.Warning)
+		}
+	})
+}

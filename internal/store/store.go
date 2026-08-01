@@ -268,6 +268,10 @@ type session struct {
 	// progress is the last value seen per progress token, and whether the request
 	// that issued it has finished.
 	progress map[string]progressTracker
+	// subscriptions is what each observed subscriptions/listen asked for, keyed by
+	// that request's own JSON-RPC id, which is the subscription id every message on
+	// its stream carries.
+	subscriptions map[string]*subscription
 	// stateless records that this session was observed carrying at least one
 	// request declaring 2026-07-28 or later, which is what makes the rules that
 	// revision introduced applicable to the frames around it.
@@ -513,6 +517,9 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		}
 		ev.call, reused = sess.openCall(ev.id, msg, e)
 		ev.call.progressToken = sess.noteProgressToken(msg.Params)
+		if msg.Method == "subscriptions/listen" && e.Direction == proxy.ClientToServer {
+			sess.noteSubscription(ev.id, msg.Params)
+		}
 		if ev.call.taskID != "" {
 			ev.taskID = ev.call.taskID
 			ev.taskCall = sess.tasks[ev.taskID]
@@ -541,6 +548,9 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.warning = validationWarning(msg)
 		sess.notifications++
 		sess.invalidateCache(msg.Method, msg.Params)
+		for _, note := range sess.subscriptionWarnings(e.Direction, msg.Method, msg.Params) {
+			ev.warning = appendWarning(ev.warning, note)
+		}
 		if msg.Method == "notifications/progress" {
 			if note := sess.progressWarning(msg.Params); note != "" {
 				ev.warning = appendWarning(ev.warning, note)
