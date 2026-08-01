@@ -139,9 +139,16 @@ func mcpParamHeaderWarnings(sess *session, msg proxy.RPCMessage, headers []proxy
 	// values is a request a conforming server must reject, and keeping only the
 	// first made the verdict depend on which line happened to arrive first.
 	values := make(map[string][]string, len(headers))
+	// Which names mcpsnoop scrubbed, taken from the flag the shim set rather than
+	// read back out of the value. "[REDACTED]" is a legal header value a peer
+	// controls, so a guess made from the bytes cannot tell the two apart.
+	scrubbed := make(map[string]struct{})
 	for _, header := range headers {
 		key := strings.ToLower(header.Name)
 		values[key] = append(values[key], header.Value)
+		if header.Redacted {
+			scrubbed[key] = struct{}{}
+		}
 	}
 
 	var warnings []string
@@ -175,8 +182,15 @@ func mcpParamHeaderWarnings(sess *session, msg proxy.RPCMessage, headers []proxy
 		// Gated on the frame actually having been redacted. "[REDACTED]" is a legal
 		// header value and a legal string argument, so skipping on those bytes alone
 		// let either peer switch the check off by sending them.
-		if redacted && (slices.Contains(spellings, redactedMarker) ||
-			string(raw) == strconv.Quote(redactedMarker)) {
+		if _, headerScrubbed := scrubbed[strings.ToLower(fullName)]; headerScrubbed {
+			continue
+		}
+		// The body half still has to be recognised by its bytes, since a rule
+		// rewrites a value in place and leaves no per-argument mark. Gated on the
+		// frame having been rewritten at all, which is what keeps an untouched
+		// capture checkable, and the residue is narrow: an argument whose genuine
+		// value is the placeholder, on a frame where some other rule fired.
+		if redacted && string(raw) == strconv.Quote(redactedMarker) {
 			continue
 		}
 		if len(spellings) > 1 && !mcpParamHeaderValuesAgree(spellings, binding.typ) {

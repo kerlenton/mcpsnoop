@@ -204,7 +204,7 @@ func (r Redactor) redactMCPParamHeaders(headers []MCPParamHeader, scrubbed, surv
 	changed := false
 	for i := range out {
 		if mirrorsScrubbed(out[i].Value, scrubbed, survived) {
-			out[i].Value = redactedValue
+			out[i].Value, out[i].Redacted = redactedValue, true
 			changed = true
 			continue
 		}
@@ -213,12 +213,12 @@ func (r Redactor) redactMCPParamHeaders(headers []MCPParamHeader, scrubbed, surv
 		_, exactKey := r.keys[name]
 		_, normalizedKey := r.keys[strings.ReplaceAll(name, "-", "_")]
 		if ok && (exactKey || normalizedKey) {
-			out[i].Value = redactedValue
+			out[i].Value, out[i].Redacted = redactedValue, true
 			changed = true
 			continue
 		}
 		if scrubbedValue := r.redactString(out[i].Value); scrubbedValue != out[i].Value {
-			out[i].Value = scrubbedValue
+			out[i].Value, out[i].Redacted = scrubbedValue, true
 			changed = true
 		}
 	}

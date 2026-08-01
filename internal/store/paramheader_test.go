@@ -391,23 +391,24 @@ func (s *paramCaptureSink) Close() error          { return nil }
 func TestParamHeaderRedactionIsNotAMismatch(t *testing.T) {
 	const schema = `{"type":"object","properties":{"authKey":{"type":"string","x-mcp-header":"Auth"}}}`
 	for _, tc := range []struct {
-		name         string
-		header, body string
-		wantWarnings int
+		name           string
+		header, body   string
+		headerScrubbed bool
+		wantWarnings   int
 	}{
-		{"both scrubbed", redactedMarker, redactedMarker, 0},
-		{"body scrubbed only", "sk-live-abcdef", redactedMarker, 0},
-		{"header scrubbed only", redactedMarker, "sk-live-abcdef", 0},
-		{"neither scrubbed and equal", "sk-live-abcdef", "sk-live-abcdef", 0},
+		{"both scrubbed", redactedMarker, redactedMarker, true, 0},
+		{"body scrubbed only", "sk-live-abcdef", redactedMarker, false, 0},
+		{"header scrubbed only", redactedMarker, "sk-live-abcdef", true, 0},
+		{"neither scrubbed and equal", "sk-live-abcdef", "sk-live-abcdef", false, 0},
 		// A real disagreement on unredacted values must still be reported, or the
 		// guard has switched the check off rather than scoping it.
-		{"neither scrubbed and different", "sk-live-abcdef", "sk-live-999999", 1},
+		{"neither scrubbed and different", "sk-live-abcdef", "sk-live-999999", false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sess := paramSession(t, "fetch", schema)
 			got := mcpParamHeaderWarnings(sess,
 				paramCallMsg("fetch", `{"authKey":`+quoteJSON(tc.body)+`}`),
-				[]proxy.MCPParamHeader{{Name: "Mcp-Param-Auth", Value: tc.header}}, true)
+				[]proxy.MCPParamHeader{{Name: "Mcp-Param-Auth", Value: tc.header, Redacted: tc.headerScrubbed}}, true)
 			if len(got) != tc.wantWarnings {
 				t.Fatalf("warnings = %v, want %d", got, tc.wantWarnings)
 			}
@@ -415,26 +416,79 @@ func TestParamHeaderRedactionIsNotAMismatch(t *testing.T) {
 	}
 }
 
-// TestParamHeaderRedactionGuardNeedsAnActualRedaction. "[REDACTED]" is a legal
-// header value and a legal string argument, so a guard that skips on those bytes
-// alone is a check either peer can switch off by sending them. It is scoped to
-// frames mcpsnoop itself rewrote.
-func TestParamHeaderRedactionGuardNeedsAnActualRedaction(t *testing.T) {
+// TestParamHeaderRedactionGuardIsNotForgeable. "[REDACTED]" is a legal header
+// value and a legal string argument, so the header side is decided by the flag
+// the shim set and never by the bytes. The frame-wide flag is not enough either,
+// since any rule matching anything on the frame would otherwise unlock the skip
+// for a header no rule touched.
+func TestParamHeaderRedactionGuardIsNotForgeable(t *testing.T) {
 	const schema = `{"type":"object","properties":{"authKey":{"type":"string","x-mcp-header":"Auth"}}}`
 	for _, tc := range []struct {
-		name         string
-		redacted     bool
-		wantWarnings int
+		name           string
+		frameRedacted  bool
+		headerScrubbed bool
+		wantWarnings   int
 	}{
-		{"frame was redacted", true, 0},
-		{"frame was not redacted", false, 1},
+		{"mcpsnoop scrubbed this header", true, true, 0},
+		{"a peer sent the placeholder itself", true, false, 1},
+		{"no redaction anywhere", false, false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := mcpParamHeaderWarnings(paramSession(t, "fetch", schema),
 				paramCallMsg("fetch", `{"authKey":"sk-live-abcdef"}`),
-				[]proxy.MCPParamHeader{{Name: "Mcp-Param-Auth", Value: redactedMarker}}, tc.redacted)
+				[]proxy.MCPParamHeader{{Name: "Mcp-Param-Auth", Value: redactedMarker, Redacted: tc.headerScrubbed}},
+				tc.frameRedacted)
 			if len(got) != tc.wantWarnings {
 				t.Fatalf("warnings = %v, want %d", got, tc.wantWarnings)
+			}
+		})
+	}
+}
+
+// TestParamHeaderRedactionFlagSurvivesTheProxy keeps the two sides in step. The
+// store now trusts a flag rather than the bytes, so the flag has to be the thing
+// the shim actually sets on a header it scrubbed.
+func TestParamHeaderRedactionFlagSurvivesTheProxy(t *testing.T) {
+	// One case per way redactMCPParamHeaders can scrub a header, since each is its
+	// own branch and any one of them left unflagged is a header the store then
+	// judges by its bytes.
+	for _, tc := range []struct {
+		name string
+		cfg  proxy.RedactConfig
+		args string
+	}{
+		{
+			name: "linked to a value a body rule removed",
+			cfg:  proxy.RedactConfig{Keys: []string{"authKey"}},
+			args: `{"authKey":"sk-live-abcdef"}`,
+		},
+		{
+			name: "matched by the annotation name",
+			cfg:  proxy.RedactConfig{Keys: []string{"auth"}},
+			args: `{"region":"us-west1"}`,
+		},
+		{
+			name: "matched by a value pattern",
+			cfg:  proxy.RedactConfig{ValuePatterns: []string{`sk-live-\S+`}},
+			args: `{"region":"us-west1"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &paramCaptureSink{}
+			proxy.NewRedactingSink(sink, tc.cfg).Emit(proxy.Envelope{
+				Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+					`{"name":"fetch","arguments":` + tc.args + `}}`),
+				MCPParamHeaders: []proxy.MCPParamHeader{
+					{Name: "Mcp-Param-Auth", Value: "sk-live-abcdef"},
+					{Name: "Mcp-Param-Zone", Value: "eu-central1"},
+				},
+			})
+			got := sink.envs[0].MCPParamHeaders
+			if !got[0].Redacted || got[0].Value != redactedMarker {
+				t.Fatalf("a scrubbed header must carry the flag, got %+v", got[0])
+			}
+			if got[1].Redacted || got[1].Value != "eu-central1" {
+				t.Fatalf("a header no rule touched must be left alone, got %+v", got[1])
 			}
 		})
 	}
