@@ -1098,7 +1098,7 @@ func TestParamHeadersSurviveTheJSONLRoundTrip(t *testing.T) {
 		SessionID: "s1", ServerLabel: "demo", Seq: 4, TS: t0.Add(3 * time.Millisecond),
 		Transport: proxy.TransportHTTP, Direction: proxy.ClientToServer,
 		MCPMethod: "tools/call", MCPName: "route", MCPProtocolVersion: "2026-07-28",
-		MCPParamHeaders: []proxy.MCPParamHeader{{Name: "Mcp-Param-Region", Value: "[REDACTED]"}},
+		MCPParamHeaders: []proxy.MCPParamHeader{{Name: "Mcp-Param-Region", Value: "[REDACTED]", Redacted: true}},
 		Redacted:        true,
 		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":` +
 			`{"name":"route","arguments":{"region":"us-west1"},` + meta + `}}`),
@@ -1117,6 +1117,12 @@ func TestParamHeadersSurviveTheJSONLRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(lines[3], `"redacted":true`) {
 		t.Fatalf("on-disk envelope lost its redaction flag:\n%s", lines[3])
+	}
+	// The per-header flag is what the store trusts on the header side, so it has
+	// to survive the round trip as its own field rather than be re-guessed from
+	// the value.
+	if want := `{"name":"Mcp-Param-Region","value":"[REDACTED]","redacted":true}`; !strings.Contains(lines[3], want) {
+		t.Fatalf("on-disk header lost its redaction flag:\n%s", lines[3])
 	}
 
 	st, sessionID, err := LoadFile(path)

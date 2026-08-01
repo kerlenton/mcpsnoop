@@ -46,6 +46,11 @@ type SessionMeta struct {
 type MCPParamHeader struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+	// Redacted marks a value mcpsnoop's own redaction replaced. The store needs
+	// it to tell its placeholder from a client that sent those bytes, and reading
+	// the value back to guess cannot do that, because "[REDACTED]" is a legal
+	// header value that a peer controls.
+	Redacted bool `json:"redacted,omitempty"`
 }
 
 // Envelope wraps a single observed event for transport to the hub and for the
