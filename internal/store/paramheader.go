@@ -267,6 +267,12 @@ func mcpParamHeaderBindings(schema json.RawMessage) ([]paramHeaderBinding, strin
 	if violation != "" {
 		return nil, violation
 	}
+	// The static-reachability rule, checked after the walk because the walk is
+	// what defines reachable. Anything the walk could not arrive at is an
+	// annotation the spec says makes the whole definition invalid.
+	if note := unreachableAnnotation(schema); note != "" {
+		return nil, note
+	}
 	slices.SortFunc(bindings, func(a, b paramHeaderBinding) int {
 		if n := strings.Compare(strings.ToLower(a.header), strings.ToLower(b.header)); n != 0 {
 			return n
@@ -274,6 +280,82 @@ func mcpParamHeaderBindings(schema json.RawMessage) ([]paramHeaderBinding, strin
 		return strings.Compare(strings.Join(a.path, "."), strings.Join(b.path, "."))
 	})
 	return bindings, ""
+}
+
+// unreachableAnnotation looks for an x-mcp-header the binding walk cannot arrive
+// at, and names the keyword that put it out of reach. The spec allows the
+// annotation only on a property reachable through a chain consisting solely of
+// "properties" keys, and says of anything else that it "makes the annotation, and
+// thus the tool definition, invalid".
+//
+// Written as a scan for the unreachable rather than a list of forbidden
+// keywords. items, oneOf, anyOf, allOf, not, if, then, else and the $defs a $ref
+// points into all fall out of the one rule, and so does any keyword a later
+// revision adds, which a hand-kept list would silently miss.
+//
+// The keys inside a "properties" object are parameter names, not schema
+// keywords, so they are stepped over rather than read. Without that, a tool with
+// an argument genuinely named x-mcp-header would be reported for an annotation it
+// does not have.
+func unreachableAnnotation(schema json.RawMessage) string {
+	var document any
+	if json.Unmarshal(schema, &document) != nil {
+		return ""
+	}
+	return scanForUnreachable(document, "")
+}
+
+func scanForUnreachable(node any, under string) string {
+	switch value := node.(type) {
+	case map[string]any:
+		if under != "" {
+			if _, annotated := value["x-mcp-header"]; annotated {
+				return "an x-mcp-header under " + strconv.Quote(under) +
+					", which 2026-07-28 does not allow in the chain to an annotated property"
+			}
+		}
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		for _, key := range keys {
+			if key == "properties" {
+				// One step further along the reachable chain. Its keys are names, so
+				// descend past them into each subschema keeping the current reach.
+				if names, ok := value[key].(map[string]any); ok {
+					childKeys := make([]string, 0, len(names))
+					for name := range names {
+						childKeys = append(childKeys, name)
+					}
+					slices.Sort(childKeys)
+					for _, name := range childKeys {
+						if note := scanForUnreachable(names[name], under); note != "" {
+							return note
+						}
+					}
+					continue
+				}
+			}
+			// Any other keyword leaves the chain, and once left it is never rejoined.
+			// The annotation's own key needs no special case, since a reachable one
+			// is not a violation and its value is a scalar the walk bottoms out on.
+			reach := under
+			if reach == "" {
+				reach = key
+			}
+			if note := scanForUnreachable(value[key], reach); note != "" {
+				return note
+			}
+		}
+	case []any:
+		for _, item := range value {
+			if note := scanForUnreachable(item, under); note != "" {
+				return note
+			}
+		}
+	}
+	return ""
 }
 
 func collectMCPParamHeaderBindings(properties map[string]json.RawMessage, prefix []string, seen map[string]struct{}, out []paramHeaderBinding) ([]paramHeaderBinding, string) {
