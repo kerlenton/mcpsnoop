@@ -436,12 +436,34 @@ func collectSurviving(v any, scrubbed, survived map[string]struct{}) {
 	}
 }
 
+// schemaKeywords are the positions where a JSON Schema hangs off an MCP message.
+// A key rule must not fire inside one. The names under a schema's "properties"
+// are type declarations rather than values, so scrubbing the subschema under a
+// property called "token" hides what the argument is while leaving the name
+// itself in plain sight, which protects nothing and costs every check that reads
+// the schema, x-mcp-header validation most of all. A user who does mean to scrub
+// something inside a schema still has --redact-path, which names it exactly.
+var schemaKeywords = map[string]struct{}{
+	"inputSchema":  {},
+	"outputSchema": {},
+}
+
 func (r Redactor) redactValue(v any, scrubbed map[string]struct{}) bool {
+	return r.redactValueIn(v, scrubbed, false)
+}
+
+func (r Redactor) redactValueIn(v any, scrubbed map[string]struct{}, inSchema bool) bool {
 	switch x := v.(type) {
 	case map[string]any:
 		changed := false
 		for key, child := range x {
-			if _, ok := r.keys[strings.ToLower(key)]; ok {
+			if _, schema := schemaKeywords[key]; schema && !inSchema {
+				if r.redactValueIn(child, scrubbed, true) {
+					changed = true
+				}
+				continue
+			}
+			if _, ok := r.keys[strings.ToLower(key)]; ok && !inSchema {
 				// Recorded for the same reason a path match is. A key rule reaches a
 				// mirrored Mcp-Param header no more directly than a path does, and
 				// leaving it unrecorded left --redact-key and --redact-secrets scrubbing
@@ -464,7 +486,7 @@ func (r Redactor) redactValue(v any, scrubbed map[string]struct{}) bool {
 				}
 				continue
 			}
-			if r.redactValue(child, scrubbed) {
+			if r.redactValueIn(child, scrubbed, inSchema) {
 				changed = true
 			}
 		}
@@ -474,7 +496,7 @@ func (r Redactor) redactValue(v any, scrubbed map[string]struct{}) bool {
 		for i := 0; i < len(x); i++ {
 			s, ok := x[i].(string)
 			if !ok {
-				if r.redactValue(x[i], scrubbed) {
+				if r.redactValueIn(x[i], scrubbed, inSchema) {
 					changed = true
 				}
 				continue

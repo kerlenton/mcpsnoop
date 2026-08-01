@@ -715,3 +715,77 @@ func TestRedactScrubsMcpNameButNotTheProtocolConstants(t *testing.T) {
 		})
 	}
 }
+
+// TestRedactLeavesToolSchemasAlone. A key rule names a JSON property whose value
+// is data. Inside a tool schema the same name is a type declaration, and the key
+// stays in the log either way, so scrubbing the subschema under a property called
+// "token" hides what the argument is while leaving the name in plain sight. It
+// protects nothing and takes every check that reads the schema with it.
+func TestRedactLeavesToolSchemasAlone(t *testing.T) {
+	const schema = `{"type":"object","properties":{"token":{"type":"string","x-mcp-header":"Token"}}}`
+	for _, keyword := range []string{"inputSchema", "outputSchema"} {
+		t.Run(keyword, func(t *testing.T) {
+			sink := &captureSink{}
+			NewRedactingSink(sink, RedactConfig{CommonSecrets: true}).Emit(Envelope{
+				Direction: ServerToClient,
+				Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"route",` +
+					`"` + keyword + `":` + schema + `}],"resultType":"complete"}}`),
+			})
+			got := string(sink.byDir(ServerToClient)[0].Raw)
+			if strings.Contains(got, redactedValue) {
+				t.Fatalf("a tool schema must survive a key rule: %s", got)
+			}
+			if !strings.Contains(got, `"x-mcp-header":"Token"`) {
+				t.Fatalf("the annotation must survive: %s", got)
+			}
+		})
+	}
+
+	// The exemption is for schema keywords only. Call arguments are data and are
+	// still scrubbed by the same rule in the same run.
+	t.Run("call arguments are still scrubbed", func(t *testing.T) {
+		sink := &captureSink{}
+		NewRedactingSink(sink, RedactConfig{CommonSecrets: true}).Emit(Envelope{
+			Direction: ClientToServer,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":` +
+				`{"name":"route","arguments":{"token":"sk-live-abcdef"}}}`),
+		})
+		got := string(sink.byDir(ClientToServer)[0].Raw)
+		if strings.Contains(got, "sk-live-abcdef") {
+			t.Fatalf("call arguments must still be scrubbed: %s", got)
+		}
+	})
+
+	// A user who does mean to reach inside a schema still can, by naming it.
+	t.Run("a path rule still reaches a schema", func(t *testing.T) {
+		path, err := ParseRedactPath("$.result.tools[0].inputSchema.properties.token")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sink := &captureSink{}
+		NewRedactingSink(sink, RedactConfig{Paths: []RedactPath{path}}).Emit(Envelope{
+			Direction: ServerToClient,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"route",` +
+				`"inputSchema":` + schema + `}],"resultType":"complete"}}`),
+		})
+		if got := string(sink.byDir(ServerToClient)[0].Raw); !strings.Contains(got, redactedValue) {
+			t.Fatalf("an explicit path must still reach into a schema: %s", got)
+		}
+	})
+
+	// And a value pattern, which is written against the text rather than a name,
+	// still applies. A secret pasted into a default or a description is reachable.
+	t.Run("a value pattern still applies inside a schema", func(t *testing.T) {
+		sink := &captureSink{}
+		NewRedactingSink(sink, RedactConfig{ValuePatterns: []string{`sk-live-\S+`}}).Emit(Envelope{
+			Direction: ServerToClient,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"route",` +
+				`"inputSchema":{"type":"object","properties":{"key":{"type":"string",` +
+				`"default":"sk-live-abcdef"}}}}],"resultType":"complete"}}`),
+		})
+		got := string(sink.byDir(ServerToClient)[0].Raw)
+		if strings.Contains(got, "sk-live-abcdef") {
+			t.Fatalf("a value pattern must still reach a secret inside a schema: %s", got)
+		}
+	})
+}
