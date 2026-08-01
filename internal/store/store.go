@@ -112,6 +112,7 @@ func httpFailed(status int) bool { return status >= 400 }
 // the opposite direction with the same id.
 type callKey struct {
 	dir proxy.Direction
+	seq uint64
 	id  string
 	// conn separates the id spaces of two clients that share one proxy process.
 	// JSON-RPC scopes id uniqueness to the sender, "the ID MUST NOT match the ID
@@ -124,18 +125,19 @@ type callKey struct {
 
 // call is the mutable internal record for one request/response pair.
 type call struct {
-	id       string
-	method   string
-	reqDir   proxy.Direction
-	params   json.RawMessage
-	result   json.RawMessage
-	err      *proxy.RPCError
-	start    time.Time
-	end      time.Time
-	state    CallState
-	isTool   bool
-	toolName string
-	toolErr  bool // result.isError == true (MCP tool-level failure)
+	requestSeq uint64
+	id         string
+	method     string
+	reqDir     proxy.Direction
+	params     json.RawMessage
+	result     json.RawMessage
+	err        *proxy.RPCError
+	start      time.Time
+	end        time.Time
+	state      CallState
+	isTool     bool
+	toolName   string
+	toolErr    bool // result.isError == true (MCP tool-level failure)
 	// errored is the "something went wrong" axis: a protocol error, a tool-level
 	// error, or a task that ended failed. It drives the session error counter and
 	// the CI gate, and is deliberately distinct from the Failed state, which also
@@ -494,7 +496,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			// A continuation, not a new call. Mapping the retry id onto the same
 			// call object lets completeCall find it, so the operation keeps one
 			// pending slot and one duration however many round trips it takes.
-			sess.calls[callKey{dir: e.Direction, id: ev.id, conn: e.ConnID}] = root
+			sess.calls[requestCallKey(ev.id, msg.ID, e)] = root
 			root.mrtrState, root.mrtrKeys = "", ""
 			root.mrtrHasState = false
 			sess.unpark(root)
@@ -781,7 +783,7 @@ func (s *Store) sessionFor(e proxy.Envelope) *session {
 // a still-pending call for the same id and direction, meaning the client reused
 // an id while its earlier request was in flight. Caller holds the write lock.
 func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope) (*call, bool) {
-	key := callKey{dir: e.Direction, id: id, conn: e.ConnID}
+	key := requestCallKey(id, msg.ID, e)
 	prev, ok := sess.calls[key]
 	reused := ok && (prev.state == Pending || prev.state == Streaming)
 	if reused {
@@ -801,12 +803,13 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 		prev.end = e.TS
 	}
 	c := &call{
-		id:     id,
-		method: msg.Method,
-		reqDir: e.Direction,
-		params: msg.Params,
-		start:  e.TS,
-		state:  Pending,
+		requestSeq: e.Seq,
+		id:         id,
+		method:     msg.Method,
+		reqDir:     e.Direction,
+		params:     msg.Params,
+		start:      e.TS,
+		state:      Pending,
 	}
 	if isStreamOpeningMethod(msg.Method) {
 		c.state = Streaming
@@ -822,6 +825,14 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 	c.protocolVersion = requestProtocolVersion(msg.Params, e.MCPProtocolVersion)
 	sess.calls[key] = c
 	return c, reused
+}
+
+func requestCallKey(id string, rawID json.RawMessage, e proxy.Envelope) callKey {
+	key := callKey{dir: e.Direction, id: id, conn: e.ConnID}
+	if bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+		key.seq = e.Seq
+	}
+	return key
 }
 
 // completeCall matches a response to its pending request. The bool reports
@@ -1589,6 +1600,9 @@ func validationWarning(msg proxy.RPCMessage) string {
 	case msg.JSONRPC != "2.0":
 		warning = appendWarning(warning, "jsonrpc must be 2.0")
 	}
+	if idWarning := requestIDWarning(msg); idWarning != "" {
+		warning = appendWarning(warning, idWarning)
+	}
 	if msg.Method == "" && len(msg.ID) > 0 {
 		if len(msg.Result) == 0 && msg.Error == nil {
 			warning = appendWarning(warning, "response has neither result nor error")
@@ -1598,6 +1612,42 @@ func validationWarning(msg proxy.RPCMessage) string {
 		}
 	}
 	return warning
+}
+
+func requestIDWarning(msg proxy.RPCMessage) string {
+	if msg.Method == "" || len(msg.ID) == 0 {
+		return ""
+	}
+	decoder := json.NewDecoder(bytes.NewReader(msg.ID))
+	decoder.UseNumber()
+	var id any
+	if decoder.Decode(&id) != nil {
+		return ""
+	}
+	switch value := id.(type) {
+	case string:
+		return ""
+	case json.Number:
+		if requestIDIsInteger(string(value)) {
+			return ""
+		}
+		return "request id has type non-integer number; MCP requires a string or integer id"
+	case nil:
+		return "request id is null; MCP requires a string or integer id"
+	case bool:
+		return "request id has type boolean; MCP requires a string or integer id"
+	case []any:
+		return "request id has type array; MCP requires a string or integer id"
+	default:
+		return "request id has type object; MCP requires a string or integer id"
+	}
+}
+
+func requestIDIsInteger(id string) bool {
+	id = strings.TrimPrefix(id, "-")
+	return id != "" && strings.IndexFunc(id, func(r rune) bool {
+		return r < '0' || r > '9'
+	}) == -1
 }
 
 // resultTypeRequiredFrom is the revision that made resultType mandatory on every

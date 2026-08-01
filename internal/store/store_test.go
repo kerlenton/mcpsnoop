@@ -196,6 +196,71 @@ func TestReusedRequestIdKeepsPendingCounterAndTimelineInSync(t *testing.T) {
 	}
 }
 
+func TestNullRequestIDsRemainDistinct(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	first := s.Ingest(req(1, t0, proxy.ClientToServer, "null", "tools/call", `{"name":"read_file"}`))
+	second := s.Ingest(req(2, t0.Add(time.Millisecond), proxy.ClientToServer, "null", "tools/call", `{"name":"write_file"}`))
+
+	want := "request id is null; MCP requires a string or integer id"
+	if first.Warning != want || second.Warning != want {
+		t.Fatalf("null id warnings = %q and %q, want %q", first.Warning, second.Warning, want)
+	}
+	if strings.Contains(second.Warning, "reuses an id") {
+		t.Fatalf("null ids must not be treated as reusable identifiers: %q", second.Warning)
+	}
+	response := s.Ingest(resp(3, t0.Add(2*time.Millisecond), proxy.ServerToClient, "null", `"error":{"code":-32700,"message":"parse error"}`))
+	if !strings.Contains(response.Warning, "no matching request") {
+		t.Fatalf("null response warning = %q, want an unmatched response", response.Warning)
+	}
+	if got := s.Sessions()[0].Pending; got != 2 {
+		t.Fatalf("pending = %d, want 2", got)
+	}
+	calls := s.Calls("s1")
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(calls))
+	}
+	if calls[0].State != Pending || calls[1].State != Pending {
+		t.Fatalf("null id calls should both remain pending: %+v", calls)
+	}
+	if calls[0].ToolName != "read_file" || calls[1].ToolName != "write_file" {
+		t.Fatalf("tool names = %q and %q", calls[0].ToolName, calls[1].ToolName)
+	}
+}
+
+func TestInvalidRequestIDTypesWarn(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+		want string
+	}{
+		{"string", `"abc"`, ""},
+		{"integer", "42", ""},
+		{"null", "null", "request id is null; MCP requires a string or integer id"},
+		{"fraction", "1.5", "request id has type non-integer number; MCP requires a string or integer id"},
+		{"boolean", "true", "request id has type boolean; MCP requires a string or integer id"},
+		{"array", "[]", "request id has type array; MCP requires a string or integer id"},
+		{"object", "{}", "request id has type object; MCP requires a string or integer id"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := New()
+			ev := s.Ingest(req(1, time.Now(), proxy.ClientToServer, test.id, "ping", ""))
+			if ev.Warning != test.want {
+				t.Fatalf("warning = %q, want %q", ev.Warning, test.want)
+			}
+		})
+	}
+}
+
+func TestNullErrorResponseDoesNotUseRequestIDWarning(t *testing.T) {
+	s := New()
+	ev := s.Ingest(resp(1, time.Now(), proxy.ServerToClient, "null", `"error":{"code":-32700,"message":"parse error"}`))
+	if strings.Contains(ev.Warning, "request id") {
+		t.Fatalf("null error response got request warning %q", ev.Warning)
+	}
+}
+
 func TestSessionReportsSeqGapAsMissingFrames(t *testing.T) {
 	now := time.Now()
 

@@ -163,6 +163,41 @@ func TestBuildExportsSupersededCallNotAsOk(t *testing.T) {
 	}
 }
 
+func TestBuildKeepsNullIDCallsDistinct(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "null-id.jsonl")
+	t0 := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "files", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":null,"method":"tools/call","params":{"name":"read_file"}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "files", Seq: 2, TS: t0.Add(time.Second),
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":null,"method":"tools/call","params":{"name":"write_file"}}`),
+	})
+
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Calls) != 2 || len(out.Events) != 2 {
+		t.Fatalf("calls/events = %d/%d, want 2/2", len(out.Calls), len(out.Events))
+	}
+	for i, want := range []string{"read_file", "write_file"} {
+		if out.Events[i].CallIndex == nil || *out.Events[i].CallIndex != i {
+			t.Fatalf("event %d call index = %v, want %d", i, out.Events[i].CallIndex, i)
+		}
+		if out.Calls[i].ToolName != want {
+			t.Fatalf("call %d tool = %q, want %q", i, out.Calls[i].ToolName, want)
+		}
+	}
+}
+
 func TestBuildExportsCancelledTaskWithoutFlaggingAnError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cancel.jsonl")
 	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
