@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -660,6 +661,20 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			} else if e.Call.State == store.Superseded {
 				// Its id was reused while in flight, so it will never be answered.
 				c.status = "superseded"
+			} else if e.Call.State == store.Cancelled {
+				// The peer gave up on it, so it is settled, not hung: no spinner and no
+				// pending label on a call nobody is waiting for.
+				c.status = e.Call.CancelStatus()
+				if e.Call.CancelReason != "" {
+					// Quoted like the other wire text this row shows, since a reason can
+					// carry newlines or control characters and this is a terminal cell.
+					reason := "cancelled: " + strconv.Quote(e.Call.CancelReason)
+					if c.detail == "" {
+						c.detail = reason
+					} else {
+						c.detail = reason + " · " + c.detail
+					}
+				}
 			}
 		}
 	case store.EventResponse:
@@ -668,6 +683,20 @@ func (m Model) streamCells(e store.EventView) streamCell {
 		if e.Call != nil {
 			c.dur = e.Call.Duration().Round(time.Millisecond).String()
 			switch {
+			case e.Call.State == store.Cancelled:
+				// The answer arrived, but the call had already been cancelled, so the
+				// row must not read "ok" as though someone were still waiting for it.
+				// The detail still says what arrived, since a server acknowledging the
+				// cancel with an error is a shape worth reading.
+				c.status = e.Call.CancelStatus()
+				switch {
+				case e.Call.Err != nil:
+					c.detail = rpcErrorText(*e.Call.Err)
+				case e.Call.ToolErr:
+					c.detail = toolErrorText(e.Call.Result)
+				default:
+					c.detail = compactJSON(e.Call.Result)
+				}
 			case e.Call.TaskID != "" && e.Call.State == store.Pending:
 				c.status = e.Call.TaskStatus
 				c.detail = compactJSON(e.Call.Result)
@@ -750,6 +779,15 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = e.CacheStaleRefetch
 		} else {
 			c.detail = e.CacheStaleRefetch + " · " + c.detail
+		}
+	}
+	// An observation, not a warning: the spec blesses the race, and the call state
+	// already supplies the row status, so this only adds the ordering and the gap.
+	if e.LateResult != "" {
+		if c.detail == "" {
+			c.detail = e.LateResult
+		} else {
+			c.detail = e.LateResult + " · " + c.detail
 		}
 	}
 	if !e.CacheHint.Empty() {
@@ -910,6 +948,11 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 			return m.styles.follow
 		case e.Call.State == store.Superseded:
 			return m.styles.warn // never answered, not a success
+		case e.Call.State == store.Cancelled:
+			// Never answered, or answered after the peer stopped listening. Neither is
+			// a plain success, and neither is an error either, so it reads as a caution
+			// on the superseded precedent.
+			return m.styles.warn
 		case e.Call.Failed():
 			return m.styles.respErr
 		default:

@@ -31,6 +31,14 @@ type CallView struct {
 	State      CallState
 	TaskID     string
 	TaskStatus string
+	// CancelledAt is when mcpsnoop observed the notifications/cancelled naming this
+	// call, and CancelReason the host's own words for why. Both zero unless State
+	// is Cancelled.
+	CancelledAt  time.Time
+	CancelReason string
+	// LateResult is true when a response arrived after the cancel, so the work
+	// completed and the peer that asked for it had already stopped listening.
+	LateResult bool
 }
 
 // Failed reports a protocol error, a tool-level error (result.isError), or any
@@ -44,6 +52,25 @@ func (c CallView) Failed() bool { return c.Err != nil || c.ToolErr || c.State ==
 
 // Done reports whether a response has arrived.
 func (c CallView) Done() bool { return c.State != Pending && c.State != Streaming }
+
+// CancelStatus is the label a cancelled call reads under, separating the two
+// shapes a wire cancel produces: one nobody ever answered, and one the server
+// answered after the host had stopped listening. Empty for any other state.
+//
+// It lives beside the state so the export and the TUI row can never disagree,
+// and it deliberately avoids the bare "cancelled" the Tasks feature already uses
+// for a task that ended cancelled. That is a different fact from a cancel of a
+// request id on the wire, and one label could not tell them apart.
+func (c CallView) CancelStatus() string {
+	switch {
+	case c.State != Cancelled:
+		return ""
+	case c.LateResult:
+		return "cancelled_late_result"
+	default:
+		return "cancelled_request"
+	}
+}
 
 // Duration is the request→response latency, or elapsed-so-far while the call is
 // still open, which covers both a pending request and a live stream.
@@ -99,9 +126,13 @@ type EventView struct {
 	// CacheStaleRefetch is set when a client re-fetches inside a declared ttlMs
 	// window. Structured like Deprecated and never fails check.
 	CacheStaleRefetch string
-	Call              *CallView // set for request/response events
-	TaskCall          *CallView // originating call for a tasks/* lifecycle frame
-	TaskID            string
+	// LateResult is set on a response that arrived after its call was cancelled,
+	// carrying the ordering and the gap. Structured like Deprecated: an
+	// observation the spec's Timing Considerations allow, so it never fails check.
+	LateResult string
+	Call       *CallView // set for request/response events
+	TaskCall   *CallView // originating call for a tasks/* lifecycle frame
+	TaskID     string
 	// MRTRRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised (SEP-2322). Empty on an ordinary request.
 	MRTRRoot string
@@ -372,6 +403,7 @@ func (e *event) view(_ *session) EventView {
 		Deprecated:         e.deprecated,
 		CacheHint:          e.cacheHint,
 		CacheStaleRefetch:  e.cacheStaleRefetch,
+		LateResult:         e.lateResult,
 		TaskID:             e.taskID,
 		MRTRRoot:           e.mrtrRoot,
 		MRTRStateIssue:     e.mrtrStateIssue,
@@ -389,21 +421,24 @@ func (e *event) view(_ *session) EventView {
 
 func (c *call) view() CallView {
 	return CallView{
-		ID:         c.id,
-		Method:     c.method,
-		ReqDir:     c.reqDir,
-		IsTool:     c.isTool,
-		ToolName:   c.toolName,
-		Params:     c.params,
-		Result:     c.result,
-		Err:        c.err,
-		ToolErr:    c.toolErr,
-		Errored:    c.errored,
-		Start:      c.start,
-		End:        c.end,
-		State:      c.state,
-		TaskID:     c.taskID,
-		TaskStatus: c.taskStatus,
+		ID:           c.id,
+		Method:       c.method,
+		ReqDir:       c.reqDir,
+		IsTool:       c.isTool,
+		ToolName:     c.toolName,
+		Params:       c.params,
+		Result:       c.result,
+		Err:          c.err,
+		ToolErr:      c.toolErr,
+		Errored:      c.errored,
+		Start:        c.start,
+		End:          c.end,
+		State:        c.state,
+		TaskID:       c.taskID,
+		TaskStatus:   c.taskStatus,
+		CancelledAt:  c.cancelledAt,
+		CancelReason: c.cancelReason,
+		LateResult:   c.lateResult,
 	}
 }
 
@@ -713,6 +748,12 @@ func (s *Store) ToolSummary(sessionID string) (SessionToolSummary, bool) {
 		if c.state == Superseded {
 			// Its id was reused, so it was never answered. It still counts as a call
 			// (like a pending one), but has no real latency to feed the percentiles.
+			continue
+		}
+		if c.state == Cancelled && !c.lateResult {
+			// Cancelled and never answered. Its stored end is when the cancel landed,
+			// not a latency, so it counts as a call but feeds no percentile. One that
+			// did get a late answer still does: that duration is a real server latency.
 			continue
 		}
 		if c.errored {

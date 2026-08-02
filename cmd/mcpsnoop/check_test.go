@@ -23,7 +23,7 @@ func TestCheckFailsOnSelectedSessionSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 deprecated=0 missing_frames=0\ncheck failed: error,invalid,warn\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 cancelled=0 deprecated=0 missing_frames=0\ncheck failed: error,invalid,warn\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -39,7 +39,7 @@ func TestCheckFailsOnlyOnSelectedSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 because the fixture contains an invalid frame", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 deprecated=0 missing_frames=0\ncheck failed: invalid\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 cancelled=0 deprecated=0 missing_frames=0\ncheck failed: invalid\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -54,7 +54,7 @@ func TestCheckIgnoresUnselectedSignals(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=2 invalid=0 warnings=0 mismatches=0 pending=0 deprecated=0 missing_frames=0\ncheck passed\n" {
+	if stdout != "session s1: errors=2 invalid=0 warnings=0 mismatches=0 pending=0 cancelled=0 deprecated=0 missing_frames=0\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -73,7 +73,7 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0 deprecated=0 missing_frames=0\nrecorded first-seen tool baseline (trusted, not verified)\ncheck passed\n" {
+	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0 cancelled=0 deprecated=0 missing_frames=0\nrecorded first-seen tool baseline (trusted, not verified)\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -92,8 +92,8 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
 		t.Fatalf("exit = %d, want 1", code)
 	}
 	const want = `<?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="mcpsnoop check" tests="9" failures="3" errors="0" skipped="0" time="0">
-  <testsuite name="s1" tests="9" failures="3" errors="0" skipped="0" time="0">
+<testsuites name="mcpsnoop check" tests="10" failures="3" errors="0" skipped="0" time="0">
+  <testsuite name="s1" tests="10" failures="3" errors="0" skipped="0" time="0">
     <testcase classname="mcpsnoop.check" name="s1/error" time="0">
       <failure message="session s1 has 2 errors" type="mcpsnoop.check.error">session s1 has 2 errors</failure>
     </testcase>
@@ -105,6 +105,7 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
     </testcase>
     <testcase classname="mcpsnoop.check" name="s1/mismatch" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/pending" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/late" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/drift" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/deprecated" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/incomplete" time="0"></testcase>
@@ -128,7 +129,7 @@ func TestCheckJUnitHonorsFailOn(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 because errors are not selected", code)
 	}
-	for _, want := range []string{`tests="9"`, `failures="0"`, `name="s1/error"`} {
+	for _, want := range []string{`tests="10"`, `failures="0"`, `name="s1/error"`} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q\n%s", want, stdout)
 		}
@@ -272,6 +273,118 @@ func TestCheckFailsOnHungCall(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "check passed") {
 		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
+// cancelCaptureLog is the issue's repro as JSONL: a tools/call the host gives up
+// on 160ms in, with the server either ignoring the cancel and answering 450ms
+// later or obeying it and never answering.
+func cancelCaptureLog(t *testing.T, serverAnswers bool) string {
+	t.Helper()
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	at := func(seq uint64, dir proxy.Direction, offset time.Duration, raw string) proxy.Envelope {
+		e := checkEnvelope(seq, dir, raw)
+		e.TS = t0.Add(offset)
+		return e
+	}
+	envelopes := []proxy.Envelope{
+		at(1, proxy.ClientToServer, 0, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slow_job"}}`),
+		at(2, proxy.ClientToServer, 160*time.Millisecond,
+			`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":3,"reason":"Request timed out"}}`),
+	}
+	if serverAnswers {
+		envelopes = append(envelopes, at(3, proxy.ServerToClient, 610*time.Millisecond,
+			`{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"done"}]}}`))
+	}
+	return encodeCheckLog(t, envelopes...)
+}
+
+// TestCheckReportsACancelWithoutFailingByDefault is the issue's headline: both
+// captures must stay green on a default run (the spec blesses the race), while
+// the summary line finally says a cancel happened at all.
+func TestCheckReportsACancelWithoutFailingByDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		serverAnswers bool
+	}{
+		{"server ignored the cancel", true},
+		{"server obeyed the cancel", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MCPSNOOP_HOME", t.TempDir())
+			code, stdout, stderr := executeCheck(t, []string{"-"}, cancelCaptureLog(t, tc.serverAnswers))
+			if code != 0 {
+				t.Fatalf("exit = %d, want 0: a cancel is an observation, not a violation\n%s", code, stdout)
+			}
+			if !strings.Contains(stdout, "pending=0 cancelled=1") {
+				t.Fatalf("summary should report the cancel and no pending call, got %q", stdout)
+			}
+			if !strings.Contains(stdout, "check passed") || stderr != "" {
+				t.Fatalf("stdout = %q stderr = %q", stdout, stderr)
+			}
+		})
+	}
+}
+
+// TestCheckPendingSignalSurvivesAConformingCancel. The issue's second half: a
+// server that obeys the cancel used to leave the call pending forever, so the
+// one signal a user would reach for to catch a hung server could never be
+// switched on. A genuinely unanswered call must still trip it.
+func TestCheckPendingSignalSurvivesAConformingCancel(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	code, stdout, _ := executeCheck(t, []string{"--fail-on", "pending", "-"}, cancelCaptureLog(t, false))
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: a cancelled call is settled, not hung\n%s", code, stdout)
+	}
+
+	hung := encodeCheckLog(t, checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hang"}}`))
+	code, stdout, _ = executeCheck(t, []string{"--fail-on", "pending", "-"}, hung)
+	if code != 1 || !strings.Contains(stdout, "check failed: pending") {
+		t.Fatalf("a real hang must still trip the signal, got exit %d\n%s", code, stdout)
+	}
+}
+
+// TestCheckLateSignalGatesOnlyTheLateResult. Opt-in, and only for the shape the
+// reporter asked to be able to catch: work that completed after the host had
+// already been told it timed out.
+func TestCheckLateSignalGatesOnlyTheLateResult(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	code, stdout, _ := executeCheck(t, []string{"--fail-on", "late", "-"}, cancelCaptureLog(t, true))
+	if code != 1 || !strings.Contains(stdout, "check failed: late") {
+		t.Fatalf("exit = %d, want 1 for a result that arrived after the cancel\n%s", code, stdout)
+	}
+
+	code, stdout, _ = executeCheck(t, []string{"--fail-on", "late", "-"}, cancelCaptureLog(t, false))
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: obeying the cancel is exactly what the spec asks for\n%s", code, stdout)
+	}
+
+	// And it reads properly in the JUnit report.
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	_, stdout, _ = executeCheck(t, []string{"--format", "junit", "--fail-on", "late", "-"}, cancelCaptureLog(t, true))
+	for _, want := range []string{`name="s1/late"`, `type="mcpsnoop.check.late"`, "1 result after a cancel"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("junit stdout missing %q\n%s", want, stdout)
+		}
+	}
+}
+
+// TestCheckMaxDurationIgnoresAnUnansweredCancel. Settling the call makes it
+// Done(), and its stored end is when the cancel landed, so without the skip a
+// capture that used to be exempt as pending would start failing the budget on a
+// number that is not a latency. A cancelled call that did get an answer is still
+// judged: that duration is a real server latency.
+func TestCheckMaxDurationIgnoresAnUnansweredCancel(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	code, stdout, _ := executeCheck(t, []string{"--max-duration", "100ms", "-"}, cancelCaptureLog(t, false))
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: a cancel timestamp is not a latency\n%s", code, stdout)
+	}
+
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	code, stdout, _ = executeCheck(t, []string{"--max-duration", "100ms", "-"}, cancelCaptureLog(t, true))
+	if code != 1 || !strings.Contains(stdout, "assertion failed:") {
+		t.Fatalf("exit = %d, want the real 610ms round trip still judged\n%s", code, stdout)
 	}
 }
 

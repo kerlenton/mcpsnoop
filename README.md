@@ -360,13 +360,14 @@ leave the capture incomplete, tool-definition drift, or use of deprecated
 protocol features.
 
 ```bash
-mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,drift,deprecated,incomplete] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,late,drift,deprecated,incomplete] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
 to gate on calls that never got a response, `mismatch` to gate specifically on a
-routing header (Mcp-Method or Mcp-Name) disagreeing with the body, `drift` to gate
-on tool definitions changing after approval, `deprecated` to gate on features
+routing header (Mcp-Method or Mcp-Name) disagreeing with the body, `late` to gate
+on a result that arrived after the host had already cancelled the call, `drift` to
+gate on tool definitions changing after approval, `deprecated` to gate on features
 the spec has deprecated, or `incomplete` to gate on captures with dropped frames.
 Pass a comma-separated subset to select only the
 conditions relevant to a job. Omit the session to check the newest capture, or use
@@ -391,6 +392,19 @@ numeric-equivalent safe integers are handled without string-comparison false
 positives. Unknown parameter headers and sessions without a matching tool
 definition remain observational only. Existing key- and value-based redaction
 also applies to captured parameter-header values before they reach a sink.
+
+A `notifications/cancelled` naming an open request settles that call: it stops
+counting toward `pending` (so a conforming cancellation no longer looks like a
+hang), it is counted as `cancelled` on the summary line, and it carries the
+host's `reason` into the export and the TUI. That is an observation, not a
+failure — the specification's Timing Considerations bless the race — so the
+default run stays green whether the server obeyed the cancel or answered anyway.
+The export gives the two shapes their own statuses, `cancelled_request` for a
+call nobody ever answered and `cancelled_late_result` for one the server answered
+after the host had stopped listening, and the response frame carries a
+`late_result` note with the gap. `--fail-on late` is the opt-in gate for that
+second shape, for anyone who wants CI to catch work that completed into a void.
+
 Use `--format junit` to write one JUnit `<testcase>` per signal and session;
 failures follow the same `--fail-on` selection as the text output.
 

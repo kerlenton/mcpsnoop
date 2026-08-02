@@ -37,6 +37,16 @@ const (
 	// Streaming means a long-lived stream request (subscriptions/listen) whose
 	// response arrives only when the stream ends. It is open but not pending.
 	Streaming
+	// Cancelled means the peer that issued the request sent notifications/cancelled
+	// for it, so it is settled and no longer pending: nobody is waiting for an
+	// answer any more. It is deliberately not Failed, because a cancel is a
+	// decision rather than an error, and the answer may still arrive (the spec's
+	// Timing Considerations bless that race), in which case the response is kept
+	// as evidence that the work actually completed.
+	//
+	// Appended rather than slotted next to Superseded so the existing iota values
+	// keep their numbers.
+	Cancelled
 )
 
 func (s CallState) String() string {
@@ -49,6 +59,8 @@ func (s CallState) String() string {
 		return "superseded"
 	case Streaming:
 		return "streaming"
+	case Cancelled:
+		return "cancelled"
 	default:
 		return "pending"
 	}
@@ -167,6 +179,16 @@ type call struct {
 	// remembered so completion can close it and a later notification under the
 	// same token is read as reuse rather than a violation.
 	progressToken string
+	// cancelledAt is when the notifications/cancelled frame was observed at
+	// mcpsnoop's own vantage point, which is the only ordering it can testify to.
+	cancelledAt time.Time
+	// cancelReason is the host's own words for why it gave up. The spec asks both
+	// parties to log cancellation reasons, and it is usually the sentence the user
+	// was shown ("Request timed out").
+	cancelReason string
+	// lateResult records that a response landed after the cancel: the work
+	// completed and the peer that asked for it was no longer listening.
+	lateResult bool
 }
 
 // event is the mutable internal timeline entry.
@@ -193,9 +215,15 @@ type event struct {
 	deprecated         string // a deprecated MCP feature was used (structured, not a protocol warning)
 	cacheHint          CacheHint
 	cacheStaleRefetch  string // client re-fetched inside a declared ttlMs window (structured, not a protocol warning)
-	call               *call  // set for request/response events
-	taskCall           *call  // originating call for a task lifecycle frame
-	taskID             string
+	// lateResult says a response arrived for a call that was already cancelled,
+	// with the ordering and the gap mcpsnoop observed. It rides its own field
+	// rather than warning because the spec's Timing Considerations bless the race,
+	// so a default check run must stay green on it (same discipline as truncated,
+	// deprecated and cacheStaleRefetch).
+	lateResult string
+	call       *call // set for request/response events
+	taskCall   *call // originating call for a task lifecycle frame
+	taskID     string
 	// mrtrRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised. Empty on an ordinary request.
 	mrtrRoot string
@@ -407,6 +435,9 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		if c != nil && c.state != Pending && c.state != Streaming {
 			sess.closeProgressToken(c.progressToken)
 		}
+		if matched && c != nil && c.state == Cancelled {
+			ev.lateResult = lateResultNote(c.cancelledAt, e.TS)
+		}
 		if state, ok := parseInputRequired(msg.Result); ok {
 			for _, note := range inputRequiredWarnings(state, c) {
 				ev.warning = appendWarning(ev.warning, note)
@@ -563,7 +594,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 				}]); note != "" {
 					ev.warning = appendWarning(ev.warning, note)
 				}
-				sess.closeStreamingCall(id, e.ConnID, e.TS)
+				// A stream teardown is its own shape (the call completes), so the
+				// ordinary settle runs only when that did not claim the id.
+				if !sess.closeStreamingCall(id, e.ConnID, e.TS) {
+					sess.cancelCall(e.Direction, id, e.ConnID, e.TS, cancelReason(msg.Params))
+				}
 			}
 		}
 		if msg.Method == "notifications/tasks" {
@@ -832,13 +867,22 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 	if c == nil {
 		return nil, false // unmatched response (request missed or before backfill)
 	}
-	if c.state != Pending && c.state != Streaming {
+	switch c.state {
+	case Pending, Streaming:
+	case Cancelled:
+		// The peer gave up, but the answer arrived anyway, which is the fact worth
+		// keeping: the work completed and nobody was listening. Record it once; a
+		// second response for the same id is a genuine duplicate again.
+		if c.lateResult {
+			return c, false
+		}
+	default:
 		return c, false // already answered, a duplicate or late response must not recount
 	}
 	if c.method == "tools/call" && c.taskID != "" {
 		return c, false // the task handle already continued this call
 	}
-	if state, ok := parseInputRequired(msg.Result); ok {
+	if state, ok := parseInputRequired(msg.Result); ok && c.state != Cancelled {
 		// The operation is not finished, it is waiting on the client. Keep it
 		// pending and open so its duration ends up spanning the whole exchange,
 		// including the time the user spends answering.
@@ -849,7 +893,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 		sess.park(c)
 		return c, true
 	}
-	if c.method == "tools/call" {
+	if c.method == "tools/call" && c.state != Cancelled {
 		if state, ok := parseTaskState(msg.Result); ok && state.ResultType == "task" {
 			c.result = msg.Result
 			c.taskID = state.TaskID
@@ -862,18 +906,27 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 	c.result = msg.Result
 	c.err = msg.Error
 	wasPending := c.state == Pending
+	next := Completed
 	switch {
 	case msg.Error != nil:
-		c.state = Failed // JSON-RPC / protocol error
+		next = Failed // JSON-RPC / protocol error
 		c.errored = true
 	case isToolError(msg.Result):
-		c.state = Failed // tool-level error, a 200-OK response with result.isError=true
+		next = Failed // tool-level error, a 200-OK response with result.isError=true
 		c.toolErr = true
 		c.errored = true
-	default:
-		c.state = Completed
+	}
+	if c.state == Cancelled {
+		// A cancelled call stays cancelled: that is what the reader needs to know
+		// about it. The result, error and end above are still recorded, because the
+		// bytes are the evidence that the work finished.
+		c.lateResult = true
+	} else {
+		c.state = next
 	}
 	if wasPending {
+		// The slot was already released at cancel time, so wasPending is false there
+		// and the counter is not double-decremented.
 		sess.pending--
 	}
 	switch c.method {
@@ -1451,16 +1504,76 @@ func cancelledRequestID(params json.RawMessage) string {
 	return string(bytes.TrimSpace(p.RequestID))
 }
 
-func (sess *session) closeStreamingCall(id, conn string, ts time.Time) {
+// cancelReason is the host's own words for why it cancelled. Unlike the id this
+// is prose rather than a call key, so it is decoded into a Go string. Empty when
+// the notification carried none or the params do not parse.
+func cancelReason(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var p struct {
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return ""
+	}
+	return p.Reason
+}
+
+// closeStreamingCall ends a subscriptions/listen stream the notification tore
+// down. The bool reports whether it actually claimed a Streaming call, so the
+// caller can settle an ordinary request only when this did not.
+func (sess *session) closeStreamingCall(id, conn string, ts time.Time) bool {
 	for _, dir := range []proxy.Direction{proxy.ClientToServer, proxy.ServerToClient} {
 		key := callKey{dir: dir, id: id, conn: conn}
 		c := sess.calls[key]
 		if c != nil && c.state == Streaming {
 			c.end = ts
 			c.state = Completed
-			return
+			return true
 		}
 	}
+	return false
+}
+
+// cancelCall settles the request a notifications/cancelled names. Caller holds
+// the lock.
+//
+// It looks only in the direction the notification travelled, because the spec
+// scopes the notification to a request "previously issued in the same
+// direction". JSON-RPC scopes id uniqueness per sender, so scanning the opposite
+// direction too would let a client's cancel of id 1 settle an unrelated
+// server-initiated request that also happens to be id 1.
+//
+// Only a Pending call is settled: the spec likewise limits the notification to
+// requests "believed to still be in progress". An id mcpsnoop never observed, an
+// already-answered call, a superseded one, and a stream are therefore all
+// no-ops, which is the same discipline serverCancelWarning is written to.
+func (sess *session) cancelCall(dir proxy.Direction, id, conn string, ts time.Time, reason string) {
+	c := sess.calls[callKey{dir: dir, id: id, conn: conn}]
+	if c == nil || c.state != Pending {
+		return
+	}
+	c.state = Cancelled
+	// end is set so Done() is true and the TUI stops running a live spinner on a
+	// call nobody is waiting for. The exporter still omits the duration, because
+	// this timestamp is a cancel rather than a latency.
+	c.end = ts
+	c.cancelledAt = ts
+	c.cancelReason = reason
+	sess.pending--
+	sess.unpark(c) // a parked multi round-trip operation is settled too
+}
+
+// lateResultNote describes a response that landed after its call was cancelled.
+// The ordering and the gap at mcpsnoop's vantage point are all it claims: it
+// says nothing about which peer cancelled, and nothing about whether the server
+// was at fault, because the spec blesses the race and mcpsnoop cannot see inside
+// the server. max clamps a non-monotonic capture rather than printing "-2ms".
+func lateResultNote(cancelledAt, ts time.Time) string {
+	gap := max(ts.Sub(cancelledAt), 0).Round(time.Millisecond)
+	return "result arrived " + gap.String() +
+		" after the call was cancelled, and 2026-07-28 says the client should ignore it"
 }
 
 func operationName(msg proxy.RPCMessage) string {

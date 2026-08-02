@@ -130,9 +130,14 @@ type CallExport struct {
 	StartedAt  time.Time       `json:"started_at"`
 	EndedAt    *time.Time      `json:"ended_at,omitempty"`
 	DurationMS *float64        `json:"duration_ms,omitempty"`
-	Params     json.RawMessage `json:"params,omitempty"`
-	Result     json.RawMessage `json:"result,omitempty"`
-	Error      *proxy.RPCError `json:"error,omitempty"`
+	// CancelledAt is when a notifications/cancelled naming this call was observed,
+	// and CancelReason the host's own words for why. Present only on a cancelled
+	// call, so a reader can see the host had already walked away.
+	CancelledAt  *time.Time      `json:"cancelled_at,omitempty"`
+	CancelReason string          `json:"cancel_reason,omitempty"`
+	Params       json.RawMessage `json:"params,omitempty"`
+	Result       json.RawMessage `json:"result,omitempty"`
+	Error        *proxy.RPCError `json:"error,omitempty"`
 	// ErrorName is the specification's name for Error.Code, absent when the code
 	// is one the spec leaves to implementations. A sibling rather than a field
 	// inside Error, so the error object stays the wire shape.
@@ -159,6 +164,7 @@ type EventExport struct {
 	CacheTTLMs        *int            `json:"cache_ttl_ms,omitempty"`
 	CacheScope        string          `json:"cache_scope,omitempty"`
 	CacheStaleRefetch string          `json:"cache_stale_refetch,omitempty"`
+	LateResult        string          `json:"late_result,omitempty"`
 	CallIndex         *int            `json:"call_index,omitempty"`
 	Raw               json.RawMessage `json:"raw,omitempty"`
 	Text              string          `json:"text,omitempty"`
@@ -519,8 +525,10 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 			attrs = append(attrs, otlpDouble("mcpsnoop.call.duration_ms", *call.DurationMS))
 		}
 		status := "STATUS_CODE_OK"
-		if call.State == "pending" || call.State == "superseded" {
-			status = "STATUS_CODE_UNSET" // no definitive outcome, never answered
+		if call.State == "pending" || call.State == "superseded" || call.Status == "cancelled_request" {
+			// No definitive outcome, never answered. A cancelled call that did get a
+			// late result is left OK: it was answered, just too late to be wanted.
+			status = "STATUS_CODE_UNSET"
 		}
 		if call.IsError {
 			status = "STATUS_CODE_ERROR"
@@ -758,6 +766,12 @@ func exportCall(index int, c store.CallView) CallExport {
 		status = "streaming"
 	case c.State == store.Superseded:
 		status = "superseded"
+	case c.State == store.Cancelled:
+		// Ahead of the task branch below and deliberately not sharing its label. The
+		// Tasks feature already owns the bare "cancelled" status for a task that ended
+		// cancelled; a wire cancel of a request id is a different fact, and collapsing
+		// the two would make the export unable to say which one happened.
+		status = c.CancelStatus()
 	case c.TaskStatus == "cancelled":
 		// Terminal and without a result, so not ok, but the user stopped the work on
 		// purpose rather than hitting an error. Its own status ahead of Failed(),
@@ -786,12 +800,20 @@ func exportCall(index int, c store.CallView) CallExport {
 		ErrorName:  errorName(c.Err),
 	}
 	// A superseded call was never answered; its stored end is the moment the id was
-	// reused, not a latency, so omit the duration the way a pending call does.
-	if c.Done() && c.State != store.Superseded {
+	// reused, not a latency, so omit the duration the way a pending call does. A
+	// cancel with no answer is the same shape: its end is when the cancel landed.
+	// A cancelled call that did get a late answer keeps its duration, which is a
+	// real server latency and the whole point of reporting it.
+	if c.Done() && c.State != store.Superseded && !(c.State == store.Cancelled && !c.LateResult) {
 		end := c.End
 		dur := float64(c.End.Sub(c.Start)) / float64(time.Millisecond)
 		out.EndedAt = &end
 		out.DurationMS = &dur
+	}
+	if !c.CancelledAt.IsZero() {
+		cancelledAt := c.CancelledAt
+		out.CancelledAt = &cancelledAt
+		out.CancelReason = c.CancelReason
 	}
 	return out
 }
@@ -813,6 +835,7 @@ func exportEvent(ev store.EventView, callIndex map[string]int) EventExport {
 		CacheTTLMs:        cacheTTLExport(ev.CacheHint),
 		CacheScope:        ev.CacheHint.Scope,
 		CacheStaleRefetch: ev.CacheStaleRefetch,
+		LateResult:        ev.LateResult,
 		Raw:               ev.Raw,
 		Text:              ev.Text,
 	}
@@ -853,6 +876,11 @@ func writeText(w io.Writer, data SessionExport) error {
 		}
 		if ev.CacheStaleRefetch != "" {
 			title += " cache_stale_refetch"
+		}
+		// Spelled out rather than reduced to a marker word, because the note carries
+		// the ordering and the gap, which is the whole of what it reports.
+		if ev.LateResult != "" {
+			title += " late_result=" + ev.LateResult
 		}
 		if ev.CacheTTLMs != nil || ev.CacheScope != "" {
 			title += " cache"

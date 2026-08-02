@@ -1204,7 +1204,10 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 		return e.Call.Errored
 	case "cancelled", "canceled":
 		// The row already labels a cancelled task "cancelled"; find it the same way.
-		return e.Call.TaskStatus == "cancelled"
+		// A cancelled request id keeps its own row and export labels, because they
+		// are different facts, but a search is not a label: one obvious query should
+		// find both rather than making the reader know which kind of cancel it was.
+		return e.Call.TaskStatus == "cancelled" || e.Call.State == store.Cancelled
 	case "pending", "pend", "inflight":
 		return e.Call.State == store.Pending
 	case "ok", "success":

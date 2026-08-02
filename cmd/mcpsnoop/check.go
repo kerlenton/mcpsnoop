@@ -15,17 +15,21 @@ import (
 type checkSignal string
 
 const (
-	checkError      checkSignal = "error"
-	checkInvalid    checkSignal = "invalid"
-	checkWarn       checkSignal = "warn"
-	checkMismatch   checkSignal = "mismatch"
-	checkPending    checkSignal = "pending"
+	checkError    checkSignal = "error"
+	checkInvalid  checkSignal = "invalid"
+	checkWarn     checkSignal = "warn"
+	checkMismatch checkSignal = "mismatch"
+	checkPending  checkSignal = "pending"
+	// checkLate is a result that arrived after its call had already been
+	// cancelled. Opt-in only: the spec's Timing Considerations bless the race, so
+	// a default run reports the cancel and stays green.
+	checkLate       checkSignal = "late"
 	checkDrift      checkSignal = "drift"
 	checkDeprecated checkSignal = "deprecated"
 	checkIncomplete checkSignal = "incomplete"
 )
 
-var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated, checkIncomplete}
+var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLate, checkDrift, checkDeprecated, checkIncomplete}
 
 type checkOutputFormat string
 
@@ -41,6 +45,8 @@ type checkSummary struct {
 	warnings        int
 	mismatches      int
 	pending         int
+	cancelled       int
+	lateResults     int
 	deprecated      int
 	missingFrames   uint64
 	drift           store.ToolDrift
@@ -54,7 +60,7 @@ func newCheckCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "check [session-id|log.jsonl|-]",
 		Short: "Fail when a captured session violates a signal or an assertion",
-		Long:  "Check a captured session against signals (errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, dropped frames that leave the capture incomplete, tool-definition drift) and assertions (a tool-call latency budget, and tools that must or must not have been called). With no session, the newest session log is checked. Use - to read from stdin.",
+		Long:  "Check a captured session against signals (errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, results that arrived after their call was cancelled, dropped frames that leave the capture incomplete, tool-definition drift) and assertions (a tool-call latency budget, and tools that must or must not have been called). With no session, the newest session log is checked. Use - to read from stdin.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			signals, err := parseCheckSignals(failOn)
@@ -102,8 +108,8 @@ func newCheckCmd() *cobra.Command {
 				}
 			} else {
 				for i, summary := range summaries {
-					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d deprecated=%d missing_frames=%d\n",
-						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.deprecated, summary.missingFrames)
+					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d cancelled=%d deprecated=%d missing_frames=%d\n",
+						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.cancelled, summary.deprecated, summary.missingFrames)
 					if summary.baselineCreated {
 						// No baseline existed, so this run trusted the current definitions
 						// rather than verifying them. Say so, or an ephemeral CI reads green
@@ -138,7 +144,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().SortFlags = false
-	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, drift, deprecated, incomplete")
+	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, late, drift, deprecated, incomplete")
 	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text or junit")
 	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
 	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this duration (e.g. 500ms), disabled when zero")
@@ -177,9 +183,16 @@ func (a checkAssertions) eval(st *store.Store, sessionID string) []string {
 		var worstDuration time.Duration
 		var worstTool string
 		for _, c := range calls {
-			// Only a call that actually got a response has a real latency. Pending and
-			// superseded calls never did, so they are not judged here.
-			if !c.IsTool || !c.Done() || c.State == store.Superseded {
+			// Only a call that actually got a response has a real latency. Pending,
+			// superseded and never-answered cancelled calls did not, so they are not
+			// judged here. The last clause preserves the budget rather than changing
+			// it: settling a cancel makes the call Done(), and its stored end is when
+			// the cancel landed, so without the skip a capture that used to be exempt
+			// as pending would start failing on a number that is not a latency. A
+			// cancelled call that did get a late answer is still judged; that duration
+			// is real.
+			if !c.IsTool || !c.Done() || c.State == store.Superseded ||
+				(c.State == store.Cancelled && !c.LateResult) {
 				continue
 			}
 			duration := c.Duration()
@@ -219,10 +232,10 @@ func parseCheckSignals(value string) (map[checkSignal]bool, error) {
 	for _, part := range strings.Split(value, ",") {
 		signal := checkSignal(strings.TrimSpace(part))
 		switch signal {
-		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated, checkIncomplete:
+		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLate, checkDrift, checkDeprecated, checkIncomplete:
 			signals[signal] = true
 		default:
-			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, drift, deprecated, or incomplete, got %q", part)
+			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, late, drift, deprecated, or incomplete, got %q", part)
 		}
 	}
 	return signals, nil
@@ -269,6 +282,17 @@ func summarizeCheck(st *store.Store, baselines *toolbaseline.Manager) []checkSum
 				summary.baselineCreated = created
 			}
 		}
+		// Counted from the calls rather than from a new session counter, so there is
+		// one place that decides what a cancelled call is.
+		for _, c := range st.Calls(header.ID) {
+			if c.State != store.Cancelled {
+				continue
+			}
+			summary.cancelled++
+			if c.LateResult {
+				summary.lateResults++
+			}
+		}
 		for _, event := range st.Timeline(header.ID) {
 			if event.Kind == store.EventInvalid {
 				summary.invalid++
@@ -309,6 +333,10 @@ func (s checkSummary) count(signal checkSignal) int {
 		return s.mismatches
 	case checkPending:
 		return s.pending
+	case checkLate:
+		// Only the late-result shape gates. A cancel with no answer is exactly what
+		// the spec asks a server to do, so it is reported and never failed on.
+		return s.lateResults
 	case checkDrift:
 		// A baseline error is not drift, but it means drift could not be verified,
 		// so count it as a drift failure for a run that selected the drift signal.

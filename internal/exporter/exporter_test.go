@@ -163,6 +163,137 @@ func TestBuildExportsSupersededCallNotAsOk(t *testing.T) {
 	}
 }
 
+// TestBuildExportsAWireCancelUnderItsOwnStatus covers both shapes a
+// notifications/cancelled leaves behind, and guards the naming trap: the Tasks
+// feature already owns the bare "cancelled" status, so a cancelled request id
+// must not answer to the same label (see the sibling test below).
+func TestBuildExportsAWireCancelUnderItsOwnStatus(t *testing.T) {
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		late       bool
+		wantStatus string
+	}{
+		{"never answered", false, "cancelled_request"},
+		{"answered too late", true, "cancelled_late_result"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "cancel.jsonl")
+			writeEnv(t, path, proxy.Envelope{
+				SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: t0,
+				Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slow_job"}}`),
+			})
+			writeEnv(t, path, proxy.Envelope{
+				SessionID: "s1", ServerLabel: "demo", Seq: 2, TS: t0.Add(160 * time.Millisecond),
+				Direction: proxy.ClientToServer,
+				Raw:       json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":3,"reason":"Request timed out"}}`),
+			})
+			if tc.late {
+				writeEnv(t, path, proxy.Envelope{
+					SessionID: "s1", ServerLabel: "demo", Seq: 3, TS: t0.Add(610 * time.Millisecond),
+					Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`),
+				})
+			}
+
+			st, id, err := LoadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := Build(st, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(out.Calls) != 1 {
+				t.Fatalf("want 1 call, got %d", len(out.Calls))
+			}
+			c := out.Calls[0]
+			if c.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", c.Status, tc.wantStatus)
+			}
+			if c.State != "cancelled" {
+				t.Fatalf("state = %q, want cancelled", c.State)
+			}
+			if c.IsError {
+				t.Fatal("a cancel is a decision, not an error, so is_error must stay false")
+			}
+			// The host's own words about what went wrong, which the spec asks both
+			// parties to log, plus when mcpsnoop saw the cancel.
+			if c.CancelReason != "Request timed out" {
+				t.Fatalf("cancel_reason = %q, want the host's reason", c.CancelReason)
+			}
+			if c.CancelledAt == nil || !c.CancelledAt.Equal(t0.Add(160*time.Millisecond)) {
+				t.Fatalf("cancelled_at = %v, want the cancel timestamp", c.CancelledAt)
+			}
+			if tc.late {
+				// A real round trip: the work finished, nobody was listening.
+				if c.DurationMS == nil || *c.DurationMS != 610 {
+					t.Fatalf("duration_ms = %v, want the real 610ms round trip", c.DurationMS)
+				}
+				if len(c.Result) == 0 {
+					t.Fatal("the late result bytes are the evidence and must be exported")
+				}
+			} else {
+				// The stored end is when the cancel landed, not a latency, so it is
+				// omitted the way a superseded call's is.
+				if c.DurationMS != nil || c.EndedAt != nil {
+					t.Fatalf("a cancel with no answer must omit the duration, got %v / %v", c.DurationMS, c.EndedAt)
+				}
+			}
+
+			// The response event carries the ordering and the gap, and does so
+			// structurally rather than as a warning: the spec's Timing Considerations
+			// bless the race, so a default check run must stay green.
+			var note, warning string
+			for _, ev := range out.Events {
+				if ev.LateResult != "" {
+					note = ev.LateResult
+				}
+				warning += ev.Warning
+			}
+			if tc.late && !strings.Contains(note, "450ms") {
+				t.Fatalf("late_result note = %q, want the observed gap", note)
+			}
+			if !tc.late && note != "" {
+				t.Fatalf("no response arrived, so there is no late_result note, got %q", note)
+			}
+			if warning != "" {
+				t.Fatalf("a cancel must raise no warning, got %q", warning)
+			}
+		})
+	}
+}
+
+// TestWireCancelDoesNotCollideWithTheTaskCancelledStatus. Two different facts,
+// two labels: this is the trap the issue calls out by name.
+func TestWireCancelDoesNotCollideWithTheTaskCancelledStatus(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "task.jsonl")
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow"}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 2, TS: t0.Add(time.Millisecond),
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"resultType":"task","taskId":"t-1","status":"working"}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 3, TS: t0.Add(time.Second),
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/tasks","params":{"taskId":"t-1","status":"cancelled"}}`),
+	})
+
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.Calls[0].Status; got != "cancelled" {
+		t.Fatalf("cancelled task status = %q, want the unchanged cancelled label", got)
+	}
+}
+
 func TestBuildExportsCancelledTaskWithoutFlaggingAnError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cancel.jsonl")
 	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)

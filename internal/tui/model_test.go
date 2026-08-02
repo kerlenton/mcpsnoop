@@ -201,6 +201,75 @@ func TestStreamRowShowsSupersededStatusInWarnStyle(t *testing.T) {
 	}
 }
 
+// TestStreamRowShowsCancelledCallWithoutASpinner. A cancelled call is settled,
+// so the row must stop offering the "possibly hung" affordance (spinner plus a
+// live clock) on a call nobody is waiting for, and must not read "ok" when the
+// answer arrives after the host has already walked away.
+func TestStreamRowShowsCancelledCallWithoutASpinner(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		late       bool
+		wantStatus string
+	}{
+		{"never answered", false, "cancelled_request"},
+		{"answered too late", true, "cancelled_late_result"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t0 := time.Now().Add(-time.Second)
+			st := store.New()
+			st.Ingest(envAt(1, proxy.ClientToServer, t0, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slow_job"}}`))
+			st.Ingest(envAt(2, proxy.ClientToServer, t0.Add(160*time.Millisecond),
+				`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":3,"reason":"Request timed out"}}`))
+			if tc.late {
+				st.Ingest(envAt(3, proxy.ServerToClient, t0.Add(610*time.Millisecond),
+					`{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`))
+			}
+
+			m := ready(t, st)
+			m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+
+			request := m.full[0]
+			if request.Call == nil || request.Call.State != store.Cancelled {
+				t.Fatalf("first frame should be a cancelled call, got %+v", request.Call)
+			}
+			cells := m.streamCells(request)
+			if cells.status != tc.wantStatus {
+				t.Fatalf("request row status = %q, want %q", cells.status, tc.wantStatus)
+			}
+			if cells.dur != "" {
+				t.Fatalf("a settled call must not run a live timer, got dur %q", cells.dur)
+			}
+			if !strings.Contains(cells.detail, `cancelled: "Request timed out"`) {
+				t.Fatalf("the row should carry the host's reason, got %q", cells.detail)
+			}
+			// Warn, not the success green: never answered, or answered too late.
+			fg := m.statusStyle(request).GetForeground()
+			if fg != m.styles.warn.GetForeground() {
+				t.Fatal("a cancelled call should use the warn style")
+			}
+			if fg == m.styles.resp.GetForeground() {
+				t.Fatal("a cancelled call must not use the success style")
+			}
+
+			if !tc.late {
+				return
+			}
+			response := m.full[len(m.full)-1]
+			respCells := m.streamCells(response)
+			if respCells.status != "cancelled_late_result" {
+				t.Fatalf("response row status = %q, want cancelled_late_result", respCells.status)
+			}
+			if !strings.Contains(respCells.detail, "450ms") {
+				t.Fatalf("the response row should say how late the result was, got %q", respCells.detail)
+			}
+			// status:cancelled is one obvious query, and it finds a wire cancel too.
+			if !m.matchStatus(response, "cancelled") {
+				t.Fatal("status:cancelled should find a cancelled request id")
+			}
+		})
+	}
+}
+
 func TestRefreshClampsInspectWhenTimelineShrinks(t *testing.T) {
 	st := store.New()
 	seed(st)

@@ -204,10 +204,15 @@ func harStatus(status string) (int, string) {
 		return 200, "OK"
 	case "error":
 		return 500, "Error"
+	case "cancelled_late_result":
+		// The entry carries a body and a real round trip, so reporting it as "no
+		// response" would contradict the payload sitting right next to it. The text
+		// still says the call had been cancelled by the time it arrived.
+		return 200, "OK (cancelled)"
 	case "":
 		return 0, "No Response"
 	default:
-		return 0, status // pending or superseded, never answered
+		return 0, status // pending, superseded or cancelled_request, never answered
 	}
 }
 

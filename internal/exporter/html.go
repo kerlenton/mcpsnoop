@@ -37,6 +37,8 @@ main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
 .status.error { color:var(--err); }
 .status.warn { color:var(--warn); }
 .status.superseded { color:var(--warn); }
+.status.cancelled_request { color:var(--warn); }
+.status.cancelled_late_result { color:var(--warn); }
 .status.pending { color:var(--pending); }
 .status.bad { color:var(--invalid); }
 /* Per-event tone by kind/status, matching the TUI stream colors. */
@@ -160,7 +162,10 @@ const toneOf = (ev, call) => {
     if (call && call.status === "error") return "error";
     // A cancelled task delivered no result but is not an error, so it reads as a
     // caution like the TUI row, reusing the warn tone rather than success green.
-    if (call && call.status === "cancelled") return "warn";
+    // A wire cancel of the request id is a separate fact with its own statuses,
+    // and reads the same way: answered too late, or never answered at all.
+    if (call && (call.status === "cancelled" || call.status === "cancelled_request" ||
+      call.status === "cancelled_late_result")) return "warn";
     return "resp";
   }
   return "resp";
@@ -175,6 +180,9 @@ const statusOf = (ev, call) => {
     if (call.status === "error") return "error";
     return call.status;
   }
+  // A wire cancel reads on the request row too: the call is settled, so an empty
+  // cell would leave it looking like an ordinary answered request.
+  if (call.status === "cancelled_request" || call.status === "cancelled_late_result") return call.status;
   return call.status === "pending" || call.status === "superseded" ? call.status : "";
 };
 const renderEvent = (ev) => {
