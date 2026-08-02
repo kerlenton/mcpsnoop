@@ -164,6 +164,76 @@ func resp(seq uint64, ts time.Time, dir proxy.Direction, id, body string) proxy.
 	return proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: ts, Direction: dir, Raw: json.RawMessage(raw)}
 }
 
+func TestCancellationSettlesPendingCall(t *testing.T) {
+	s := New()
+	t0 := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	s.Ingest(req(1, t0, proxy.ClientToServer, `"job-1"`, "tools/call", `{"name":"slow"}`))
+	cancelledAt := t0.Add(250 * time.Millisecond)
+	cancel := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: cancelledAt,
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"job-1","reason":"no longer needed"}}`),
+	})
+
+	if cancel.Call == nil || cancel.Call.State != Cancelled {
+		t.Fatalf("cancelled call = %+v", cancel.Call)
+	}
+	if cancel.Call.CancelledAt != cancelledAt || cancel.Call.CancelReason != "no longer needed" {
+		t.Fatalf("cancellation metadata = %s %q", cancel.Call.CancelledAt, cancel.Call.CancelReason)
+	}
+	if cancel.Call.LateResult || cancel.Call.Duration() != 0 {
+		t.Fatalf("unanswered cancellation has late=%v duration=%s", cancel.Call.LateResult, cancel.Call.Duration())
+	}
+	if cancel.Warning != "" {
+		t.Fatalf("cancellation warning = %q, want none", cancel.Warning)
+	}
+	header := s.Sessions()[0]
+	if header.Pending != 0 || header.Errors != 0 || header.LateResults != 0 {
+		t.Fatalf("session counts = pending %d errors %d late %d", header.Pending, header.Errors, header.LateResults)
+	}
+	if got := s.Timeline("s1")[0].Call.State; got != Cancelled {
+		t.Fatalf("request state = %s, want cancelled", got)
+	}
+}
+
+func TestLateResponseAfterCancellationRemainsAnObservation(t *testing.T) {
+	s := New()
+	t0 := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	s.Ingest(req(1, t0, proxy.ClientToServer, "7", "tools/call", `{"name":"slow"}`))
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0.Add(250 * time.Millisecond),
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}`),
+	})
+	late := s.Ingest(resp(3, t0.Add(time.Second), proxy.ServerToClient, "7", `"result":{"content":[]}`))
+
+	if late.Call == nil || late.Call.State != Cancelled || !late.Call.LateResult {
+		t.Fatalf("late response call = %+v", late.Call)
+	}
+	if late.Observation != "result arrived 750ms after cancellation" || late.Warning != "" {
+		t.Fatalf("late response observation=%q warning=%q", late.Observation, late.Warning)
+	}
+	if string(late.Call.Result) != `{"content":[]}` || late.Call.Duration() != time.Second {
+		t.Fatalf("late result=%s duration=%s", late.Call.Result, late.Call.Duration())
+	}
+	header := s.Sessions()[0]
+	if header.Pending != 0 || header.Errors != 0 || header.LateResults != 1 {
+		t.Fatalf("session counts = pending %d errors %d late %d", header.Pending, header.Errors, header.LateResults)
+	}
+	summary, ok := s.ToolSummary("s1")
+	if !ok || len(summary.Tools) != 1 || summary.Tools[0].P50 != time.Second {
+		t.Fatalf("tool summary = %+v, ok=%v", summary, ok)
+	}
+
+	duplicate := s.Ingest(resp(4, t0.Add(2*time.Second), proxy.ServerToClient, "7", `"result":{"content":["again"]}`))
+	if !strings.Contains(duplicate.Warning, "duplicate response") {
+		t.Fatalf("duplicate warning = %q", duplicate.Warning)
+	}
+	if got := s.Sessions()[0].LateResults; got != 1 {
+		t.Fatalf("late results = %d, want 1", got)
+	}
+}
+
 func TestReusedRequestIdKeepsPendingCounterAndTimelineInSync(t *testing.T) {
 	s := New()
 	t0 := time.Now()

@@ -1040,6 +1040,9 @@ func statusRank(e store.EventView) int {
 	if e.Call != nil && e.Call.Failed() {
 		return 4
 	}
+	if e.Call != nil && e.Call.State == store.Cancelled {
+		return 3
+	}
 	if e.Warning != "" || e.Truncated || e.Deprecated != "" || e.CacheStaleRefetch != "" {
 		return 3
 	}
@@ -1124,6 +1127,7 @@ func eventSubstr(e store.EventView, q string) bool {
 		strings.Contains(strings.ToLower(e.ID), q) ||
 		strings.Contains(strings.ToLower(e.Text), q) ||
 		strings.Contains(strings.ToLower(e.Warning), q) ||
+		strings.Contains(strings.ToLower(e.Observation), q) ||
 		strings.Contains(strings.ToLower(string(e.Raw)), q) {
 		return true
 	}
@@ -1205,6 +1209,10 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 	case "cancelled", "canceled":
 		// The row already labels a cancelled task "cancelled"; find it the same way.
 		return e.Call.TaskStatus == "cancelled"
+	case "cancel", "call_cancelled", "call-cancelled":
+		return e.Call.State == store.Cancelled && !e.Call.LateResult
+	case "late", "late_result", "late-result":
+		return e.Call.State == store.Cancelled && e.Call.LateResult
 	case "pending", "pend", "inflight":
 		return e.Call.State == store.Pending
 	case "ok", "success":

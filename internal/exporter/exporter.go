@@ -100,6 +100,7 @@ type SessionSummary struct {
 	Notifications int       `json:"notifications"`
 	Errors        int       `json:"errors"`
 	Pending       int       `json:"pending"`
+	LateResults   int       `json:"late_results"`
 	// MissingFrames counts envelopes dropped upstream, inferred from Seq gaps.
 	// A non-zero value means the capture is incomplete.
 	MissingFrames uint64 `json:"missing_frames"`
@@ -115,24 +116,27 @@ type CapabilitiesExport struct {
 }
 
 type CallExport struct {
-	Index      int             `json:"index"`
-	ID         string          `json:"id"`
-	Method     string          `json:"method"`
-	Direction  proxy.Direction `json:"direction"`
-	State      string          `json:"state"`
-	Status     string          `json:"status"`
-	IsTool     bool            `json:"is_tool"`
-	ToolName   string          `json:"tool_name,omitempty"`
-	IsError    bool            `json:"is_error"`
-	ToolError  bool            `json:"tool_error"`
-	TaskID     string          `json:"task_id,omitempty"`
-	TaskStatus string          `json:"task_status,omitempty"`
-	StartedAt  time.Time       `json:"started_at"`
-	EndedAt    *time.Time      `json:"ended_at,omitempty"`
-	DurationMS *float64        `json:"duration_ms,omitempty"`
-	Params     json.RawMessage `json:"params,omitempty"`
-	Result     json.RawMessage `json:"result,omitempty"`
-	Error      *proxy.RPCError `json:"error,omitempty"`
+	Index        int             `json:"index"`
+	ID           string          `json:"id"`
+	Method       string          `json:"method"`
+	Direction    proxy.Direction `json:"direction"`
+	State        string          `json:"state"`
+	Status       string          `json:"status"`
+	IsTool       bool            `json:"is_tool"`
+	ToolName     string          `json:"tool_name,omitempty"`
+	IsError      bool            `json:"is_error"`
+	ToolError    bool            `json:"tool_error"`
+	TaskID       string          `json:"task_id,omitempty"`
+	TaskStatus   string          `json:"task_status,omitempty"`
+	StartedAt    time.Time       `json:"started_at"`
+	EndedAt      *time.Time      `json:"ended_at,omitempty"`
+	CancelledAt  *time.Time      `json:"cancelled_at,omitempty"`
+	CancelReason string          `json:"cancel_reason,omitempty"`
+	LateResult   bool            `json:"late_result,omitempty"`
+	DurationMS   *float64        `json:"duration_ms,omitempty"`
+	Params       json.RawMessage `json:"params,omitempty"`
+	Result       json.RawMessage `json:"result,omitempty"`
+	Error        *proxy.RPCError `json:"error,omitempty"`
 	// ErrorName is the specification's name for Error.Code, absent when the code
 	// is one the spec leaves to implementations. A sibling rather than a field
 	// inside Error, so the error object stays the wire shape.
@@ -140,14 +144,15 @@ type CallExport struct {
 }
 
 type EventExport struct {
-	Seq       uint64          `json:"seq"`
-	Timestamp time.Time       `json:"timestamp"`
-	Direction proxy.Direction `json:"direction"`
-	Kind      string          `json:"kind"`
-	Method    string          `json:"method,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Warning   string          `json:"warning,omitempty"`
-	Mismatch  bool            `json:"mismatch,omitempty"`
+	Seq         uint64          `json:"seq"`
+	Timestamp   time.Time       `json:"timestamp"`
+	Direction   proxy.Direction `json:"direction"`
+	Kind        string          `json:"kind"`
+	Method      string          `json:"method,omitempty"`
+	ID          string          `json:"id,omitempty"`
+	Warning     string          `json:"warning,omitempty"`
+	Observation string          `json:"observation,omitempty"`
+	Mismatch    bool            `json:"mismatch,omitempty"`
 	// Status is the HTTP status the frame arrived on and AuthChallenge that
 	// response's WWW-Authenticate header, both absent on stdio.
 	Status        int    `json:"http_status,omitempty"`
@@ -327,6 +332,7 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 			Notifications: header.Notifications,
 			Errors:        header.Errors,
 			Pending:       header.Pending,
+			LateResults:   header.LateResults,
 			MissingFrames: header.MissingFrames,
 		},
 		Calls:  outCalls,
@@ -518,9 +524,18 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 		if call.DurationMS != nil {
 			attrs = append(attrs, otlpDouble("mcpsnoop.call.duration_ms", *call.DurationMS))
 		}
+		if call.CancelledAt != nil {
+			attrs = append(attrs, otlpString("mcpsnoop.call.cancelled_at", call.CancelledAt.Format(time.RFC3339Nano)))
+		}
+		if call.CancelReason != "" {
+			attrs = append(attrs, otlpString("mcpsnoop.call.cancel_reason", call.CancelReason))
+		}
+		if call.LateResult {
+			attrs = append(attrs, otlpBool("mcpsnoop.call.late_result", true))
+		}
 		status := "STATUS_CODE_OK"
-		if call.State == "pending" || call.State == "superseded" {
-			status = "STATUS_CODE_UNSET" // no definitive outcome, never answered
+		if call.State == "pending" || call.State == "superseded" || call.Status == "call_cancelled" || call.Status == "late_result" {
+			status = "STATUS_CODE_UNSET"
 		}
 		if call.IsError {
 			status = "STATUS_CODE_ERROR"
@@ -547,6 +562,7 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 			otlpString("service.name", "mcpsnoop"),
 			otlpString("mcpsnoop.session.id", data.Session.ID),
 			otlpString("mcpsnoop.session.label", data.Session.Label),
+			otlpInt("mcpsnoop.session.late_results", int64(data.Session.LateResults)),
 			// Emitted even when zero. Absence would be ambiguous between a capture
 			// that dropped nothing and one exported before this attribute existed,
 			// and the whole point of the count is that the span total can be
@@ -758,6 +774,10 @@ func exportCall(index int, c store.CallView) CallExport {
 		status = "streaming"
 	case c.State == store.Superseded:
 		status = "superseded"
+	case c.State == store.Cancelled && c.LateResult:
+		status = "late_result"
+	case c.State == store.Cancelled:
+		status = "call_cancelled"
 	case c.TaskStatus == "cancelled":
 		// Terminal and without a result, so not ok, but the user stopped the work on
 		// purpose rather than hitting an error. Its own status ahead of Failed(),
@@ -767,27 +787,31 @@ func exportCall(index int, c store.CallView) CallExport {
 		status = "error"
 	}
 	out := CallExport{
-		Index:      index,
-		ID:         c.ID,
-		Method:     c.Method,
-		Direction:  c.ReqDir,
-		State:      c.State.String(),
-		Status:     status,
-		IsTool:     c.IsTool,
-		ToolName:   c.ToolName,
-		IsError:    c.Errored, // the "something went wrong" axis, so a cancel is not flagged
-		ToolError:  c.ToolErr,
-		TaskID:     c.TaskID,
-		TaskStatus: c.TaskStatus,
-		StartedAt:  c.Start,
-		Params:     c.Params,
-		Result:     c.Result,
-		Error:      c.Err,
-		ErrorName:  errorName(c.Err),
+		Index:        index,
+		ID:           c.ID,
+		Method:       c.Method,
+		Direction:    c.ReqDir,
+		State:        c.State.String(),
+		Status:       status,
+		IsTool:       c.IsTool,
+		ToolName:     c.ToolName,
+		IsError:      c.Errored,
+		ToolError:    c.ToolErr,
+		TaskID:       c.TaskID,
+		TaskStatus:   c.TaskStatus,
+		StartedAt:    c.Start,
+		CancelReason: c.CancelReason,
+		LateResult:   c.LateResult,
+		Params:       c.Params,
+		Result:       c.Result,
+		Error:        c.Err,
+		ErrorName:    errorName(c.Err),
 	}
-	// A superseded call was never answered; its stored end is the moment the id was
-	// reused, not a latency, so omit the duration the way a pending call does.
-	if c.Done() && c.State != store.Superseded {
+	if !c.CancelledAt.IsZero() {
+		cancelledAt := c.CancelledAt
+		out.CancelledAt = &cancelledAt
+	}
+	if c.Done() && c.State != store.Superseded && (c.State != store.Cancelled || c.LateResult) {
 		end := c.End
 		dur := float64(c.End.Sub(c.Start)) / float64(time.Millisecond)
 		out.EndedAt = &end
@@ -805,6 +829,7 @@ func exportEvent(ev store.EventView, callIndex map[string]int) EventExport {
 		Method:            ev.Method,
 		ID:                ev.ID,
 		Warning:           ev.Warning,
+		Observation:       ev.Observation,
 		Mismatch:          ev.RoutingMismatch,
 		Status:            ev.HTTPStatus,
 		AuthChallenge:     ev.AuthChallenge,
@@ -829,8 +854,8 @@ func writeText(w io.Writer, data SessionExport) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "frames: %d  calls: %d  requests: %d  responses: %d  errors: %d  pending: %d\n\n",
-		len(data.Events), len(data.Calls), data.Session.Requests, data.Session.Responses, data.Session.Errors, data.Session.Pending)
+	_, err = fmt.Fprintf(w, "frames: %d  calls: %d  requests: %d  responses: %d  errors: %d  pending: %d  late results: %d\n\n",
+		len(data.Events), len(data.Calls), data.Session.Requests, data.Session.Responses, data.Session.Errors, data.Session.Pending, data.Session.LateResults)
 	if err != nil {
 		return err
 	}
@@ -844,6 +869,9 @@ func writeText(w io.Writer, data SessionExport) error {
 		}
 		if ev.Warning != "" {
 			title += " warning=" + ev.Warning
+		}
+		if ev.Observation != "" {
+			title += " observation=" + ev.Observation
 		}
 		if ev.Truncated {
 			title += " truncated"

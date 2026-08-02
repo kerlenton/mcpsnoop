@@ -360,17 +360,19 @@ leave the capture incomplete, tool-definition drift, or use of deprecated
 protocol features.
 
 ```bash
-mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,drift,deprecated,incomplete] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,late-result,drift,deprecated,incomplete] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
-to gate on calls that never got a response, `mismatch` to gate specifically on a
+to gate on calls that never got a response, `late-result` to gate on responses
+that arrived after cancellation, `mismatch` to gate specifically on a
 routing header (Mcp-Method or Mcp-Name) disagreeing with the body, `drift` to gate
 on tool definitions changing after approval, `deprecated` to gate on features
 the spec has deprecated, or `incomplete` to gate on captures with dropped frames.
 Pass a comma-separated subset to select only the
 conditions relevant to a job. Omit the session to check the newest capture, or use
-`-` to read JSONL from stdin.
+`-` to read JSONL from stdin. Late results are reported as `late_results` without
+affecting the default error, invalid, or warning signals.
 The dropped-frame count travels with the artifacts too, so a capture that
 understates itself says so wherever it is opened: `missing_frames` in the JSON
 export, `log.comment` in HAR, and the `mcpsnoop.session.missing_frames` resource

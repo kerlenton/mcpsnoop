@@ -660,6 +660,12 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			} else if e.Call.State == store.Superseded {
 				// Its id was reused while in flight, so it will never be answered.
 				c.status = "superseded"
+			} else if e.Call.State == store.Cancelled {
+				c.status = "cancel"
+				if e.Call.LateResult {
+					c.status = "late"
+					c.dur = e.Call.Duration().Round(time.Millisecond).String()
+				}
 			}
 		}
 	case store.EventResponse:
@@ -668,6 +674,16 @@ func (m Model) streamCells(e store.EventView) streamCell {
 		if e.Call != nil {
 			c.dur = e.Call.Duration().Round(time.Millisecond).String()
 			switch {
+			case e.Call.State == store.Cancelled && e.Call.LateResult:
+				c.status = "late"
+				switch {
+				case e.Call.Err != nil:
+					c.detail = rpcErrorText(*e.Call.Err)
+				case e.Call.ToolErr:
+					c.detail = toolErrorText(e.Call.Result)
+				default:
+					c.detail = compactJSON(e.Call.Result)
+				}
 			case e.Call.TaskID != "" && e.Call.State == store.Pending:
 				c.status = e.Call.TaskStatus
 				c.detail = compactJSON(e.Call.Result)
@@ -689,6 +705,9 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			if p, ok := parseProgress(e.Raw); ok {
 				c.progress = &p
 			}
+		}
+		if e.Method == "notifications/cancelled" && e.Call != nil {
+			c.status = "cancel"
 		}
 	case store.EventInvalid:
 		c.dir, c.method, c.status = "!", "invalid rpc", "bad"
@@ -750,6 +769,13 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = e.CacheStaleRefetch
 		} else {
 			c.detail = e.CacheStaleRefetch + " · " + c.detail
+		}
+	}
+	if e.Observation != "" {
+		if c.detail == "" {
+			c.detail = e.Observation
+		} else {
+			c.detail = e.Observation + " · " + c.detail
 		}
 	}
 	if !e.CacheHint.Empty() {
@@ -910,6 +936,8 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 			return m.styles.follow
 		case e.Call.State == store.Superseded:
 			return m.styles.warn // never answered, not a success
+		case e.Call.State == store.Cancelled:
+			return m.styles.warn
 		case e.Call.Failed():
 			return m.styles.respErr
 		default:
@@ -1166,6 +1194,9 @@ func (m Model) pairWidget() string {
 		}
 		if e.Call.State == store.Streaming {
 			return cur + arrow + m.styles.follow.Render("streaming")
+		}
+		if e.Call.State == store.Cancelled && !e.Call.LateResult {
+			return cur + arrow + m.styles.warn.Render("cancel")
 		}
 		if pi, ok := m.pairIndex(m.inspect); ok {
 			return cur + arrow + m.styles.req.Render(fmt.Sprintf("resp %d", m.full[pi].Seq))
