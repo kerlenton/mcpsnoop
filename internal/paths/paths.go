@@ -113,6 +113,25 @@ func Base() string {
 	return base
 }
 
+// ClaudeDesktopConfig returns the well-known path to Claude Desktop's MCP
+// config file, the one `mcpsnoop wrap` edits.
+//
+// os.UserConfigDir already resolves to exactly the three directories Claude
+// Desktop keeps it in: $HOME/Library/Application Support on darwin, %AppData%
+// on windows, and $XDG_CONFIG_HOME or ~/.config on linux. So there is no
+// runtime.GOOS switch here, and therefore no per-OS branch to get wrong.
+//
+// Unlike Base this creates nothing, not even the parent directory. The path
+// belongs to another application, so mcpsnoop reads it and, when asked, writes
+// it back, but never brings it into existence.
+func ClaudeDesktopConfig() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve the user config directory (%w); pass --config with the path to claude_desktop_config.json", err)
+	}
+	return filepath.Join(dir, "Claude", "claude_desktop_config.json"), nil
+}
+
 // SocketPath is the unix socket the hub listens on and shims connect to.
 func SocketPath() string {
 	return filepath.Join(Base(), "hub.sock")

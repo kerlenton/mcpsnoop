@@ -1,7 +1,11 @@
 package paths
 
 import (
+	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -78,6 +82,61 @@ func TestCheckLabelKeepsADoubledDotContained(t *testing.T) {
 		if !strings.HasPrefix(filepath.Clean(got), filepath.Clean(SessionsDir())+string(filepath.Separator)) {
 			t.Fatalf("label %q escaped the sessions dir: %s", label, got)
 		}
+	}
+}
+
+// TestClaudeDesktopConfigTracksTheOSConfigDir keeps the one assumption the
+// helper rests on honest across every platform CI builds for: os.UserConfigDir
+// already resolves to the directory Claude Desktop keeps its config under, so
+// there is no per-OS branch here to drift.
+func TestClaudeDesktopConfigTracksTheOSConfigDir(t *testing.T) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		t.Skipf("no user config dir on this machine: %v", err)
+	}
+	got, err := ClaudeDesktopConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "Claude", "claude_desktop_config.json"); got != want {
+		t.Fatalf("ClaudeDesktopConfig() = %q, want %q", got, want)
+	}
+	// The path belongs to another application, so resolving it must not bring any
+	// part of it into existence the way Base and its callers deliberately do.
+	// Comparing existence either side of the call says so wherever the test runs,
+	// whether or not Claude Desktop is installed on the machine.
+	before := exists(filepath.Dir(got))
+	if _, err := ClaudeDesktopConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if exists(filepath.Dir(got)) != before {
+		t.Fatalf("ClaudeDesktopConfig changed whether %q exists", filepath.Dir(got))
+	}
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+// TestClaudeDesktopConfigFollowsXDGConfigHome is linux-only because that is the
+// only platform where os.UserConfigDir consults XDG.
+func TestClaudeDesktopConfigFollowsXDGConfigHome(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("XDG_CONFIG_HOME is only consulted on linux")
+	}
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+
+	got, err := ClaudeDesktopConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, "Claude", "claude_desktop_config.json"); got != want {
+		t.Fatalf("ClaudeDesktopConfig() = %q, want %q", got, want)
+	}
+	if exists(filepath.Dir(got)) {
+		t.Fatalf("ClaudeDesktopConfig created %q under a fresh config home", filepath.Dir(got))
 	}
 }
 
