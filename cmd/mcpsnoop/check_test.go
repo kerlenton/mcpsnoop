@@ -149,7 +149,7 @@ func TestCheckRejectsUnknownFormat(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("stdout = %q, want empty", stdout)
 	}
-	if !strings.Contains(stderr, "mcpsnoop check: --format must be text or junit") {
+	if !strings.Contains(stderr, "mcpsnoop check: --format must be text, junit, or sarif") {
 		t.Fatalf("stderr = %q, want --format error", stderr)
 	}
 }

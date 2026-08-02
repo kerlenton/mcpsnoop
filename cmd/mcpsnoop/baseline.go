@@ -39,11 +39,12 @@ func newBaselineCmd() *cobra.Command {
 			if len(args) == 1 {
 				arg = args[0]
 			}
-			st, sessionID, err := loadCheckSession(cmd, arg)
+			sessionLog, err := loadCheckSession(cmd, arg)
 			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop baseline:", err)
 				return exitCode(1)
 			}
+			st, sessionID := sessionLog.store, sessionLog.sessionID
 			manager := toolbaseline.New(resolveBaselineDir(baselineDir))
 			switch {
 			case accept:

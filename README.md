@@ -360,7 +360,7 @@ leave the capture incomplete, tool-definition drift, or use of deprecated
 protocol features.
 
 ```bash
-mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,drift,deprecated,incomplete] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit|sarif] [--fail-on error,invalid,warn,mismatch,pending,drift,deprecated,incomplete] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
@@ -393,6 +393,15 @@ definition remain observational only. Existing key- and value-based redaction
 also applies to captured parameter-header values before they reach a sink.
 Use `--format junit` to write one JUnit `<testcase>` per signal and session;
 failures follow the same `--fail-on` selection as the text output.
+Use `--format sarif` to write a SARIF 2.1.0 log instead. Where junit reports one
+aggregate per signal, SARIF reports one result per finding, carrying the session,
+the frame `Seq` and the frame's own warning or drift text, and pointing at the
+line of the log the frame was decoded from. A signal named in `--fail-on` is
+reported at level `error` and one outside it at level `note`, so the report and
+the gate never disagree. Alerts render only when the session log sits inside the
+checkout, since code scanning resolves a result's path against the repository
+root; the `artifacts/session.jsonl` recipe below already satisfies that, while a
+log read from the state directory or from stdin does not.
 
 ```bash
 mcpsnoop check build-agent
@@ -425,6 +434,23 @@ mcpsnoop check --expect-tool search --forbid-tool delete --max-duration 2s run.j
   with:
     name: mcpsnoop-junit
     path: test-results/mcpsnoop.xml
+```
+
+To put the findings in the Security tab instead, hand the SARIF log to
+`upload-sarif`. `check` exits non-zero on a finding, so the check step needs
+`continue-on-error` and the upload needs `if: always()`, or the report never
+reaches the tab on the runs that have something to report.
+
+```yaml
+- name: Check captured MCP session
+  continue-on-error: true
+  run: mcpsnoop check --format sarif artifacts/session.jsonl > mcpsnoop.sarif
+- name: Upload mcpsnoop SARIF report
+  if: always()
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: mcpsnoop.sarif
+    category: mcpsnoop
 ```
 
 ### Detect tool definition drift

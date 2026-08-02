@@ -1181,3 +1181,97 @@ func TestResolveSessionPathSkipsAnEmptyLog(t *testing.T) {
 		t.Fatalf("resolved %q, want the last real capture %q", got, real)
 	}
 }
+
+// TestLoadFileLinesTracksTrueLineNumbers. Seq is scoped per session and skips
+// frames dropped upstream, so a result pointed at Seq would send a reader to the
+// wrong frame in exactly the captures worth pointing them at: this log has a
+// gap in one session and a second session that restarts numbering at 1.
+func TestLoadFileLinesTracksTrueLineNumbers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "two.jsonl")
+	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	frames := []struct {
+		session string
+		seq     uint64
+	}{
+		{"alpha", 1},
+		{"alpha", 2},
+		{"alpha", 5}, // Seq 3 and 4 were dropped upstream.
+		{"beta", 1},
+		{"beta", 2},
+	}
+	for i, frame := range frames {
+		writeEnv(t, path, proxy.Envelope{
+			SessionID: frame.session, ServerLabel: "demo", Seq: frame.seq,
+			TS: t0.Add(time.Duration(i) * time.Millisecond), Direction: proxy.ClientToServer,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		})
+	}
+
+	st, first, lines, err := LoadFileLines(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st == nil || first != "alpha" {
+		t.Fatalf("first session = %q, want alpha", first)
+	}
+	for i, frame := range frames {
+		want := i + 1
+		got, ok := lines.Line(frame.session, frame.seq)
+		if !ok {
+			t.Fatalf("no line recorded for %s seq %d", frame.session, frame.seq)
+		}
+		if got != want {
+			t.Fatalf("%s seq %d is on line %d, want %d", frame.session, frame.seq, got, want)
+		}
+	}
+	// The point of the index: after the gap, and in the second session, the line
+	// and the Seq are different numbers.
+	if line, _ := lines.Line("alpha", 5); line == 5 {
+		t.Fatal("alpha seq 5 must not be reported on line 5")
+	}
+	if line, _ := lines.Line("beta", 1); line == 1 {
+		t.Fatal("beta seq 1 must not be reported on line 1")
+	}
+	if _, ok := lines.Line("alpha", 3); ok {
+		t.Fatal("a frame that never reached the log must have no line")
+	}
+	// A stream loaded without the index answers the same way as a missing frame,
+	// so a caller cannot mistake "not tracked" for line zero.
+	if _, ok := FrameLines(nil).Line("alpha", 1); ok {
+		t.Fatal("an absent index must report no line")
+	}
+}
+
+// TestLoadFileLinesCountsBlankLines. json.Decoder buffers past the value it
+// returns, so a newline count kept alongside Decode would run ahead of it, and
+// whitespace between envelopes would shift every line after it.
+func TestLoadFileLinesCountsBlankLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "padded.jsonl")
+	envelope := func(seq uint64) string {
+		b, err := json.Marshal(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "demo", Seq: seq,
+			TS: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC), Direction: proxy.ClientToServer,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	// Envelopes on lines 1, 2, 4 and 5, with line 3 blank.
+	body := envelope(1) + "\n" + envelope(2) + "\n\n" + envelope(3) + "\n" + envelope(4) + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, lines, err := LoadFileLines(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for seq, want := range map[uint64]int{1: 1, 2: 2, 3: 4, 4: 5} {
+		got, ok := lines.Line("s1", seq)
+		if !ok || got != want {
+			t.Fatalf("seq %d is on line %d (ok=%v), want %d", seq, got, ok, want)
+		}
+	}
+}
