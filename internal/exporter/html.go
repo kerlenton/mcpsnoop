@@ -37,6 +37,7 @@ main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
 .status.error { color:var(--err); }
 .status.warn { color:var(--warn); }
 .status.superseded { color:var(--warn); }
+.status.call_cancelled, .status.late_result { color:var(--warn); }
 .status.pending { color:var(--pending); }
 .status.bad { color:var(--invalid); }
 /* Per-event tone by kind/status, matching the TUI stream colors. */
@@ -87,6 +88,7 @@ document.getElementById("summary").innerHTML = [
   ["Notifications", data.session.notifications],
   ["Errors", data.session.errors],
   ["Pending", data.session.pending],
+  ["Late results", data.session.late_results],
   ["Protocol", data.capabilities?.protocol_version || ""]
 ].map(([k,v]) => "<div class=\"pill\">" + esc(k) + "<br><b>" + esc(v) + "</b></div>").join("");
 const calls = data.calls || [];
@@ -118,12 +120,15 @@ const matchStatus = (ev, call, v) => {
   if (!call) return false;
   if (["err", "error", "fail", "failed"].includes(v)) return call.status === "error";
   if (["pending", "pend", "inflight"].includes(v)) return call.status === "pending";
+  if (["cancel", "call_cancelled", "call-cancelled"].includes(v)) return call.status === "call_cancelled";
+  if (["late", "late_result", "late-result"].includes(v)) return call.status === "late_result";
+  if (["cancelled", "canceled"].includes(v)) return call.status === "cancelled";
   if (["ok", "success"].includes(v)) return call.status === "ok";
   return false;
 };
 const bareMatch = (ev, call, q) =>
   norm(ev.method).includes(q) || norm(ev.id).includes(q) || norm(ev.text).includes(q) ||
-  norm(compact(ev.raw)).includes(q) || (call ? norm(call.tool_name).includes(q) : false);
+  norm(ev.observation).includes(q) || norm(compact(ev.raw)).includes(q) || (call ? norm(call.tool_name).includes(q) : false);
 const matchToken = (ev, call, tok) => {
   const i = tok.indexOf(":");
   if (i > 0) {
@@ -158,9 +163,7 @@ const toneOf = (ev, call) => {
   if (ev.kind === "request") return "req";
   if (ev.kind === "response") {
     if (call && call.status === "error") return "error";
-    // A cancelled task delivered no result but is not an error, so it reads as a
-    // caution like the TUI row, reusing the warn tone rather than success green.
-    if (call && call.status === "cancelled") return "warn";
+    if (call && ["cancelled", "call_cancelled", "late_result"].includes(call.status)) return "warn";
     return "resp";
   }
   return "resp";
@@ -175,7 +178,7 @@ const statusOf = (ev, call) => {
     if (call.status === "error") return "error";
     return call.status;
   }
-  return call.status === "pending" || call.status === "superseded" ? call.status : "";
+  return ["pending", "superseded", "call_cancelled", "late_result"].includes(call.status) ? call.status : "";
 };
 const renderEvent = (ev) => {
   const call = ev.call_index == null ? null : calls[ev.call_index];
@@ -184,6 +187,7 @@ const renderEvent = (ev) => {
   const raw = ev.text || textOf(ev.raw);
   const warning = ev.warning ? "<details open><summary>Warning</summary><pre>" + esc(ev.warning) + "</pre></details>" : "";
   const deprecated = ev.deprecated ? "<details open><summary>Deprecated</summary><pre>" + esc(ev.deprecated) + "</pre></details>" : "";
+  const observation = ev.observation ? "<details open><summary>Observation</summary><pre>" + esc(ev.observation) + "</pre></details>" : "";
   const callBlock = call ? "<details><summary>Correlated call</summary><pre>" + esc(JSON.stringify(call, null, 2)) + "</pre></details>" : "";
   return "<article class=\"event tone-" + tone + "\">" +
     "<div class=\"head\">" +
@@ -195,6 +199,7 @@ const renderEvent = (ev) => {
     "</div>" +
     warning +
     deprecated +
+    observation +
     "<details open><summary>Frame</summary><pre>" + esc(raw) + "</pre></details>" +
     callBlock +
   "</article>";

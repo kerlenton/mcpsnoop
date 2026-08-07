@@ -109,7 +109,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop` | open the live TUI |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, har, or otlp |
-| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, or hung calls |
+| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, hung calls, or late results |
 | `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
@@ -223,12 +223,14 @@ matches the method, tool, id, and payload.
 | `task:` | task id | `task:01J...` |
 | `dir:` | direction (`c2s`, `s2c`) | `dir:s2c` |
 | `kind:` | frame type (`req`, `resp`, `notify`, `stderr`, `invalid`) | `kind:invalid` |
-| `status:` | call outcome (`ok`, `error`, `cancelled`, `pending`, `bad`, `warn`, `mismatch`) | `status:error` |
+| `status:` | call outcome (`ok`, `error`, `cancel`, `late`, `cancelled`, `pending`, `bad`, `warn`, `mismatch`, or an HTTP status like `401`) | `status:error` |
 
 Stack tokens to get specific.
 
 ```text
 tool:search status:pending        # in-flight calls to one search tool
+status:cancel                     # calls the client gave up on (status:cancelled is a cancelled task)
+status:late                       # results that arrived after the cancellation
 method:tools/call status:error    # tool calls that failed
 dir:s2c kind:req                  # server-initiated requests (servers before 2026-07-28)
 ```
@@ -360,17 +362,19 @@ leave the capture incomplete, tool-definition drift, or use of deprecated
 protocol features.
 
 ```bash
-mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,drift,deprecated,incomplete] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,late-result,drift,deprecated,incomplete] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
-to gate on calls that never got a response, `mismatch` to gate specifically on a
+to gate on calls that never got a response, `late-result` to gate on responses
+that arrived after cancellation, `mismatch` to gate specifically on a
 routing header (Mcp-Method or Mcp-Name) disagreeing with the body, `drift` to gate
 on tool definitions changing after approval, `deprecated` to gate on features
 the spec has deprecated, or `incomplete` to gate on captures with dropped frames.
 Pass a comma-separated subset to select only the
 conditions relevant to a job. Omit the session to check the newest capture, or use
-`-` to read JSONL from stdin.
+`-` to read JSONL from stdin. Late results are reported as `late_results` without
+affecting the default error, invalid, or warning signals.
 The dropped-frame count travels with the artifacts too, so a capture that
 understates itself says so wherever it is opened: `missing_frames` in the JSON
 export, `log.comment` in HAR, and the `mcpsnoop.session.missing_frames` resource
