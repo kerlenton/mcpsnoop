@@ -173,6 +173,9 @@ type ToolCost struct {
 	// reading the gap as a bug.
 	DescriptionBytes int
 	SchemaBytes      int
+	// FindingKinds lists the schema finding kinds detected on this tool, keyed
+	// structurally for export and check rather than by display text.
+	FindingKinds []SchemaFindingKind
 }
 
 // ToolListCost is the fixed context cost of a session's advertised tool list,
@@ -512,6 +515,56 @@ func (s *Store) ToolDrift(sessionID string) (ToolDrift, bool) {
 		return ToolDrift{}, false
 	}
 	return cloneToolDrift(sess.toolDrift), true
+}
+
+// SchemaReport groups tool names by observational schema finding kind. It
+// includes every tool advertised so far, even when tools/list is still
+// paginating, so a violation on an early page is not lost.
+type SchemaReport struct {
+	// ByKind maps an observational finding kind to the tools that carry it.
+	ByKind map[SchemaFindingKind][]string
+}
+
+func (r SchemaReport) Empty() bool {
+	return len(r.ByKind) == 0
+}
+
+func (r SchemaReport) Count() int {
+	n := 0
+	for _, names := range r.ByKind {
+		n += len(names)
+	}
+	return n
+}
+
+func (r SchemaReport) Names(kind SchemaFindingKind) []string {
+	if r.ByKind == nil {
+		return nil
+	}
+	return slices.Clone(r.ByKind[kind])
+}
+
+// SchemaFindings returns observational schema findings for every tool seen in
+// the session so far. ok is false when the session never carried a tools/list
+// response.
+func (s *Store) SchemaFindings(sessionID string) (SchemaReport, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok || !sess.toolListSeen {
+		return SchemaReport{}, false
+	}
+	report := SchemaReport{ByKind: make(map[SchemaFindingKind][]string)}
+	for _, name := range sess.advertisedTools {
+		definition := sess.toolDefinitions[name]
+		for _, f := range definition.Findings {
+			if !IsObservationalSchemaKind(f.Kind) {
+				continue
+			}
+			report.ByKind[f.Kind] = append(report.ByKind[f.Kind], name)
+		}
+	}
+	return report, true
 }
 
 // cloneToolDrift deep-copies a report for a reader. It walks the map rather than

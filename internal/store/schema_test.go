@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestAnalyzeSchemaClean(t *testing.T) {
+func TestAnalyzeInputSchemaClean(t *testing.T) {
 	schema := json.RawMessage(`{
 		"type":"object",
 		"properties":{
@@ -16,22 +16,25 @@ func TestAnalyzeSchemaClean(t *testing.T) {
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 
 	if len(got) != 0 {
 		t.Fatalf("got %v findings, want none", got)
 	}
 }
 
-func TestAnalyzeSchemaOneOf(t *testing.T) {
+func TestAnalyzeInputSchemaOneOf(t *testing.T) {
 	schema := json.RawMessage(`{
-		"oneOf": [
-			{"type":"string"},
-			{"type":"integer"}
-		]
+		"type":"object",
+		"properties":{
+			"value":{"oneOf":[
+				{"type":"string"},
+				{"type":"integer"}
+			]}
+		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 
 	want := []SchemaFinding{
 		{Kind: FindingOneOf},
@@ -42,15 +45,18 @@ func TestAnalyzeSchemaOneOf(t *testing.T) {
 	}
 }
 
-func TestAnalyzeSchemaAnyOf(t *testing.T) {
+func TestAnalyzeInputSchemaAnyOf(t *testing.T) {
 	schema := json.RawMessage(`{
-		"anyOf": [
-			{"type":"string"},
-			{"type":"integer"}
-		]
+		"type":"object",
+		"properties":{
+			"value":{"anyOf":[
+				{"type":"string"},
+				{"type":"integer"}
+			]}
+		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 
 	want := []SchemaFinding{
 		{Kind: FindingAnyOf},
@@ -61,15 +67,18 @@ func TestAnalyzeSchemaAnyOf(t *testing.T) {
 	}
 }
 
-func TestAnalyzeSchemaAllOf(t *testing.T) {
+func TestAnalyzeInputSchemaAllOf(t *testing.T) {
 	schema := json.RawMessage(`{
-		"allOf": [
-			{"type":"string"},
-			{"type":"integer"}
-		]
+		"type":"object",
+		"properties":{
+			"value":{"allOf":[
+				{"type":"string"},
+				{"type":"integer"}
+			]}
+		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 
 	want := []SchemaFinding{
 		{Kind: FindingAllOf},
@@ -80,14 +89,15 @@ func TestAnalyzeSchemaAllOf(t *testing.T) {
 	}
 }
 
-func TestAnalyzeSchemaNot(t *testing.T) {
+func TestAnalyzeInputSchemaNot(t *testing.T) {
 	schema := json.RawMessage(`{
-		"not": {
-			"type":"string"
+		"type":"object",
+		"properties":{
+			"value":{"not":{"type":"string"}}
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 
 	want := []SchemaFinding{
 		{Kind: FindingNot},
@@ -98,12 +108,15 @@ func TestAnalyzeSchemaNot(t *testing.T) {
 	}
 }
 
-func TestAnalyzeSchemaRef(t *testing.T) {
+func TestAnalyzeInputSchemaRef(t *testing.T) {
 	schema := json.RawMessage(`{
-		"$ref": "#/$defs/Foo"
+		"type":"object",
+		"properties":{
+			"u":{"$ref":"#/$defs/Foo"}
+		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 
 	want := []SchemaFinding{
 		{Kind: FindingRef},
@@ -114,7 +127,7 @@ func TestAnalyzeSchemaRef(t *testing.T) {
 	}
 }
 
-func TestAnalyzeSchemaPropertyNamedLikeKeyword(t *testing.T) {
+func TestAnalyzeInputSchemaPropertyNamedLikeKeyword(t *testing.T) {
 	schema := json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -124,19 +137,22 @@ func TestAnalyzeSchemaPropertyNamedLikeKeyword(t *testing.T) {
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 
 	if len(got) != 0 {
 		t.Fatalf("got %v, want none", got)
 	}
 }
 
-func TestAnalyzeSchemaExternalRef(t *testing.T) {
+func TestAnalyzeInputSchemaExternalRef(t *testing.T) {
 	schema := json.RawMessage(`{
-		"$ref": "https://example.com/schema.json"
+		"type":"object",
+		"properties":{
+			"u":{"$ref":"https://example.com/schema.json"}
+		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 
 	want := []SchemaFinding{
 		{Kind: FindingExternalRef},
@@ -147,7 +163,7 @@ func TestAnalyzeSchemaExternalRef(t *testing.T) {
 	}
 }
 
-func TestAnalyzeSchemaUntypedProperty(t *testing.T) {
+func TestAnalyzeInputSchemaUntypedProperty(t *testing.T) {
 	schema := json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -155,7 +171,7 @@ func TestAnalyzeSchemaUntypedProperty(t *testing.T) {
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 
 	want := []SchemaFinding{
 		{Kind: FindingUntypedProperty},
@@ -166,7 +182,7 @@ func TestAnalyzeSchemaUntypedProperty(t *testing.T) {
 	}
 }
 
-func TestAnalyzeSchemaNestedUntypedProperty(t *testing.T) {
+func TestAnalyzeInputSchemaNestedUntypedProperty(t *testing.T) {
 	schema := json.RawMessage(`{
 		"type":"object",
 		"properties":{
@@ -181,7 +197,7 @@ func TestAnalyzeSchemaNestedUntypedProperty(t *testing.T) {
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 
 	want := []SchemaFinding{
 		{Kind: FindingUntypedProperty},
@@ -192,25 +208,28 @@ func TestAnalyzeSchemaNestedUntypedProperty(t *testing.T) {
 	}
 }
 
-func TestAnalyzeSchemaTopLevelWithoutTypeIsNotFlaggedAsUntypedProperty(t *testing.T) {
+func TestAnalyzeInputSchemaTopLevelWithoutTypeIsNotFlaggedAsUntypedProperty(t *testing.T) {
 	schema := json.RawMessage(`{
-		"oneOf":[
-			{
-				"type":"object",
-				"properties":{
-					"a":{"type":"string"}
+		"type":"object",
+		"properties":{
+			"config":{"oneOf":[
+				{
+					"type":"object",
+					"properties":{
+						"a":{"type":"string"}
+					}
+				},
+				{
+					"type":"object",
+					"properties":{
+						"b":{"type":"string"}
+					}
 				}
-			},
-			{
-				"type":"object",
-				"properties":{
-					"b":{"type":"string"}
-				}
-			}
-		]
+			]}
+		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 
 	for _, finding := range got {
 		if finding.Kind == FindingUntypedProperty {
@@ -219,11 +238,7 @@ func TestAnalyzeSchemaTopLevelWithoutTypeIsNotFlaggedAsUntypedProperty(t *testin
 	}
 }
 
-// A real MCP inputSchema is an object whose parameters live under properties, so
-// that is where a construct actually appears. Flagging such a property as
-// untyped would be wrong (its type comes from the reference or the branches) and
-// would also hide the construct behind the untyped label.
-func TestAnalyzeSchemaConstructOnAPropertyIsNotAlsoUntyped(t *testing.T) {
+func TestAnalyzeInputSchemaConstructOnAPropertyIsNotAlsoUntyped(t *testing.T) {
 	cases := []struct {
 		name   string
 		schema string
@@ -252,7 +267,7 @@ func TestAnalyzeSchemaConstructOnAPropertyIsNotAlsoUntyped(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := analyzeSchema(json.RawMessage(tc.schema))
+			got := analyzeInputSchema(json.RawMessage(tc.schema))
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
@@ -260,22 +275,18 @@ func TestAnalyzeSchemaConstructOnAPropertyIsNotAlsoUntyped(t *testing.T) {
 	}
 }
 
-// enum and const pin the accepted values more tightly than a type would, so a
-// property using either is not ambiguous and must not be reported as untyped.
-func TestAnalyzeSchemaEnumAndConstAreNotUntyped(t *testing.T) {
+func TestAnalyzeInputSchemaEnumAndConstAreNotUntyped(t *testing.T) {
 	for _, schema := range []string{
 		`{"type":"object","properties":{"mode":{"enum":["fast","slow"]}}}`,
 		`{"type":"object","properties":{"version":{"const":2}}}`,
 	} {
-		if got := analyzeSchema(json.RawMessage(schema)); len(got) != 0 {
-			t.Fatalf("analyzeSchema(%s) = %v, want no findings", schema, got)
+		if got := analyzeInputSchema(json.RawMessage(schema)); len(got) != 0 {
+			t.Fatalf("analyzeInputSchema(%s) = %v, want no findings", schema, got)
 		}
 	}
 }
 
-// Findings carry only a kind, so repeats of one kind are indistinguishable and
-// collapsing them keeps "more than one finding" meaning "more than one kind".
-func TestAnalyzeSchemaDeduplicatesByKind(t *testing.T) {
+func TestAnalyzeInputSchemaDeduplicatesByKind(t *testing.T) {
 	schema := json.RawMessage(`{
 		"type":"object",
 		"properties":{
@@ -285,7 +296,7 @@ func TestAnalyzeSchemaDeduplicatesByKind(t *testing.T) {
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeInputSchema(schema)
 	want := []SchemaFinding{{Kind: FindingUntypedProperty}}
 
 	if !reflect.DeepEqual(got, want) {
@@ -293,9 +304,7 @@ func TestAnalyzeSchemaDeduplicatesByKind(t *testing.T) {
 	}
 }
 
-// A construct is just as real inside these containers as at the top level, so
-// the walk has to reach them or a schema reads as clean when it is not.
-func TestAnalyzeSchemaReachesEveryContainer(t *testing.T) {
+func TestAnalyzeInputSchemaReachesEveryContainer(t *testing.T) {
 	cases := []struct {
 		name   string
 		schema string
@@ -305,8 +314,8 @@ func TestAnalyzeSchemaReachesEveryContainer(t *testing.T) {
 		{"if", `{"type":"object","if":{"oneOf":[{"type":"string"}]}}`, FindingOneOf},
 		{"then", `{"type":"object","then":{"$ref":"https://example.com/x.json"}}`, FindingExternalRef},
 		{"else", `{"type":"object","else":{"anyOf":[{"type":"string"}]}}`, FindingAnyOf},
-		{"contains", `{"type":"array","contains":{"allOf":[{"type":"string"}]}}`, FindingAllOf},
-		{"prefixItems", `{"type":"array","prefixItems":[{"oneOf":[{"type":"string"}]}]}`, FindingOneOf},
+		{"contains", `{"type":"object","properties":{"items":{"type":"array","contains":{"allOf":[{"type":"string"}]}}}}`, FindingAllOf},
+		{"prefixItems", `{"type":"object","properties":{"items":{"type":"array","prefixItems":[{"oneOf":[{"type":"string"}]}]}}}`, FindingOneOf},
 		{"patternProperties", `{"type":"object","patternProperties":{"^a":{"$ref":"#/$defs/A"}}}`, FindingRef},
 		{"$defs", `{"type":"object","$defs":{"X":{"oneOf":[{"type":"string"}]}}}`, FindingOneOf},
 		{"definitions", `{"type":"object","definitions":{"X":{"anyOf":[{"type":"string"}]}}}`, FindingAnyOf},
@@ -315,7 +324,7 @@ func TestAnalyzeSchemaReachesEveryContainer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := analyzeSchema(json.RawMessage(tc.schema))
+			got := analyzeInputSchema(json.RawMessage(tc.schema))
 			if len(got) != 1 || got[0].Kind != tc.want {
 				t.Fatalf("got %v, want exactly [%s]", got, tc.want)
 			}
@@ -323,9 +332,7 @@ func TestAnalyzeSchemaReachesEveryContainer(t *testing.T) {
 	}
 }
 
-// Nothing may be resolved or fetched: an external reference is recognized by its
-// form alone, and the schema it points at is never read.
-func TestAnalyzeSchemaClassifiesRefsByFormOnly(t *testing.T) {
+func TestAnalyzeInputSchemaClassifiesRefsByFormOnly(t *testing.T) {
 	cases := map[string]SchemaFindingKind{
 		"#":                          FindingRef,
 		"#/$defs/User":               FindingRef,
@@ -337,9 +344,107 @@ func TestAnalyzeSchemaClassifiesRefsByFormOnly(t *testing.T) {
 	}
 	for ref, want := range cases {
 		schema := json.RawMessage(`{"type":"object","properties":{"u":{"$ref":` + strconv.Quote(ref) + `}}}`)
-		got := analyzeSchema(schema)
+		got := analyzeInputSchema(schema)
 		if len(got) != 1 || got[0].Kind != want {
 			t.Fatalf("$ref %q: got %v, want [%s]", ref, got, want)
 		}
+	}
+}
+
+func TestAnalyzeInputSchemaNonObjectRoot(t *testing.T) {
+	cases := []string{
+		`{"$schema":"http://json-schema.org/draft-07/schema#"}`,
+		`{}`,
+		`{"type":"array","items":{"type":"string"}}`,
+		`true`,
+		`null`,
+	}
+	for _, schema := range cases {
+		got := analyzeInputSchema(json.RawMessage(schema))
+		if len(got) == 0 || got[0].Kind != FindingNonObjectRoot {
+			t.Fatalf("analyzeInputSchema(%s) = %v, want nonObjectRoot", schema, got)
+		}
+	}
+}
+
+func TestAnalyzeInputSchemaAbsentIsNonObjectRoot(t *testing.T) {
+	got := analyzeInputSchema(nil)
+	if len(got) != 1 || got[0].Kind != FindingNonObjectRoot {
+		t.Fatalf("got %v, want nonObjectRoot for absent schema", got)
+	}
+}
+
+func TestAnalyzeInputSchemaValidNoParamForms(t *testing.T) {
+	for _, schema := range []string{
+		`{"type":"object"}`,
+		`{"type":"object","additionalProperties":false}`,
+	} {
+		if got := analyzeInputSchema(json.RawMessage(schema)); len(got) != 0 {
+			t.Fatalf("analyzeInputSchema(%s) = %v, want no findings", schema, got)
+		}
+	}
+}
+
+func TestAnalyzeOutputSchemaDoesNotReportNonObjectRoot(t *testing.T) {
+	schema := json.RawMessage(`{"type":"array","items":{"type":"string"}}`)
+	got := analyzeOutputSchema(schema)
+	for _, f := range got {
+		if f.Kind == FindingNonObjectRoot {
+			t.Fatalf("output schema must not report nonObjectRoot, got %v", got)
+		}
+	}
+}
+
+func TestAnalyzeSchemaNonDefaultDialect(t *testing.T) {
+	schema := json.RawMessage(`{
+		"type":"object",
+		"$schema":"http://json-schema.org/draft-07/schema#",
+		"properties":{"path":{"type":"string"}}
+	}`)
+	got := analyzeInputSchema(schema)
+	found := false
+	for _, f := range got {
+		if f.Kind == FindingNonDefaultDialect {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("got %v, want nonDefaultDialect", got)
+	}
+}
+
+func TestAnalyzeSchemaDefaultDialectIsSilent(t *testing.T) {
+	for _, schema := range []string{
+		`{"type":"object","properties":{"q":{"type":"string"}}}`,
+		`{"type":"object","$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"q":{"type":"string"}}}`,
+		`{"type":"object","$schema":"https://json-schema.org/draft/2020-12/schema#","properties":{"q":{"type":"string"}}}`,
+	} {
+		got := analyzeInputSchema(json.RawMessage(schema))
+		for _, f := range got {
+			if f.Kind == FindingNonDefaultDialect {
+				t.Fatalf("analyzeInputSchema(%s) = %v, want no dialect finding", schema, got)
+			}
+		}
+	}
+}
+
+func TestAnalyzeOutputSchemaReportsDialect(t *testing.T) {
+	schema := json.RawMessage(`{
+		"type":"array",
+		"$schema":"http://json-schema.org/draft-07/schema#",
+		"items":{"type":"string"}
+	}`)
+	got := analyzeOutputSchema(schema)
+	found := false
+	for _, f := range got {
+		if f.Kind == FindingNonDefaultDialect {
+			found = true
+		}
+		if f.Kind == FindingNonObjectRoot {
+			t.Fatalf("output schema must not report nonObjectRoot")
+		}
+	}
+	if !found {
+		t.Fatalf("got %v, want nonDefaultDialect on outputSchema", got)
 	}
 }

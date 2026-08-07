@@ -11,6 +11,8 @@ import (
 type SchemaFindingKind string
 
 const (
+	FindingNonObjectRoot   SchemaFindingKind = "nonObjectRoot"
+	FindingNonDefaultDialect SchemaFindingKind = "nonDefaultDialect"
 	FindingOneOf           SchemaFindingKind = "oneOf"
 	FindingAnyOf           SchemaFindingKind = "anyOf"
 	FindingAllOf           SchemaFindingKind = "allOf"
@@ -20,32 +22,111 @@ const (
 	FindingUntypedProperty SchemaFindingKind = "untypedProperty"
 )
 
+// jsonSchema2020_12 is the dialect MCP defaults to when $schema is absent.
+const jsonSchema2020_12 = "https://json-schema.org/draft/2020-12/schema"
+
+// ObservationalSchemaKinds are findings that never fail check unless the schema
+// signal is selected. nonObjectRoot is a violation and is surfaced as a warning
+// on the tools/list frame instead.
+var ObservationalSchemaKinds = []SchemaFindingKind{
+	FindingNonDefaultDialect,
+	FindingOneOf,
+	FindingAnyOf,
+	FindingAllOf,
+	FindingNot,
+	FindingRef,
+	FindingExternalRef,
+	FindingUntypedProperty,
+}
+
 type SchemaFinding struct {
 	Kind SchemaFindingKind
 }
 
-// analyzeSchema reports the constructs a tool's advertised input schema uses
-// that are known to travel badly. Nothing is resolved or fetched: an external
-// $ref is recognized by its form alone.
+// analyzeInputSchema reports constructs in a tool's inputSchema, including a
+// root that is not type object, which the MCP spec requires.
+func analyzeInputSchema(raw json.RawMessage) []SchemaFinding {
+	if len(raw) == 0 {
+		return []SchemaFinding{{Kind: FindingNonObjectRoot}}
+	}
+	return analyzeSchema(raw, true)
+}
+
+// analyzeOutputSchema reports constructs in a tool's outputSchema. The spec
+// places no root-type constraint on outputSchema, so only dialect and the
+// composition walk apply.
+func analyzeOutputSchema(raw json.RawMessage) []SchemaFinding {
+	if len(raw) == 0 {
+		return nil
+	}
+	return analyzeSchema(raw, false)
+}
+
+// analyzeSchema reports the constructs a tool's advertised schema uses that are
+// known to travel badly. Nothing is resolved or fetched: an external $ref is
+// recognized by its form alone.
 //
 // Findings are deduplicated by kind. A finding carries only its kind, so two
 // entries of the same kind are indistinguishable and add nothing; collapsing
 // them lets a caller treat "more than one finding" as "more than one kind of
 // problem", which is the question a reader actually has.
-func analyzeSchema(raw json.RawMessage) []SchemaFinding {
+func analyzeSchema(raw json.RawMessage, checkRoot bool) []SchemaFinding {
 	if len(raw) == 0 {
 		return nil
 	}
 
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
+		if checkRoot {
+			return []SchemaFinding{{Kind: FindingNonObjectRoot}}
+		}
 		return nil
 	}
 
 	var findings []SchemaFinding
-	seen := make(map[SchemaFindingKind]bool, 7)
+	seen := make(map[SchemaFindingKind]bool, 9)
+	if checkRoot && !hasObjectRoot(v) {
+		addFinding(&findings, seen, FindingNonObjectRoot)
+	}
+	if dialect := nonDefaultDialect(v); dialect {
+		addFinding(&findings, seen, FindingNonDefaultDialect)
+	}
 	walkSchema(v, &findings, seen)
 	return findings
+}
+
+// hasObjectRoot is true when v is a JSON object whose type is the string
+// "object". Absent type, any other type value, or a non-object node all fail.
+func hasObjectRoot(v any) bool {
+	node, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	t, ok := node["type"]
+	if !ok {
+		return false
+	}
+	s, ok := t.(string)
+	return ok && s == "object"
+}
+
+// nonDefaultDialect is true when the schema object carries a $schema URI that
+// is not the 2020-12 dialect MCP defaults to.
+func nonDefaultDialect(v any) bool {
+	node, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	schemaURI, ok := node["$schema"].(string)
+	if !ok || schemaURI == "" {
+		return false
+	}
+	return !isJSONSchema2020_12(schemaURI)
+}
+
+func isJSONSchema2020_12(uri string) bool {
+	uri = strings.TrimSuffix(uri, "#")
+	return uri == jsonSchema2020_12
 }
 
 func addFinding(findings *[]SchemaFinding, seen map[SchemaFindingKind]bool, kind SchemaFindingKind) {
@@ -140,4 +221,49 @@ func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]boo
 			}
 		}
 	}
+}
+
+// mergeSchemaFindings appends kinds from extra that are not already in base.
+func mergeSchemaFindings(base, extra []SchemaFinding) []SchemaFinding {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[SchemaFindingKind]bool, len(base)+len(extra))
+	for _, f := range base {
+		seen[f.Kind] = true
+	}
+	for _, f := range extra {
+		if seen[f.Kind] {
+			continue
+		}
+		seen[f.Kind] = true
+		base = append(base, f)
+	}
+	return base
+}
+
+// SchemaFindingKinds returns the kind strings present in findings, in a stable
+// order for display and export.
+func SchemaFindingKinds(findings []SchemaFinding) []SchemaFindingKind {
+	seen := make(map[SchemaFindingKind]bool, len(findings))
+	var kinds []SchemaFindingKind
+	for _, f := range findings {
+		if seen[f.Kind] {
+			continue
+		}
+		seen[f.Kind] = true
+		kinds = append(kinds, f.Kind)
+	}
+	return kinds
+}
+
+// IsObservationalSchemaKind is true for findings that never fail check unless
+// the schema signal is selected.
+func IsObservationalSchemaKind(kind SchemaFindingKind) bool {
+	for _, k := range ObservationalSchemaKinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
 }

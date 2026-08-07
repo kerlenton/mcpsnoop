@@ -1570,6 +1570,8 @@ func (m Model) summaryContent() string {
 // property, which is the weakest signal since a description often carries the
 // meaning a type would.
 var schemaHeadlineOrder = []store.SchemaFindingKind{
+	store.FindingNonObjectRoot,
+	store.FindingNonDefaultDialect,
 	store.FindingExternalRef,
 	store.FindingOneOf,
 	store.FindingAnyOf,
@@ -1597,6 +1599,10 @@ func headlineFinding(findings []store.SchemaFinding) store.SchemaFindingKind {
 // narrow SCHEMA column. Display wording is a TUI concern, not the store's.
 func schemaKindLabel(k store.SchemaFindingKind) string {
 	switch k {
+	case store.FindingNonObjectRoot:
+		return "bad root"
+	case store.FindingNonDefaultDialect:
+		return "dialect"
 	case store.FindingExternalRef:
 		return "ext ref"
 	case store.FindingUntypedProperty:

@@ -89,6 +89,20 @@ document.getElementById("summary").innerHTML = [
   ["Pending", data.session.pending],
   ["Protocol", data.capabilities?.protocol_version || ""]
 ].map(([k,v]) => "<div class=\"pill\">" + esc(k) + "<br><b>" + esc(v) + "</b></div>").join("");
+if (data.summary?.definitions?.per_tool?.length) {
+  const withFindings = data.summary.definitions.per_tool.filter(t => (t.findings || []).length);
+  if (withFindings.length) {
+    const block = document.createElement("div");
+    block.innerHTML = "<div class=\"section-title\">Schema findings</div>";
+    const list = document.createElement("div");
+    list.className = "grid";
+    withFindings.forEach(t => {
+      list.innerHTML += "<div class=\"pill\">" + esc(t.name) + "<br><b>" + esc((t.findings || []).join(", ")) + "</b></div>";
+    });
+    block.appendChild(list);
+    document.querySelector("main").insertBefore(block, document.getElementById("events"));
+  }
+}
 const calls = data.calls || [];
 const events = data.events || [];
 // Filter grammar mirrors the TUI stream filter, space-separated tokens (ANDed),

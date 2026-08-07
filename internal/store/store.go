@@ -244,6 +244,10 @@ type session struct {
 	// is parked here and Ingest drains it onto the tools/list response frame that
 	// carried the definitions.
 	paramHeaderInvalid []paramHeaderViolation
+	// schemaRootInvalid names tools whose inputSchema is not an object schema.
+	// Parked and drained the same way as paramHeaderInvalid so a partly paginated
+	// listing still reports the violation on the frame that carried it.
+	schemaRootInvalid []string
 
 	command []string
 	cwd     string
@@ -442,6 +446,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			}
 		}
 		sess.paramHeaderInvalid = nil
+		for _, tool := range sess.schemaRootInvalid {
+			ev.warning = appendWarning(ev.warning,
+				"tool "+strconv.Quote(tool)+" inputSchema is not an object schema")
+		}
+		sess.schemaRootInvalid = nil
 		if c != nil {
 			hint, cacheWarnings := sess.recordCacheFromResponse(c, msg.Result, e.TS)
 			if !hint.Empty() {
@@ -1149,6 +1158,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 	}
 
 	var invalidParamHeaderTools []paramHeaderViolation
+	var invalidSchemaRootTools []string
 	for _, rawTool := range r.Tools {
 		var tool struct {
 			Name string `json:"name"`
@@ -1211,6 +1221,15 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 		// they went. compactJSONLen already answers 0 for an absent field, which
 		// keeps the rule that no description weighs nothing rather than the two
 		// bytes of an empty one.
+		inputFindings := analyzeInputSchema(schema)
+		inputFindings = mergeSchemaFindings(inputFindings, analyzeOutputSchema(tool.OutputSchema))
+		for _, f := range inputFindings {
+			if f.Kind == FindingNonObjectRoot {
+				invalidSchemaRootTools = append(invalidSchemaRootTools, tool.Name)
+				break
+			}
+		}
+
 		sess.toolDefinitions[tool.Name] = ToolDefinition{
 			Name:         tool.Name,
 			Description:  description,
@@ -1219,18 +1238,20 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 			OutputSchema: append(json.RawMessage(nil), tool.OutputSchema...),
 			Annotations:  append(json.RawMessage(nil), tool.Annotations...),
 			Icons:        append(json.RawMessage(nil), tool.Icons...),
-			Findings:     analyzeSchema(schema),
+			Findings:     inputFindings,
 			paramHeaders: paramHeaders,
 			Cost: ToolCost{
 				Name:             tool.Name,
 				Bytes:            compactJSONLen(rawTool),
 				DescriptionBytes: compactJSONLen(tool.Description),
 				SchemaBytes:      compactJSONLen(tool.InputSchema),
+				FindingKinds:     SchemaFindingKinds(inputFindings),
 			},
 		}
 	}
 	sess.toolListComplete = r.NextCursor == ""
 	sess.paramHeaderInvalid = append(sess.paramHeaderInvalid, invalidParamHeaderTools...)
+	sess.schemaRootInvalid = append(sess.schemaRootInvalid, invalidSchemaRootTools...)
 }
 
 // hasListCursor reports whether a tools/list request carries a pagination cursor,

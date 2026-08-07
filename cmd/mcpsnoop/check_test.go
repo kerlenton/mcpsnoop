@@ -92,8 +92,8 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
 		t.Fatalf("exit = %d, want 1", code)
 	}
 	const want = `<?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="mcpsnoop check" tests="9" failures="3" errors="0" skipped="0" time="0">
-  <testsuite name="s1" tests="9" failures="3" errors="0" skipped="0" time="0">
+<testsuites name="mcpsnoop check" tests="10" failures="3" errors="0" skipped="0" time="0">
+  <testsuite name="s1" tests="10" failures="3" errors="0" skipped="0" time="0">
     <testcase classname="mcpsnoop.check" name="s1/error" time="0">
       <failure message="session s1 has 2 errors" type="mcpsnoop.check.error">session s1 has 2 errors</failure>
     </testcase>
@@ -108,6 +108,7 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
     <testcase classname="mcpsnoop.check" name="s1/drift" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/deprecated" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/incomplete" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/schema" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/assertions" time="0"></testcase>
   </testsuite>
 </testsuites>
@@ -128,7 +129,7 @@ func TestCheckJUnitHonorsFailOn(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 because errors are not selected", code)
 	}
-	for _, want := range []string{`tests="9"`, `failures="0"`, `name="s1/error"`} {
+	for _, want := range []string{`tests="10"`, `failures="0"`, `name="s1/error"`} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q\n%s", want, stdout)
 		}
