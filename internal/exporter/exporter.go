@@ -937,7 +937,7 @@ func eventKind(k store.EventKind) string {
 }
 
 func callKey(c store.CallView) string {
-	return string(c.ReqDir) + "\x00" + c.ID
+	return string(c.ReqDir) + "\x00" + c.CorrID
 }
 
 func formatDuration(ms *float64) string {

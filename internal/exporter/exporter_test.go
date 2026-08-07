@@ -1181,3 +1181,42 @@ func TestResolveSessionPathSkipsAnEmptyLog(t *testing.T) {
 		t.Fatalf("resolved %q, want the last real capture %q", got, real)
 	}
 }
+
+func TestNullRequestIDEventsMapToDistinctCalls(t *testing.T) {
+	st := store.New()
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	meta := `,"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}`
+	frames := []struct {
+		seq uint64
+		dir proxy.Direction
+		raw string
+	}{
+		{1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28"` + meta + `,"capabilities":{},"clientInfo":{"name":"demo","version":"1.0"}}}`},
+		{2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","protocolVersion":"2026-07-28","capabilities":{"tools":{}},"serverInfo":{"name":"files","version":"0.1"}}}`},
+		{3, proxy.ClientToServer, `{"jsonrpc":"2.0","id":null,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/etc/hosts"}` + meta + `}}`},
+		{4, proxy.ClientToServer, `{"jsonrpc":"2.0","id":null,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"/tmp/out"}` + meta + `}}`},
+	}
+	for _, f := range frames {
+		st.Ingest(proxy.Envelope{
+			SessionID: "n1", ServerLabel: "files", Seq: f.seq, TS: now.Add(time.Duration(f.seq) * time.Second),
+			Direction: f.dir, Raw: json.RawMessage(f.raw),
+		})
+	}
+	export, err := Build(st, "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if export.Calls[1].ToolName != "read_file" || export.Calls[2].ToolName != "write_file" {
+		t.Fatalf("export calls: %+v, %+v", export.Calls[1], export.Calls[2])
+	}
+	for _, ev := range export.Events {
+		if ev.Seq == 3 && ev.CallIndex != nil && export.Calls[*ev.CallIndex].ToolName != "read_file" {
+			t.Fatalf("frame #3 should map to read_file, got call index %d tool=%s",
+				*ev.CallIndex, export.Calls[*ev.CallIndex].ToolName)
+		}
+		if ev.Seq == 4 && ev.CallIndex != nil && export.Calls[*ev.CallIndex].ToolName != "write_file" {
+			t.Fatalf("frame #4 should map to write_file, got call index %d tool=%s",
+				*ev.CallIndex, export.Calls[*ev.CallIndex].ToolName)
+		}
+	}
+}

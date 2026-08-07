@@ -125,6 +125,7 @@ type callKey struct {
 // call is the mutable internal record for one request/response pair.
 type call struct {
 	id       string
+	corrID   string // correlation key; differs from id when the wire id is illegal
 	method   string
 	reqDir   proxy.Direction
 	params   json.RawMessage
@@ -488,7 +489,9 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.kind = EventRequest
 		ev.method = msg.Method
 		ev.id = string(msg.ID)
+		corrID := correlateID(msg.ID, e.Seq)
 		ev.warning = validationWarning(msg)
+		ev.warning = appendWarning(ev.warning, requestIDWarning(msg))
 		var reused bool
 		if root, stateIssue := sess.matchRetry(msg); root != nil {
 			// A continuation, not a new call. Mapping the retry id onto the same
@@ -515,7 +518,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			sess.requests++ // a request on the wire, even though not a new call
 			break
 		}
-		ev.call, reused = sess.openCall(ev.id, msg, e)
+		ev.call, reused = sess.openCall(corrID, msg, e)
 		ev.call.progressToken = sess.noteProgressToken(msg.Params)
 		if msg.Method == "subscriptions/listen" && e.Direction == proxy.ClientToServer {
 			sess.noteSubscription(ev.id, msg.Params)
@@ -780,8 +783,8 @@ func (s *Store) sessionFor(e proxy.Envelope) *session {
 // openCall records a new pending request. The bool reports whether it displaced
 // a still-pending call for the same id and direction, meaning the client reused
 // an id while its earlier request was in flight. Caller holds the write lock.
-func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope) (*call, bool) {
-	key := callKey{dir: e.Direction, id: id, conn: e.ConnID}
+func (sess *session) openCall(corrID string, msg proxy.RPCMessage, e proxy.Envelope) (*call, bool) {
+	key := callKey{dir: e.Direction, id: corrID, conn: e.ConnID}
 	prev, ok := sess.calls[key]
 	reused := ok && (prev.state == Pending || prev.state == Streaming)
 	if reused {
@@ -801,7 +804,8 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 		prev.end = e.TS
 	}
 	c := &call{
-		id:     id,
+		id:     string(msg.ID),
+		corrID: corrID,
 		method: msg.Method,
 		reqDir: e.Direction,
 		params: msg.Params,

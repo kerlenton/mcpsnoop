@@ -14,6 +14,7 @@ import (
 // CallView is an immutable snapshot of a correlated request/response pair.
 type CallView struct {
 	ID       string
+	CorrID   string
 	Method   string
 	ReqDir   proxy.Direction
 	IsTool   bool
@@ -390,6 +391,7 @@ func (e *event) view(_ *session) EventView {
 func (c *call) view() CallView {
 	return CallView{
 		ID:         c.id,
+		CorrID:     c.corrID,
 		Method:     c.method,
 		ReqDir:     c.reqDir,
 		IsTool:     c.isTool,
