@@ -154,6 +154,8 @@ func checkSignalFailureReason(sessionID string, signal checkSignal, count int) s
 		singular, plural = "deprecated protocol feature", "deprecated protocol features"
 	case checkIncomplete:
 		singular, plural = "dropped frame", "dropped frames"
+	case checkSchema:
+		singular, plural = "schema finding", "schema findings"
 	default:
 		singular, plural = "signal", "signals"
 	}
