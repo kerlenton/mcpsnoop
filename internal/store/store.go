@@ -1604,6 +1604,15 @@ func validationWarning(msg proxy.RPCMessage) string {
 		warning = appendWarning(warning, idWarning)
 	}
 	if msg.Method == "" && len(msg.ID) > 0 {
+		// A result MUST carry the same id as its request, so a null one names no
+		// request at all. An error response is exempt, since the spec lets it omit
+		// the id "in error cases where the ID could not be read due a malformed
+		// request", which is exactly what a null id says. Reported here because the
+		// correlation failure downstream reads as a missing frame, which sends the
+		// reader after the wrong problem.
+		if len(msg.Result) > 0 && bytes.Equal(bytes.TrimSpace(msg.ID), []byte("null")) {
+			warning = appendWarning(warning, "result response id is null; it names no request")
+		}
 		if len(msg.Result) == 0 && msg.Error == nil {
 			warning = appendWarning(warning, "response has neither result nor error")
 		}
@@ -1628,10 +1637,15 @@ func requestIDWarning(msg proxy.RPCMessage) string {
 	case string:
 		return ""
 	case json.Number:
-		if requestIDIsInteger(string(value)) {
+		// Judged on the value rather than the spelling. JSON has several ways to
+		// write one integer, and JSON Schema's own "integer" matches any number
+		// with a zero fractional part, so 1.0 and 1e3 are the ids 1 and 1000. A
+		// client whose serializer round-trips an id through a float is conforming,
+		// and refusing it would warn on correct traffic.
+		if parseMCPInteger(string(value)).integer {
 			return ""
 		}
-		return "request id has type non-integer number; MCP requires a string or integer id"
+		return "request id " + string(value) + " is not an integer; MCP requires a string or integer id"
 	case nil:
 		return "request id is null; MCP requires a string or integer id"
 	case bool:
@@ -1641,13 +1655,6 @@ func requestIDWarning(msg proxy.RPCMessage) string {
 	default:
 		return "request id has type object; MCP requires a string or integer id"
 	}
-}
-
-func requestIDIsInteger(id string) bool {
-	id = strings.TrimPrefix(id, "-")
-	return id != "" && strings.IndexFunc(id, func(r rune) bool {
-		return r < '0' || r > '9'
-	}) == -1
 }
 
 // resultTypeRequiredFrom is the revision that made resultType mandatory on every
