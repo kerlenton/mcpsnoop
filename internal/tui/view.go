@@ -707,7 +707,13 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			}
 		}
 		if e.Method == "notifications/cancelled" && e.Call != nil {
+			// Labelled by the call's outcome rather than by the frame, so the token
+			// shown is the one status: selects. A cancellation whose result turned up
+			// afterwards reads "late" on both.
 			c.status = "cancel"
+			if e.Call.LateResult {
+				c.status = "late"
+			}
 		}
 	case store.EventInvalid:
 		c.dir, c.method, c.status = "!", "invalid rpc", "bad"
@@ -1012,7 +1018,7 @@ func (m Model) renderHelp() string {
 	filter := helpGroup{"STREAM FILTER QUERY", [][2]string{
 		{"<text>", "substring over method, tool, id, payload"},
 		{"tool:echo", "by tool name"},
-		{"status:err|warn|ok|pending|bad|mismatch", "by outcome"},
+		{"status:err|warn|ok|pending|cancel|late|bad|mismatch", "by outcome"},
 		{"kind:req|resp|notify|stderr|invalid", "by message type"},
 		{"dir:c2s|s2c", "by direction"},
 		{"method:tools/call", "by method"},

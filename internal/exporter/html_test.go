@@ -135,11 +135,9 @@ func TestHTMLSurfacesSupersededStatus(t *testing.T) {
 	}
 }
 
-// TestWriteHTMLStillEscapesMarkup. The HTML export is the one writer that must
-// keep escaping: its payload lands in template.JS inside a script block, where
-// template.JS disables the contextual escaping html/template would apply, and a
-// tool result containing </script> would otherwise close the element and run as
-// markup. Wire fidelity loses to stored XSS in a file opened in a browser.
+// TestHTMLSurfacesCallCancellationStatuses. A cancelled call and a late result
+// each need their own status token and their own CSS rule, or both render as an
+// ordinary row in the one export people forward to somebody else.
 func TestHTMLSurfacesCallCancellationStatuses(t *testing.T) {
 	cancelledIndex, lateIndex := 0, 1
 	data := SessionExport{
@@ -171,6 +169,11 @@ func TestHTMLSurfacesCallCancellationStatuses(t *testing.T) {
 	}
 }
 
+// TestWriteHTMLStillEscapesMarkup. The HTML export is the one writer that must
+// keep escaping. Its payload lands in template.JS inside a script block, where
+// template.JS disables the contextual escaping html/template would apply, and a
+// tool result containing </script> would otherwise close the element and run as
+// markup. Wire fidelity loses to stored XSS in a file opened in a browser.
 func TestWriteHTMLStillEscapesMarkup(t *testing.T) {
 	data := SessionExport{
 		Session: SessionSummary{ID: "s1"},

@@ -1862,3 +1862,52 @@ func TestReplayAsksBeforeRunningTheRecordedCommand(t *testing.T) {
 		t.Fatal("declining must not start a replay")
 	}
 }
+
+// TestCancelAndLateRowsAreSelectableByWhatTheySay. The row for a
+// notifications/cancelled frame labels itself, and status: has to find it by the
+// same word. Labelling every such frame "cancel" while the filter required a call
+// that was not yet a late result meant the token shown and the token that selects
+// disagreed as soon as the result turned up.
+func TestCancelAndLateRowsAreSelectableByWhatTheySay(t *testing.T) {
+	build := func(late bool) Model {
+		st := store.New()
+		t0 := time.Now()
+		st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow"}}`))
+		st.Ingest(env(2, proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}`))
+		if late {
+			st.Ingest(env(3, proxy.ServerToClient, `{"jsonrpc":"2.0","id":7,"result":{"content":[]}}`))
+		}
+		_ = t0
+		m := ready(t, st)
+		return drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	}
+
+	for _, tc := range []struct {
+		name, token string
+		late        bool
+	}{
+		{"cancelled", "cancel", false},
+		{"late result", "late", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := build(tc.late)
+			var labelled bool
+			for _, e := range m.full {
+				if e.Method != "notifications/cancelled" {
+					continue
+				}
+				labelled = true
+				// Both sides, the word the row prints and the word status: selects by.
+				if got := m.streamCells(e).status; got != tc.token {
+					t.Fatalf("the cancellation row says %q, want %q", got, tc.token)
+				}
+				if !m.matchStatus(e, tc.token) {
+					t.Fatalf("the row says %q but status:%s does not select it", tc.token, tc.token)
+				}
+			}
+			if !labelled {
+				t.Fatal("the cancellation frame is missing from the timeline")
+			}
+		})
+	}
+}

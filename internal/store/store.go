@@ -34,6 +34,13 @@ const (
 	// Superseded means the request's id was reused by a later in-flight request, so
 	// this one can never be matched to a response. It is no longer pending.
 	Superseded
+	// Cancelled means a notifications/cancelled named this request, so it settled
+	// without the answer the caller wanted. It is no longer pending, and it is not
+	// an error, since the client stopping work on purpose is not something going
+	// wrong. Reachable on stdio only: on Streamable HTTP closing the response
+	// stream is itself the cancellation signal and, in the spec's words, "No
+	// notifications/cancelled message is required or expected", so mcpsnoop never
+	// sees one there.
 	Cancelled
 	// Streaming means a long-lived stream request (subscriptions/listen) whose
 	// response arrives only when the stream ends. It is open but not pending.
@@ -575,7 +582,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 				}]); note != "" {
 					ev.warning = appendWarning(ev.warning, note)
 				}
-				if c := sess.closeStreamingCall(id, e.ConnID, e.TS); c != nil {
+				if c := sess.closeStreamingCall(id, e.ConnID, e.TS, reason); c != nil {
 					ev.call = c
 				} else if c := sess.cancelCall(id, e.Direction, e.ConnID, e.TS, reason); c != nil {
 					ev.call = c
@@ -860,12 +867,33 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 		if c.lateResult {
 			return c, false
 		}
+		// The response to a torn-down subscription is the graceful closure the spec
+		// asks the server for, "it SHOULD respond to the original
+		// subscriptions/listen request with an empty result before closing the
+		// stream". That is the intended end of the exchange, so it is neither a
+		// late result nor the duplicate this branch used to report.
+		if c.method == "subscriptions/listen" {
+			c.end = ts
+			c.result = msg.Result
+			c.err = msg.Error
+			return c, true
+		}
 		c.end = ts
 		c.result = msg.Result
 		c.err = msg.Error
 		c.toolErr = isToolError(msg.Result)
+		// Late or not, an error is an error. Leaving errored false made a real
+		// -32603 arriving after a cancellation read as errors=0 and pass a default
+		// check run, which is the one thing the error axis exists to stop. The
+		// state stays Cancelled, because that is what happened to the call; the
+		// axis says what the answer contained.
+		c.errored = msg.Error != nil || c.toolErr
 		c.lateResult = true
 		sess.lateResults++
+		// The payload is still the server's answer, so what it declares has to
+		// land. Without this a late tools/list left the tool inventory empty and
+		// `check --fail-on drift` compared nothing and printed green.
+		sess.applyResponseSideEffects(c, msg)
 		return c, true
 	}
 	if c.state != Pending && c.state != Streaming {
@@ -912,6 +940,15 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 	if wasPending {
 		sess.pending--
 	}
+	sess.applyResponseSideEffects(c, msg)
+	return c, true
+}
+
+// applyResponseSideEffects folds a result into the session state it describes.
+// Shared by the ordinary path and the late one, because a response that arrived
+// after a cancellation is still the server's answer and still declares what the
+// server has.
+func (sess *session) applyResponseSideEffects(c *call, msg proxy.RPCMessage) {
 	switch c.method {
 	case "initialize":
 		sess.caps.applyResponse(msg.Result)
@@ -920,7 +957,6 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 	case "tools/list":
 		sess.applyToolsList(c.params, msg.Result)
 	}
-	return c, true
 }
 
 type taskState struct {
@@ -1488,9 +1524,22 @@ func cancelledRequest(params json.RawMessage) (string, string) {
 	return string(bytes.TrimSpace(p.RequestID)), p.Reason
 }
 
+// cancelCall settles a request the client gave up on. The key is built bare
+// rather than through requestCallKey because a cancellation naming a null id
+// could not say which of several such requests it meant, and #209 made those
+// deliberately unreachable by id alone.
 func (sess *session) cancelCall(id string, dir proxy.Direction, conn string, ts time.Time, reason string) *call {
 	c := sess.calls[callKey{dir: dir, id: id, conn: conn}]
 	if c == nil || c.state != Pending {
+		return nil
+	}
+	// A call whose result was a task handle is only nominally pending; the work
+	// continues under its taskId and its terminal state arrives through
+	// notifications/tasks. Taking it here settled the call early and threw that
+	// state away, so a task that ended failed reported errors=0. The spec puts
+	// this case among the cancellations a server may ignore, "Processing has
+	// already completed", and cancelling the work itself is tasks/cancel.
+	if c.taskID != "" {
 		return nil
 	}
 	c.state = Cancelled
@@ -1500,13 +1549,24 @@ func (sess *session) cancelCall(id string, dir proxy.Direction, conn string, ts 
 	return c
 }
 
-func (sess *session) closeStreamingCall(id, conn string, ts time.Time) *call {
+// closeStreamingCall settles the long-lived call a notifications/cancelled names.
+// It is only ever reached from that notification, so the outcome is a
+// cancellation rather than a completion, whoever sent it. A server tearing down a
+// subscription is the one cancellation the spec asks a server for, and a client
+// ending its own subscription on stdio sends the same notification. The graceful
+// empty result that a server SHOULD send afterwards arrives separately and is
+// handled in completeCall.
+//
+// No pending slot is released, because a Streaming call never took one.
+func (sess *session) closeStreamingCall(id, conn string, ts time.Time, reason string) *call {
 	for _, dir := range []proxy.Direction{proxy.ClientToServer, proxy.ServerToClient} {
 		key := callKey{dir: dir, id: id, conn: conn}
 		c := sess.calls[key]
 		if c != nil && c.state == Streaming {
 			c.end = ts
-			c.state = Completed
+			c.state = Cancelled
+			c.cancelledAt = ts
+			c.cancelReason = reason
 			return c
 		}
 	}
