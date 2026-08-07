@@ -196,6 +196,79 @@ func TestReusedRequestIdKeepsPendingCounterAndTimelineInSync(t *testing.T) {
 	}
 }
 
+func TestNullRequestIDsRemainDistinct(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	first := s.Ingest(req(1, t0, proxy.ClientToServer, "null", "tools/call", `{"name":"read_file"}`))
+	second := s.Ingest(req(2, t0.Add(time.Millisecond), proxy.ClientToServer, "null", "tools/call", `{"name":"write_file"}`))
+
+	want := "request id is null; MCP requires a string or integer id"
+	if first.Warning != want || second.Warning != want {
+		t.Fatalf("null id warnings = %q and %q, want %q", first.Warning, second.Warning, want)
+	}
+	if strings.Contains(second.Warning, "reuses an id") {
+		t.Fatalf("null ids must not be treated as reusable identifiers: %q", second.Warning)
+	}
+	response := s.Ingest(resp(3, t0.Add(2*time.Millisecond), proxy.ServerToClient, "null", `"error":{"code":-32700,"message":"parse error"}`))
+	if !strings.Contains(response.Warning, "no matching request") {
+		t.Fatalf("null response warning = %q, want an unmatched response", response.Warning)
+	}
+	if got := s.Sessions()[0].Pending; got != 2 {
+		t.Fatalf("pending = %d, want 2", got)
+	}
+	calls := s.Calls("s1")
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(calls))
+	}
+	if calls[0].State != Pending || calls[1].State != Pending {
+		t.Fatalf("null id calls should both remain pending: %+v", calls)
+	}
+	if calls[0].ToolName != "read_file" || calls[1].ToolName != "write_file" {
+		t.Fatalf("tool names = %q and %q", calls[0].ToolName, calls[1].ToolName)
+	}
+}
+
+func TestInvalidRequestIDTypesWarn(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+		want string
+	}{
+		{"string", `"abc"`, ""},
+		{"integer", "42", ""},
+		{"negative integer", "-7", ""},
+		// JSON has several spellings for one integer, and JSON Schema's own
+		// "integer" matches any number with a zero fractional part. A client whose
+		// serializer round-trips an id through a float is conforming, so judging the
+		// spelling rather than the value would warn on correct traffic.
+		{"integer written as a float", "1.0", ""},
+		{"integer written with an exponent", "1e3", ""},
+		{"integer past the safe range", "12345678901234567890", ""},
+		{"null", "null", "request id is null; MCP requires a string or integer id"},
+		{"fraction", "1.5", "request id 1.5 is not an integer; MCP requires a string or integer id"},
+		{"boolean", "true", "request id has type boolean; MCP requires a string or integer id"},
+		{"array", "[]", "request id has type array; MCP requires a string or integer id"},
+		{"object", "{}", "request id has type object; MCP requires a string or integer id"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := New()
+			ev := s.Ingest(req(1, time.Now(), proxy.ClientToServer, test.id, "ping", ""))
+			if ev.Warning != test.want {
+				t.Fatalf("warning = %q, want %q", ev.Warning, test.want)
+			}
+		})
+	}
+}
+
+func TestNullErrorResponseDoesNotUseRequestIDWarning(t *testing.T) {
+	s := New()
+	ev := s.Ingest(resp(1, time.Now(), proxy.ServerToClient, "null", `"error":{"code":-32700,"message":"parse error"}`))
+	if strings.Contains(ev.Warning, "request id") {
+		t.Fatalf("null error response got request warning %q", ev.Warning)
+	}
+}
+
 func TestSessionReportsSeqGapAsMissingFrames(t *testing.T) {
 	now := time.Now()
 
@@ -2092,5 +2165,26 @@ func TestTwoClientsThroughOneProxyKeepSeparateIDSpaces(t *testing.T) {
 	s2.Ingest(conn(req(1, t0, proxy.ClientToServer, "1", "tools/list", `{}`), "10.0.0.1:5001"))
 	if ev := s2.Ingest(conn(req(2, t0, proxy.ClientToServer, "1", "tools/list", `{}`), "10.0.0.1:5001")); ev.Warning == "" {
 		t.Fatal("one sender reusing an id in flight must still be reported")
+	}
+}
+
+// TestNullResultResponseNamesTheRealViolation. Separating null-id requests means
+// a null-id response matches none of them, and "response id has no matching
+// request" then sends the reader after a frame that is not missing. The result
+// carrying a null id is the actual violation, since the spec requires a result to
+// carry the same id as its request. An error response stays exempt, because the
+// spec lets one omit the id "in error cases where the ID could not be read due a
+// malformed request".
+func TestNullResultResponseNamesTheRealViolation(t *testing.T) {
+	s := New()
+	ev := s.Ingest(resp(1, time.Now(), proxy.ServerToClient, "null", `"result":{}`))
+	if !strings.Contains(ev.Warning, "result response id is null") {
+		t.Fatalf("warning = %q, want the null result id named", ev.Warning)
+	}
+
+	errored := New().Ingest(resp(1, time.Now(), proxy.ServerToClient, "null",
+		`"error":{"code":-32700,"message":"parse error"}`))
+	if strings.Contains(errored.Warning, "id is null") {
+		t.Fatalf("an error response may omit the id, got %q", errored.Warning)
 	}
 }

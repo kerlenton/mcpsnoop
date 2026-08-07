@@ -13,15 +13,16 @@ import (
 
 // CallView is an immutable snapshot of a correlated request/response pair.
 type CallView struct {
-	ID       string
-	Method   string
-	ReqDir   proxy.Direction
-	IsTool   bool
-	ToolName string
-	Params   json.RawMessage
-	Result   json.RawMessage
-	Err      *proxy.RPCError
-	ToolErr  bool // result.isError == true
+	RequestSeq uint64
+	ID         string
+	Method     string
+	ReqDir     proxy.Direction
+	IsTool     bool
+	ToolName   string
+	Params     json.RawMessage
+	Result     json.RawMessage
+	Err        *proxy.RPCError
+	ToolErr    bool // result.isError == true
 	// Errored is the "something went wrong" axis, distinct from Failed(): a
 	// cancelled task is Failed() (it delivered nothing) but not Errored (the user
 	// stopped it on purpose). The session error counter and the CI gate read this.
@@ -389,6 +390,7 @@ func (e *event) view(_ *session) EventView {
 
 func (c *call) view() CallView {
 	return CallView{
+		RequestSeq: c.requestSeq,
 		ID:         c.id,
 		Method:     c.method,
 		ReqDir:     c.reqDir,
