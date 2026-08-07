@@ -11,15 +11,15 @@ import (
 type SchemaFindingKind string
 
 const (
-	FindingNonObjectRoot   SchemaFindingKind = "nonObjectRoot"
+	FindingNonObjectRoot     SchemaFindingKind = "nonObjectRoot"
 	FindingNonDefaultDialect SchemaFindingKind = "nonDefaultDialect"
-	FindingOneOf           SchemaFindingKind = "oneOf"
-	FindingAnyOf           SchemaFindingKind = "anyOf"
-	FindingAllOf           SchemaFindingKind = "allOf"
-	FindingNot             SchemaFindingKind = "not"
-	FindingRef             SchemaFindingKind = "ref"
-	FindingExternalRef     SchemaFindingKind = "externalRef"
-	FindingUntypedProperty SchemaFindingKind = "untypedProperty"
+	FindingOneOf             SchemaFindingKind = "oneOf"
+	FindingAnyOf             SchemaFindingKind = "anyOf"
+	FindingAllOf             SchemaFindingKind = "allOf"
+	FindingNot               SchemaFindingKind = "not"
+	FindingRef               SchemaFindingKind = "ref"
+	FindingExternalRef       SchemaFindingKind = "externalRef"
+	FindingUntypedProperty   SchemaFindingKind = "untypedProperty"
 )
 
 // jsonSchema2020_12 is the dialect MCP defaults to when $schema is absent.
