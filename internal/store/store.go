@@ -270,6 +270,11 @@ type session struct {
 	// is parked here and Ingest drains it onto the tools/list response frame that
 	// carried the definitions.
 	paramHeaderInvalid []paramHeaderViolation
+	// schemaRootInvalid names tools whose inputSchema is not an object schema,
+	// with the reason in the words schemaRootViolation composed. Parked and
+	// drained the same way as paramHeaderInvalid so a partly paginated listing
+	// still reports the violation on the frame that carried it.
+	schemaRootInvalid []paramHeaderViolation
 
 	command []string
 	cwd     string
@@ -477,6 +482,16 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			}
 		}
 		sess.paramHeaderInvalid = nil
+		// A client validating a listing rejects the tool outright and never calls
+		// it, with nothing on the wire to say why, so this is the frame to say it
+		// on. The reason names what was actually there, since "the schema is wrong"
+		// leaves a reader bisecting a listing.
+		for _, invalid := range sess.schemaRootInvalid {
+			ev.warning = appendWarning(ev.warning,
+				"tool "+strconv.Quote(invalid.tool)+" advertises "+invalid.reason+
+					`, and 2026-07-28 requires one whose root type is "object"`)
+		}
+		sess.schemaRootInvalid = nil
 		if c != nil {
 			hint, cacheWarnings := sess.recordCacheFromResponse(c, msg.Result, e.TS)
 			if !hint.Empty() {
@@ -1232,6 +1247,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 	}
 
 	var invalidParamHeaderTools []paramHeaderViolation
+	var invalidSchemaRootTools []paramHeaderViolation
 	for _, rawTool := range r.Tools {
 		var tool struct {
 			Name string `json:"name"`
@@ -1294,6 +1310,18 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 		// they went. compactJSONLen already answers 0 for an absent field, which
 		// keeps the rule that no description weighs nothing rather than the two
 		// bytes of an empty one.
+		// Both schemas a tool can advertise are analysed and their kinds merged, so
+		// a dialect declared only on the outputSchema is not invisible. Only the
+		// inputSchema is judged against the root-object rule, since that is the only
+		// one the Tool definition constrains.
+		findings := mergeSchemaFindings(
+			analyzeInputSchema(schema, redacted),
+			analyzeOutputSchema(tool.OutputSchema, redacted))
+		if reason := schemaRootViolation(schema, redacted); reason != "" {
+			invalidSchemaRootTools = append(invalidSchemaRootTools,
+				paramHeaderViolation{tool: tool.Name, reason: reason})
+		}
+
 		sess.toolDefinitions[tool.Name] = ToolDefinition{
 			Name:         tool.Name,
 			Description:  description,
@@ -1302,18 +1330,20 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 			OutputSchema: append(json.RawMessage(nil), tool.OutputSchema...),
 			Annotations:  append(json.RawMessage(nil), tool.Annotations...),
 			Icons:        append(json.RawMessage(nil), tool.Icons...),
-			Findings:     analyzeSchema(schema, redacted),
+			Findings:     findings,
 			paramHeaders: paramHeaders,
 			Cost: ToolCost{
 				Name:             tool.Name,
 				Bytes:            compactJSONLen(rawTool),
 				DescriptionBytes: compactJSONLen(tool.Description),
 				SchemaBytes:      compactJSONLen(tool.InputSchema),
+				FindingKinds:     findingKinds(findings),
 			},
 		}
 	}
 	sess.toolListComplete = r.NextCursor == ""
 	sess.paramHeaderInvalid = append(sess.paramHeaderInvalid, invalidParamHeaderTools...)
+	sess.schemaRootInvalid = append(sess.schemaRootInvalid, invalidSchemaRootTools...)
 }
 
 // hasListCursor reports whether a tools/list request carries a pagination cursor,

@@ -63,10 +63,11 @@ type ToolListCostExport struct {
 }
 
 type ToolCostExport struct {
-	Name             string `json:"name"`
-	Bytes            int    `json:"bytes"`
-	DescriptionBytes int    `json:"description_bytes"`
-	SchemaBytes      int    `json:"schema_bytes"`
+	Name             string   `json:"name"`
+	Bytes            int      `json:"bytes"`
+	DescriptionBytes int      `json:"description_bytes"`
+	SchemaBytes      int      `json:"schema_bytes"`
+	Findings         []string `json:"findings,omitempty"`
 }
 
 type ToolStatsExport struct {
@@ -486,11 +487,16 @@ func exportToolListCost(cost store.ToolListCost) *ToolListCostExport {
 		PerTool:  make([]ToolCostExport, 0, len(cost.PerTool)),
 	}
 	for _, tool := range cost.PerTool {
+		findings := make([]string, 0, len(tool.FindingKinds))
+		for _, kind := range tool.FindingKinds {
+			findings = append(findings, string(kind))
+		}
 		out.PerTool = append(out.PerTool, ToolCostExport{
 			Name:             tool.Name,
 			Bytes:            tool.Bytes,
 			DescriptionBytes: tool.DescriptionBytes,
 			SchemaBytes:      tool.SchemaBytes,
+			Findings:         findings,
 		})
 	}
 	return out
@@ -955,6 +961,31 @@ func writeText(w io.Writer, data SessionExport) error {
 		len(data.Events), len(data.Calls), data.Session.Requests, data.Session.Responses, data.Session.Errors, data.Session.Pending, data.Session.LateResults)
 	if err != nil {
 		return err
+	}
+	if data.Summary.Definitions != nil && len(data.Summary.Definitions.PerTool) > 0 {
+		hasFindings := false
+		for _, tool := range data.Summary.Definitions.PerTool {
+			if len(tool.Findings) > 0 {
+				hasFindings = true
+				break
+			}
+		}
+		if hasFindings {
+			if _, err := fmt.Fprintln(w, "schema findings:"); err != nil {
+				return err
+			}
+			for _, tool := range data.Summary.Definitions.PerTool {
+				if len(tool.Findings) == 0 {
+					continue
+				}
+				if _, err := fmt.Fprintf(w, "  %s: %s\n", tool.Name, strings.Join(tool.Findings, ", ")); err != nil {
+					return err
+				}
+			}
+			if _, err := fmt.Fprintln(w); err != nil {
+				return err
+			}
+		}
 	}
 	for _, ev := range data.Events {
 		title := fmt.Sprintf("#%d %s %s %s", ev.Seq, ev.Timestamp.Format(time.RFC3339Nano), ev.Direction, ev.Kind)

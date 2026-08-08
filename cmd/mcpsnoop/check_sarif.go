@@ -288,6 +288,19 @@ func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 		}
 	}
 
+	// Looped over store.ObservationalSchemaKinds for the reason the drift loop
+	// above is looped over store.ToolDriftKinds: a kind the gate counts must not
+	// go unreported here. Anchored at the tools/list response, since that is the
+	// frame the schema was advertised on.
+	schemaLevel := b.level(checkSchema)
+	for _, kind := range store.ObservationalSchemaKinds {
+		for _, name := range summary.schema.Names(kind) {
+			b.add(sessionID, sarifRuleID(checkSchema), schemaLevel,
+				fmt.Sprintf("session %s: tool %q schema uses %s", sessionID, name, kind),
+				string(kind)+"/"+name, toolListSeq)
+		}
+	}
+
 	if summary.missingFrames > 0 {
 		// The dropped frames never reached the log, so there is no line to point at.
 		b.add(sessionID, sarifRuleID(checkIncomplete), b.level(checkIncomplete),
@@ -430,6 +443,10 @@ func checkSARIFSignalRule(signal checkSignal) (name, short, full, help string) {
 		return "DeprecatedFeature", "A frame uses a deprecated protocol feature",
 			"A frame uses a feature the MCP specification has deprecated. Nothing is broken today, but the feature is on its way out and the traffic will need changing.",
 			"The message names the feature and what replaced it. Nothing fails until the feature is removed, so this is a note unless deprecated is named in --fail-on."
+	case checkSchema:
+		return "SchemaFinding", "An advertised tool schema uses something that travels badly",
+			"A tool's inputSchema or outputSchema declares a dialect other than the 2020-12 the revision defaults to, or uses a composition keyword, a reference, or a property with no way of saying what it accepts. None of it is a violation, which is why it is not in the default gate; each one is a place two clients can read the same schema differently.",
+			"The result names the tool and what it uses. Nothing here is wrong on the wire, so treat it as portability rather than a bug: a schema that only your own client has to read can keep all of it. An inputSchema with no object root is the one real violation and is reported as a warning on the tools/list frame instead."
 	case checkIncomplete:
 		return "IncompleteCapture", "Frames were dropped, so the capture understates the session",
 			"Envelopes were dropped upstream, inferred from gaps in the per-session sequence numbers. Every other signal is then a floor rather than a total, because the dropped frames were never judged.",

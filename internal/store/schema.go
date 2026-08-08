@@ -15,16 +15,26 @@ type SchemaFindingKind string
 const (
 	// FindingNonObjectRoot is the one kind here that is a violation rather than
 	// an observation. Every other finding says a schema may travel badly; this
-	// one says a conforming client rejects the tool outright.
-	FindingNonObjectRoot   SchemaFindingKind = "nonObjectRoot"
-	FindingOneOf           SchemaFindingKind = "oneOf"
-	FindingAnyOf           SchemaFindingKind = "anyOf"
-	FindingAllOf           SchemaFindingKind = "allOf"
-	FindingNot             SchemaFindingKind = "not"
-	FindingRef             SchemaFindingKind = "ref"
-	FindingExternalRef     SchemaFindingKind = "externalRef"
-	FindingUntypedProperty SchemaFindingKind = "untypedProperty"
+	// one says a conforming client rejects the tool outright, so it is reported
+	// as a warning on the tools/list frame as well as here.
+	FindingNonObjectRoot SchemaFindingKind = "nonObjectRoot"
+	// FindingNonDefaultDialect is an observation like the rest. A schema may
+	// declare any dialect it likes; saying so only means a client has to read it
+	// as that dialect rather than the 2020-12 the revision defaults to.
+	FindingNonDefaultDialect SchemaFindingKind = "nonDefaultDialect"
+	FindingOneOf             SchemaFindingKind = "oneOf"
+	FindingAnyOf             SchemaFindingKind = "anyOf"
+	FindingAllOf             SchemaFindingKind = "allOf"
+	FindingNot               SchemaFindingKind = "not"
+	FindingRef               SchemaFindingKind = "ref"
+	FindingExternalRef       SchemaFindingKind = "externalRef"
+	FindingUntypedProperty   SchemaFindingKind = "untypedProperty"
 )
+
+// jsonSchema2020_12 is the dialect the 2026-07-28 Tool definition defaults to,
+// "Defaults to JSON Schema 2020-12 when no explicit `$schema` is provided", so a
+// schema that declares nothing declares this.
+const jsonSchema2020_12 = "https://json-schema.org/draft/2020-12/schema"
 
 // SchemaFindingKinds is every kind analyzeSchema can report, in the order the
 // constants declare them. Exported for the same reason ToolDriftKinds is: a
@@ -32,6 +42,7 @@ const (
 // way to notice a kind added here, and would show the raw enum name for it.
 var SchemaFindingKinds = []SchemaFindingKind{
 	FindingNonObjectRoot,
+	FindingNonDefaultDialect,
 	FindingOneOf,
 	FindingAnyOf,
 	FindingAllOf,
@@ -41,26 +52,55 @@ var SchemaFindingKinds = []SchemaFindingKind{
 	FindingUntypedProperty,
 }
 
+// ObservationalSchemaKinds are the kinds that never fail check unless the schema
+// signal is selected. It is SchemaFindingKinds minus the one violation, which
+// reaches the default gate as a warning on the frame that advertised the tool.
+var ObservationalSchemaKinds = SchemaFindingKinds[1:]
+
+// IsObservationalSchemaKind reports whether a kind is an observation rather than
+// the violation.
+func IsObservationalSchemaKind(kind SchemaFindingKind) bool {
+	return kind != FindingNonObjectRoot
+}
+
 type SchemaFinding struct {
 	Kind SchemaFindingKind
 }
 
-// analyzeSchema reports the constructs a tool's advertised input schema uses
-// that are known to travel badly. Nothing is resolved or fetched: an external
-// $ref is recognized by its form alone.
+// analyzeInputSchema reports what is worth knowing about a tool's inputSchema,
+// the root-object rule included, since that one is a rule only inputSchema has.
+func analyzeInputSchema(raw json.RawMessage, redacted bool) []SchemaFinding {
+	return analyzeSchema(raw, redacted, true)
+}
+
+// analyzeOutputSchema reports the same, minus the root-object rule. On
+// 2026-07-28 the outputSchema entry carries no "required" and no const on its
+// type, and the Tools page shows an array-rooted outputSchema in its list_users
+// example, so a root that is not an object is legal there. An absent
+// outputSchema is nothing at all, since the field is optional.
+func analyzeOutputSchema(raw json.RawMessage, redacted bool) []SchemaFinding {
+	if len(raw) == 0 {
+		return nil
+	}
+	return analyzeSchema(raw, redacted, false)
+}
+
+// analyzeSchema reports the constructs a tool's advertised schema uses that are
+// known to travel badly. Nothing is resolved or fetched: an external $ref is
+// recognized by its form alone.
 //
 // Findings are deduplicated by kind. A finding carries only its kind, so two
 // entries of the same kind are indistinguishable and add nothing; collapsing
 // them lets a caller treat "more than one finding" as "more than one kind of
 // problem", which is the question a reader actually has.
-func analyzeSchema(raw json.RawMessage, redacted bool) []SchemaFinding {
+func analyzeSchema(raw json.RawMessage, redacted, checkRoot bool) []SchemaFinding {
 	var findings []SchemaFinding
-	seen := make(map[SchemaFindingKind]bool, 8)
+	seen := make(map[SchemaFindingKind]bool, len(SchemaFindingKinds))
 
 	// First, so the violation leads the list the walk order would otherwise
 	// decide. A rootless schema still gets walked, because naming the construct
 	// it uses is worth having next to the reason a client refused it.
-	if schemaRootViolation(raw, redacted) != "" {
+	if checkRoot && schemaRootViolation(raw, redacted) != "" {
 		addFinding(&findings, seen, FindingNonObjectRoot)
 	}
 
@@ -73,8 +113,39 @@ func analyzeSchema(raw json.RawMessage, redacted bool) []SchemaFinding {
 		return findings
 	}
 
-	walkSchema(v, &findings, seen)
+	if declaresNonDefaultDialect(v, redacted) {
+		addFinding(&findings, seen, FindingNonDefaultDialect)
+	}
+	walkSchema(v, &findings, seen, redacted)
 	return findings
+}
+
+// declaresNonDefaultDialect reports whether the schema names a $schema other
+// than the 2020-12 the revision defaults to. Declaring one is legal, so this is
+// an observation: it says a client has to read the document as that dialect, and
+// a client that does not is reading it as something else.
+//
+// A scrubbed $schema is not a dialect. Reading the placeholder as one would
+// report a conforming server for the user's own redaction, the same way reading
+// a scrubbed root type as a missing one did.
+func declaresNonDefaultDialect(v any, redacted bool) bool {
+	node, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	uri, ok := node["$schema"].(string)
+	if !ok || uri == "" {
+		return false
+	}
+	// partlyRedacted rather than an equality test: a value rule rewrites a match in
+	// place, so scrubbing a hostname out of a $schema leaves a URI that is still
+	// mostly the server's and no longer the dialect it named.
+	if partlyRedacted(redacted, uri) {
+		return false
+	}
+	// The trailing "#" is the empty fragment, which names the same document, and
+	// both spellings are in the wild.
+	return strings.TrimSuffix(uri, "#") != jsonSchema2020_12
 }
 
 // schemaRootViolation reports how a tool's inputSchema fails the root-object
@@ -177,7 +248,7 @@ func isTyped(schema map[string]any) bool {
 	return false
 }
 
-func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]bool) {
+func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]bool, redacted bool) {
 	node, ok := v.(map[string]any)
 	if !ok {
 		return
@@ -200,8 +271,13 @@ func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]boo
 		// A reference starting with # points inside this document. Anything else
 		// points outside it, which is both a portability problem and the case the
 		// spec warns implementers not to follow blindly.
+		//
+		// A scrubbed reference is reported as the internal kind. The placeholder
+		// does not start with #, so classifying by the bytes would promote every
+		// redacted reference to the scarier verdict, on a capture that cannot show
+		// which one it was.
 		kind := FindingExternalRef
-		if strings.HasPrefix(ref, "#") {
+		if strings.HasPrefix(ref, "#") || partlyRedacted(redacted, ref) {
 			kind = FindingRef
 		}
 		addFinding(findings, seen, kind)
@@ -213,7 +289,7 @@ func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]boo
 				if !isTyped(schema) {
 					addFinding(findings, seen, FindingUntypedProperty)
 				}
-				walkSchema(schema, findings, seen)
+				walkSchema(schema, findings, seen, redacted)
 			}
 		}
 	}
@@ -222,7 +298,7 @@ func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]boo
 	for _, key := range []string{"oneOf", "anyOf", "allOf", "prefixItems"} {
 		if arr, ok := node[key].([]any); ok {
 			for _, child := range arr {
-				walkSchema(child, findings, seen)
+				walkSchema(child, findings, seen, redacted)
 			}
 		}
 	}
@@ -231,7 +307,7 @@ func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]boo
 	// is just as real as one at the top, so the walk has to reach them.
 	for _, key := range []string{"not", "items", "additionalProperties", "if", "then", "else", "contains", "propertyNames"} {
 		if child, ok := node[key]; ok {
-			walkSchema(child, findings, seen)
+			walkSchema(child, findings, seen, redacted)
 		}
 	}
 
@@ -239,8 +315,40 @@ func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]boo
 	for _, key := range []string{"$defs", "definitions", "patternProperties", "dependentSchemas"} {
 		if group, ok := node[key].(map[string]any); ok {
 			for _, child := range group {
-				walkSchema(child, findings, seen)
+				walkSchema(child, findings, seen, redacted)
 			}
 		}
 	}
+}
+
+// mergeSchemaFindings appends the kinds of extra that base does not already
+// carry, so a tool's findings stay one entry per kind across the two schemas it
+// can advertise.
+func mergeSchemaFindings(base, extra []SchemaFinding) []SchemaFinding {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[SchemaFindingKind]bool, len(base)+len(extra))
+	for _, f := range base {
+		seen[f.Kind] = true
+	}
+	for _, f := range extra {
+		if seen[f.Kind] {
+			continue
+		}
+		seen[f.Kind] = true
+		base = append(base, f)
+	}
+	return base
+}
+
+// findingKinds is the kinds present in findings, in the order they were found.
+// Named for what it returns rather than for the type, since SchemaFindingKinds
+// is the list of every kind that exists.
+func findingKinds(findings []SchemaFinding) []SchemaFindingKind {
+	kinds := make([]SchemaFindingKind, 0, len(findings))
+	for _, f := range findings {
+		kinds = append(kinds, f.Kind)
+	}
+	return kinds
 }

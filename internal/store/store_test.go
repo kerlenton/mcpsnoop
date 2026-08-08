@@ -1290,7 +1290,7 @@ func TestToolDefinitionsCaptureDescriptionsSchemasAndCompletePagination(t *testi
 	}
 
 	s.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/list", `{"cursor":"p2"}`))
-	s.Ingest(resp(4, t0, proxy.ServerToClient, "2", `"result":{"tools":[{"name":"fetch","description":"Fetch a page","inputSchema":{"type":"object","oneOf":[{"type":"object"},{"type":"string"}]}}]}`))
+	s.Ingest(resp(4, t0, proxy.ServerToClient, "2", `"result":{"tools":[{"name":"fetch","description":"Fetch a page","inputSchema":{"type":"object","properties":{"url":{"oneOf":[{"type":"object"},{"type":"string"}]}}}}]}`))
 
 	definitions, ok := s.ToolDefinitions("s1")
 	if !ok {
@@ -1311,6 +1311,53 @@ func TestToolDefinitionsCaptureDescriptionsSchemasAndCompletePagination(t *testi
 	got := definitions[1].Findings
 	if len(got) != 1 || got[0].Kind != FindingOneOf {
 		t.Fatalf("fetch findings = %v, want one oneOf finding", got)
+	}
+}
+
+func TestNonObjectRootInputSchemaWarnsOnToolsList(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", ""))
+	s.Ingest(resp(2, t0, proxy.ServerToClient, "1",
+		`"result":{"tools":[{"name":"read_file","description":"Read a file","inputSchema":{"$schema":"http://json-schema.org/draft-07/schema#"}}]}`))
+
+	events := s.Timeline("s1")
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2", len(events))
+	}
+	// The reason names what was actually on the wire. "the schema is wrong" would
+	// leave a reader bisecting a listing, which is the cost issue #199 measured in
+	// weeks.
+	for _, want := range []string{`tool "read_file" advertises`, "no root type", `root type is "object"`} {
+		if !strings.Contains(events[1].Warning, want) {
+			t.Fatalf("warning = %q, want it to mention %q", events[1].Warning, want)
+		}
+	}
+	definitions, ok := s.ToolDefinitions("s1")
+	if !ok || len(definitions) != 1 {
+		t.Fatalf("definitions = %+v, ok=%v", definitions, ok)
+	}
+	found := false
+	for _, f := range definitions[0].Findings {
+		if f.Kind == FindingNonObjectRoot {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("findings = %v, want nonObjectRoot", definitions[0].Findings)
+	}
+}
+
+func TestNonObjectRootOnPartialToolsListStillWarns(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", ""))
+	s.Ingest(resp(2, t0, proxy.ServerToClient, "1",
+		`"result":{"tools":[{"name":"read_file","inputSchema":{}}],"nextCursor":"p2"}`))
+
+	events := s.Timeline("s1")
+	if !strings.Contains(events[1].Warning, `tool "read_file" advertises an inputSchema with no root type`) {
+		t.Fatalf("warning = %q, want the root violation on a partial listing", events[1].Warning)
 	}
 }
 

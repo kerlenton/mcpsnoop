@@ -1609,6 +1609,8 @@ func (m Model) summaryContent() string {
 // non-object root leads because it is the only entry here that is a violation
 // rather than an observation: the others say a schema may be read differently
 // across clients, that one says a conforming client refuses the tool outright.
+// A non-default dialect comes next because it changes how every keyword below it
+// is read, so it frames the rest rather than sitting beside them.
 // An external reference follows because it points outside the wire entirely,
 // which is both the least portable case and the one the spec warns implementers
 // about. The composition keywords come next, then an internal reference, then an
@@ -1616,6 +1618,7 @@ func (m Model) summaryContent() string {
 // carries the meaning a type would.
 var schemaHeadlineOrder = []store.SchemaFindingKind{
 	store.FindingNonObjectRoot,
+	store.FindingNonDefaultDialect,
 	store.FindingExternalRef,
 	store.FindingOneOf,
 	store.FindingAnyOf,
@@ -1645,6 +1648,8 @@ func schemaKindLabel(k store.SchemaFindingKind) string {
 	switch k {
 	case store.FindingNonObjectRoot:
 		return "no root"
+	case store.FindingNonDefaultDialect:
+		return "dialect"
 	case store.FindingExternalRef:
 		return "ext ref"
 	case store.FindingUntypedProperty:

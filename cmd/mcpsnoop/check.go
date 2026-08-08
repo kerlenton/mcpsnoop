@@ -24,9 +24,10 @@ const (
 	checkDrift      checkSignal = "drift"
 	checkDeprecated checkSignal = "deprecated"
 	checkIncomplete checkSignal = "incomplete"
+	checkSchema     checkSignal = "schema"
 )
 
-var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLateResult, checkDrift, checkDeprecated, checkIncomplete}
+var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLateResult, checkDrift, checkDeprecated, checkIncomplete, checkSchema}
 
 type checkOutputFormat string
 
@@ -47,6 +48,7 @@ type checkSummary struct {
 	deprecated      int
 	missingFrames   uint64
 	drift           store.ToolDrift
+	schema          store.SchemaReport
 	baselineCreated bool
 }
 
@@ -115,8 +117,8 @@ func newCheckCmd() *cobra.Command {
 				}
 			default:
 				for i, summary := range summaries {
-					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d late_results=%d deprecated=%d missing_frames=%d\n",
-						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.lateResults, summary.deprecated, summary.missingFrames)
+					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d late_results=%d deprecated=%d missing_frames=%d schema_findings=%d\n",
+						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.lateResults, summary.deprecated, summary.missingFrames, summary.schema.Count())
 					if summary.baselineCreated {
 						// No baseline existed, so this run trusted the current definitions
 						// rather than verifying them. Say so, or an ephemeral CI reads green
@@ -130,6 +132,9 @@ func newCheckCmd() *cobra.Command {
 						fmt.Fprintln(cmd.OutOrStdout(), "tool baseline error:", summary.drift.BaselineError)
 					} else if !summary.drift.Empty() {
 						writeToolDrift(cmd.OutOrStdout(), summary.drift)
+					}
+					if !summary.schema.Empty() {
+						writeSchemaFindings(cmd.OutOrStdout(), summary.schema)
 					}
 					if failed := summary.failed(signals); len(failed) > 0 {
 						fmt.Fprintf(cmd.OutOrStdout(), "check failed: %s\n", strings.Join(failed, ","))
@@ -151,7 +156,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().SortFlags = false
-	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, late-result, drift, deprecated, incomplete")
+	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, late-result, drift, deprecated, incomplete, schema")
 	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text, junit, or sarif")
 	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
 	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this duration (e.g. 500ms), disabled when zero")
@@ -230,10 +235,10 @@ func parseCheckSignals(value string) (map[checkSignal]bool, error) {
 	for _, part := range strings.Split(value, ",") {
 		signal := checkSignal(strings.TrimSpace(part))
 		switch signal {
-		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLateResult, checkDrift, checkDeprecated, checkIncomplete:
+		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLateResult, checkDrift, checkDeprecated, checkIncomplete, checkSchema:
 			signals[signal] = true
 		default:
-			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, late-result, drift, deprecated, or incomplete, got %q", part)
+			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, late-result, drift, deprecated, incomplete, or schema, got %q", part)
 		}
 	}
 	return signals, nil
@@ -323,6 +328,9 @@ func summarizeCheck(st *store.Store, baselines *toolbaseline.Manager) []checkSum
 				summary.baselineCreated = created
 			}
 		}
+		if report, ok := st.SchemaFindings(header.ID); ok {
+			summary.schema = report
+		}
 		for _, event := range st.Timeline(header.ID) {
 			if event.Kind == store.EventInvalid {
 				summary.invalid++
@@ -377,6 +385,8 @@ func (s checkSummary) count(signal checkSignal) int {
 		return s.deprecated
 	case checkIncomplete:
 		return int(s.missingFrames)
+	case checkSchema:
+		return s.schema.Count()
 	default:
 		return 0
 	}

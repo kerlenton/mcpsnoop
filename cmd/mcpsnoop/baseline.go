@@ -104,6 +104,15 @@ func writeToolDrift(w io.Writer, report store.ToolDrift) {
 	}
 }
 
+func writeSchemaFindings(w io.Writer, report store.SchemaReport) {
+	fmt.Fprintln(w, "schema findings:")
+	for _, kind := range store.ObservationalSchemaKinds {
+		if names := report.Names(kind); len(names) > 0 {
+			fmt.Fprintf(w, "  %s: %s\n", kind, strings.Join(names, ", "))
+		}
+	}
+}
+
 // driftLabel is the per-line phrasing, singular, since it precedes tool names.
 func driftLabel(kind store.ToolDriftKind) string {
 	switch kind {

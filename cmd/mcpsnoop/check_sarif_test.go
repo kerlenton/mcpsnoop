@@ -54,7 +54,7 @@ func TestCheckSARIFCleanSessionDeclaresEveryRuleAndNoResults(t *testing.T) {
 	want := []string{
 		"mcpsnoop/error", "mcpsnoop/invalid", "mcpsnoop/warn", "mcpsnoop/mismatch",
 		"mcpsnoop/pending", "mcpsnoop/late-result", "mcpsnoop/drift", "mcpsnoop/deprecated",
-		"mcpsnoop/incomplete",
+		"mcpsnoop/incomplete", "mcpsnoop/schema",
 		"mcpsnoop/assertion", "mcpsnoop/report-truncated",
 	}
 	if len(driver.Rules) != len(want) {
@@ -722,6 +722,8 @@ func checkTextCountField(signal checkSignal) string {
 		return "late_results"
 	case checkIncomplete:
 		return "missing_frames"
+	case checkSchema:
+		return "schema_findings"
 	case checkError:
 		return "errors"
 	}
@@ -755,8 +757,12 @@ func everySignalEnvelopes() []proxy.Envelope {
 		// deprecated: logging, which 2026-07-28 retired in favour of stderr.
 		checkEnvelope(11, proxy.ClientToServer, `{"jsonrpc":"2.0","id":5,"method":"logging/setLevel","params":{"level":"debug"}}`),
 		checkEnvelope(12, proxy.ServerToClient, `{"jsonrpc":"2.0","id":5,"result":{}}`),
+		// schema: an advertised tool whose input schema uses a composition keyword,
+		// which travels badly across clients without being wrong.
+		checkEnvelope(13, proxy.ClientToServer, `{"jsonrpc":"2.0","id":6,"method":"tools/list"}`),
+		checkEnvelope(14, proxy.ServerToClient, `{"jsonrpc":"2.0","id":6,"result":{"tools":[{"name":"search","inputSchema":{"type":"object","properties":{"q":{"oneOf":[{"type":"string"},{"type":"integer"}]}}}}]}}`),
 		// pending: a call still open when the capture ends.
-		checkEnvelope(13, proxy.ClientToServer, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"hang"}}`),
+		checkEnvelope(15, proxy.ClientToServer, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"hang"}}`),
 	}
 }
 
