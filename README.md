@@ -362,7 +362,7 @@ leave the capture incomplete, tool-definition drift, or use of deprecated
 protocol features.
 
 ```bash
-mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,late-result,drift,deprecated,incomplete] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit|sarif] [--fail-on error,invalid,warn,mismatch,pending,late-result,drift,deprecated,incomplete] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
@@ -397,6 +397,24 @@ definition remain observational only. Existing key- and value-based redaction
 also applies to captured parameter-header values before they reach a sink.
 Use `--format junit` to write one JUnit `<testcase>` per signal and session;
 failures follow the same `--fail-on` selection as the text output.
+Use `--format sarif` to write a SARIF 2.1.0 log instead. Where junit reports one
+aggregate per signal, SARIF reports one result per finding, carrying the session,
+the frame `Seq` and the frame's own warning or drift text, and pointing at the
+line of the log the frame was decoded from. A signal named in `--fail-on` is
+reported at level `error` and one outside it at level `note`, so the report and
+the gate never disagree. Code scanning rejects a file whose run holds more than
+25,000 results and displays only the top 5,000 of what it accepts, so the report
+is capped at 5,000: the findings the gate failed on first, then a
+`mcpsnoop/report-truncated` result saying how many were left out. The text and
+junit formats stay complete.
+
+A result points at the log with a path relative to the working directory, which
+code scanning then resolves against the repository root. The alert renders with
+its surrounding lines only when that path is a file in the analysed commit, so a
+capture the workflow generated into `artifacts/` opens an alert carrying the
+message, the rule and the line number but no source view. Committing a capture
+you want rendered in full is the only way to get one. A log read from the state
+directory or from stdin gets no path at all.
 
 ```bash
 mcpsnoop check build-agent
@@ -429,6 +447,34 @@ mcpsnoop check --expect-tool search --forbid-tool delete --max-duration 2s run.j
   with:
     name: mcpsnoop-junit
     path: test-results/mcpsnoop.xml
+```
+
+To put the findings in the Security tab instead, hand the SARIF log to
+`upload-sarif`. The job needs `security-events: write`, or the upload answers
+403. `check` exits non-zero on a finding, so the upload step needs `if: always()`
+to run at all on the runs that have something to report; `continue-on-error`
+hands the verdict to the code scanning check, which fails on an `error`-level
+alert and can be made a required check. Drop it if you would rather the check
+step itself be what turns the job red.
+
+```yaml
+permissions:
+  # required for all workflows
+  security-events: write
+  # only required for workflows in private repositories
+  actions: read
+  contents: read
+
+steps:
+- name: Check captured MCP session
+  continue-on-error: true
+  run: mcpsnoop check --format sarif artifacts/session.jsonl > mcpsnoop.sarif
+- name: Upload mcpsnoop SARIF report
+  if: always()
+  uses: github/codeql-action/upload-sarif@v4
+  with:
+    sarif_file: mcpsnoop.sarif
+    category: mcpsnoop
 ```
 
 ### Detect tool definition drift

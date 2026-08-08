@@ -110,6 +110,19 @@ type EventView struct {
 	Call              *CallView // set for request/response events
 	TaskCall          *CallView // originating call for a tasks/* lifecycle frame
 	TaskID            string
+	// Errored marks a frame this session counted an error on, so a reporter can
+	// name the frames the Errors total came from. It is the frame to point a
+	// reader at: a transport failure and an unmatched error response have no
+	// Call, and a task failure lands on its terminal frame while Call.Errored,
+	// read off a live call, would retroactively mark that call's first response
+	// instead. Every counted error marks a frame; one frame that raises the count
+	// twice still marks once, so the marked frames are where the count came from
+	// rather than a running tally of it.
+	Errored bool
+	// LateResult marks the frame this session counted a late result on, one per
+	// LateResults. Call.LateResult says the call ever got one, which stays true
+	// for the rest of the capture and is visible from the request frame too.
+	LateResult bool
 	// MRTRRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised (SEP-2322). Empty on an ordinary request.
 	MRTRRoot string
@@ -385,6 +398,8 @@ func (e *event) view(_ *session) EventView {
 		TaskID:             e.taskID,
 		MRTRRoot:           e.mrtrRoot,
 		MRTRStateIssue:     e.mrtrStateIssue,
+		Errored:            e.errored,
+		LateResult:         e.lateResult,
 	}
 	if e.call != nil {
 		cv := e.call.view()

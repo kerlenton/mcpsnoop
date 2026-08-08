@@ -33,6 +33,7 @@ type checkOutputFormat string
 const (
 	checkFormatText  checkOutputFormat = "text"
 	checkFormatJUnit checkOutputFormat = "junit"
+	checkFormatSARIF checkOutputFormat = "sarif"
 )
 
 type checkSummary struct {
@@ -74,11 +75,12 @@ func newCheckCmd() *cobra.Command {
 			if len(args) == 1 {
 				arg = args[0]
 			}
-			st, _, err := loadCheckSession(cmd, arg)
+			sessionLog, err := loadCheckSession(cmd, arg, format.needsLineIndex())
 			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
 				return exitCode(1)
 			}
+			st := sessionLog.store
 
 			summaries := summarizeCheck(st, toolbaseline.New(resolveBaselineDir(baselineDir)))
 			anyFailed := false
@@ -94,7 +96,8 @@ func newCheckCmd() *cobra.Command {
 				}
 			}
 
-			if format == checkFormatJUnit {
+			switch format {
+			case checkFormatJUnit:
 				if err := writeCheckJUnit(cmd.OutOrStdout(), summaries, signals, assertionFailures); err != nil {
 					fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
 					return exitCode(1)
@@ -102,7 +105,15 @@ func newCheckCmd() *cobra.Command {
 				if checkFailed(summaries, signals) {
 					anyFailed = true
 				}
-			} else {
+			case checkFormatSARIF:
+				if err := writeCheckSARIF(cmd.OutOrStdout(), sessionLog, summaries, signals, assertionFailures); err != nil {
+					fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
+					return exitCode(1)
+				}
+				if checkFailed(summaries, signals) {
+					anyFailed = true
+				}
+			default:
 				for i, summary := range summaries {
 					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d late_results=%d deprecated=%d missing_frames=%d\n",
 						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.lateResults, summary.deprecated, summary.missingFrames)
@@ -141,7 +152,7 @@ func newCheckCmd() *cobra.Command {
 	}
 	cmd.Flags().SortFlags = false
 	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, late-result, drift, deprecated, incomplete")
-	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text or junit")
+	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text, junit, or sarif")
 	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
 	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this duration (e.g. 500ms), disabled when zero")
 	cmd.Flags().StringArrayVar(&assertions.expectTools, "expect-tool", nil, "fail if this tool was never called, repeatable")
@@ -234,20 +245,57 @@ func parseCheckOutputFormat(value string) (checkOutputFormat, error) {
 		return checkFormatText, nil
 	case checkFormatJUnit:
 		return checkFormatJUnit, nil
+	case checkFormatSARIF:
+		return checkFormatSARIF, nil
 	default:
-		return "", fmt.Errorf("--format must be text or junit, got %q", value)
+		return "", fmt.Errorf("--format must be text, junit, or sarif, got %q", value)
 	}
 }
 
-func loadCheckSession(cmd *cobra.Command, arg string) (*store.Store, string, error) {
+// needsLineIndex reports whether a format points a reader at one line of the
+// log, which is the only thing the per-frame index is for. It costs a map entry
+// per captured frame held for the whole run, so a format that reports per
+// session rather than per frame must not pay for it.
+func (f checkOutputFormat) needsLineIndex() bool { return f == checkFormatSARIF }
+
+// checkLog is a loaded session log plus where it came from. A SARIF result has
+// to point at a file and a line, which neither the text nor the junit format
+// ever needed, so the path and the per-frame line index travel beside the store.
+// Both are empty for a stdin run, which has no artifact to point at.
+type checkLog struct {
+	store     *store.Store
+	sessionID string
+	path      string
+	lines     exporter.FrameLines
+}
+
+// loadCheckSession reads the log a check or baseline run judges. withLines asks
+// for the per-frame line index, which only a caller that has to name a line
+// needs and which retains one map entry per captured frame until the run ends.
+func loadCheckSession(cmd *cobra.Command, arg string, withLines bool) (checkLog, error) {
 	if arg == "-" {
-		return exporter.Load(cmd.InOrStdin(), "stdin")
+		st, sessionID, err := exporter.Load(cmd.InOrStdin(), "stdin")
+		if err != nil {
+			return checkLog{}, err
+		}
+		return checkLog{store: st, sessionID: sessionID}, nil
 	}
 	path, err := exporter.ResolveSessionPath(arg)
 	if err != nil {
-		return nil, "", err
+		return checkLog{}, err
 	}
-	return exporter.LoadFile(path)
+	if !withLines {
+		st, sessionID, err := exporter.LoadFile(path)
+		if err != nil {
+			return checkLog{}, err
+		}
+		return checkLog{store: st, sessionID: sessionID, path: path}, nil
+	}
+	st, sessionID, lines, err := exporter.LoadFileLines(path)
+	if err != nil {
+		return checkLog{}, err
+	}
+	return checkLog{store: st, sessionID: sessionID, path: path, lines: lines}, nil
 }
 
 // summarizeCheck counts each signal for every session in the store, so a

@@ -263,15 +263,60 @@ func LoadFile(path string) (*store.Store, string, error) {
 	return Load(f, path)
 }
 
-// Load reads a JSONL envelope stream into a store and returns its first session.
-func Load(r io.Reader, source string) (*store.Store, string, error) {
-	return load(r, source, proxy.RedactConfig{})
+// LoadFileLines is LoadFile plus the log line every envelope was decoded from,
+// for a caller that has to point a reader at one specific frame of the file.
+func LoadFileLines(path string) (*store.Store, string, FrameLines, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	defer f.Close()
+	lines := make(FrameLines)
+	st, sessionID, err := load(f, path, proxy.RedactConfig{}, lines)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return st, sessionID, lines, nil
 }
 
-func load(r io.Reader, source string, redaction proxy.RedactConfig) (*store.Store, string, error) {
+// FrameRef identifies one captured envelope inside a log. Seq alone would not:
+// it restarts per session, and a concatenated capture holds several.
+type FrameRef struct {
+	SessionID string
+	Seq       uint64
+}
+
+// FrameLines maps a captured envelope to the 1-based line of the log it was
+// decoded from. Seq cannot stand in for that line, because it is scoped per
+// session and skips the frames dropped upstream, so the two diverge in exactly
+// the captures worth pointing a reader at.
+type FrameLines map[FrameRef]int
+
+// Line returns the 1-based log line a frame was decoded from. ok is false for a
+// frame this index never saw, and for every frame of a stream that was not
+// loaded through LoadFileLines.
+func (f FrameLines) Line(sessionID string, seq uint64) (int, bool) {
+	line, ok := f[FrameRef{SessionID: sessionID, Seq: seq}]
+	return line, ok
+}
+
+// Load reads a JSONL envelope stream into a store and returns its first session.
+func Load(r io.Reader, source string) (*store.Store, string, error) {
+	return load(r, source, proxy.RedactConfig{}, nil)
+}
+
+// load folds a JSONL envelope stream into a store. When lines is non-nil it is
+// filled with the log line each envelope came from, which costs a wrapping
+// reader, so the callers that do not need it pass nil.
+func load(r io.Reader, source string, redaction proxy.RedactConfig, lines FrameLines) (*store.Store, string, error) {
 	st := store.New()
 	redactor := proxy.NewRedactor(redaction)
 	var firstSession string
+	var counter *newlineCounter
+	if lines != nil {
+		counter = &newlineCounter{r: r}
+		r = counter
+	}
 	dec := json.NewDecoder(r)
 	for {
 		var env proxy.Envelope
@@ -284,12 +329,64 @@ func load(r io.Reader, source string, redaction proxy.RedactConfig) (*store.Stor
 		if firstSession == "" {
 			firstSession = env.SessionID
 		}
+		if counter != nil {
+			// InputOffset lands just past the envelope's closing brace, so it names
+			// the line the value ended on. The proxy writes one compact envelope per
+			// line, so that is also the line it started on.
+			lines[FrameRef{SessionID: env.SessionID, Seq: env.Seq}] = counter.lineAt(dec.InputOffset())
+		}
 		st.Ingest(redactor.RedactEnvelope(env))
 	}
 	if firstSession == "" {
 		return nil, "", fmt.Errorf("%s: no envelopes found", source)
 	}
 	return st, firstSession, nil
+}
+
+// newlineCounter records where every newline fell in the stream, so a decoded
+// value's byte offset can be turned back into a line number. A running count
+// kept alongside Decode would be wrong: json.Decoder buffers ahead of the value
+// it hands back, so by the time Decode returns the reader has usually already
+// consumed the lines that follow.
+type newlineCounter struct {
+	r    io.Reader
+	read int64 // bytes pulled from r so far
+	// offsets holds the newlines not yet walked past, next indexes the first of
+	// them, and passed counts the ones already behind us.
+	offsets []int64
+	next    int
+	passed  int
+}
+
+func (c *newlineCounter) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	for i, b := range p[:n] {
+		if b == '\n' {
+			c.offsets = append(c.offsets, c.read+int64(i))
+		}
+	}
+	c.read += int64(n)
+	return n, err
+}
+
+// lineAt returns the 1-based line containing the byte before offset, which is
+// where a decoded value ends. Offsets must arrive in non-decreasing order, which
+// a single forward pass over the stream guarantees.
+func (c *newlineCounter) lineAt(offset int64) int {
+	for c.next < len(c.offsets) && c.offsets[c.next] < offset {
+		c.next++
+		c.passed++
+	}
+	// The offsets already walked past are dropped on every call rather than only
+	// when the buffer happens to drain, which a json.Decoder reading ahead of the
+	// value it returns almost never leaves true: a long capture kept one entry per
+	// line for the whole load. What remains is bounded by the decoder's read-ahead,
+	// so the copy is over a handful of entries.
+	if c.next > 0 {
+		c.offsets = c.offsets[:copy(c.offsets, c.offsets[c.next:])]
+		c.next = 0
+	}
+	return c.passed + 1
 }
 
 func Build(st *store.Store, sessionID string) (SessionExport, error) {
@@ -754,7 +851,7 @@ func ExportFile(inputPath string, w io.Writer, opts Options) error {
 // Export renders the session read from r, a JSONL envelope stream, to w. It is
 // the reader form of ExportFile, so a piped log ("-") exports like a file.
 func Export(r io.Reader, source string, w io.Writer, opts Options) error {
-	st, sessionID, err := load(r, source, opts.Redaction)
+	st, sessionID, err := load(r, source, opts.Redaction, nil)
 	if err != nil {
 		return err
 	}

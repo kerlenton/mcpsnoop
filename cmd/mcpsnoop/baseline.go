@@ -39,11 +39,13 @@ func newBaselineCmd() *cobra.Command {
 			if len(args) == 1 {
 				arg = args[0]
 			}
-			st, sessionID, err := loadCheckSession(cmd, arg)
+			// baseline reports tools, never lines, so it never pays for the index.
+			sessionLog, err := loadCheckSession(cmd, arg, false)
 			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop baseline:", err)
 				return exitCode(1)
 			}
+			st, sessionID := sessionLog.store, sessionLog.sessionID
 			manager := toolbaseline.New(resolveBaselineDir(baselineDir))
 			switch {
 			case accept:

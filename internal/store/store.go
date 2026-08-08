@@ -212,6 +212,18 @@ type event struct {
 	call               *call  // set for request/response events
 	taskCall           *call  // originating call for a task lifecycle frame
 	taskID             string
+	// errored marks a frame this session counted an error on. It is set at every
+	// site that increments sess.errors, so a reporter can name the frames behind
+	// the count instead of re-deriving the conditions and drifting from them. A
+	// transport failure and an unmatched error response carry no call at all, and
+	// a task failure is counted on its terminal frame rather than on the call's
+	// first response, so call.errored alone cannot stand in for this.
+	errored bool
+	// lateResult marks the frame this session counted a late result on, the same
+	// way errored marks a counted error. call.lateResult stays true for the rest
+	// of the capture and is visible from the request frame too, so it cannot
+	// stand in for this.
+	lateResult bool
 	// mrtrRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised. Empty on an ordinary request.
 	mrtrRoot string
@@ -388,6 +400,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.kind = EventTransport
 		if httpFailed(e.Status) {
 			sess.errors++
+			ev.errored = true
 		}
 		sess.events = append(sess.events, ev)
 		return ev.view(sess)
@@ -410,6 +423,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			// and on stdio, where there is no status, nothing changes.
 			ev.kind = EventTransport
 			sess.errors++
+			ev.errored = true
 		} else {
 			ev.kind = EventInvalid
 		}
@@ -421,6 +435,10 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		c, matched := sess.completeCall(ev.id, e.Direction, e.ConnID, e.TS, msg)
 		ev.call = c
 		if matched && c != nil && c.lateResult {
+			// One-for-one with sess.lateResults++: completeCall returns matched for the
+			// frame that incremented it and false for any further response to the same
+			// call, so this marks each counted late result exactly once.
+			ev.lateResult = true
 			ev.observation = "result arrived " + e.TS.Sub(c.cancelledAt).Round(time.Millisecond).String() + " after cancellation"
 		}
 		if c != nil && c.state != Pending && c.state != Streaming {
@@ -477,6 +495,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 						ev.taskCall = parent
 						if failed {
 							sess.errors++
+							ev.errored = true
 						}
 					}
 				}
@@ -495,12 +514,14 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			}
 			if msg.Error != nil {
 				sess.errors++
+				ev.errored = true
 			}
 		case !matched:
 			ev.warning = appendWarning(ev.warning, "duplicate response for the same id")
 		default:
 			if c.errored {
 				sess.errors++
+				ev.errored = true
 			}
 		}
 	case msg.Method != "" && len(msg.ID) > 0:
@@ -596,6 +617,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 					ev.taskCall = parent
 					if failed {
 						sess.errors++
+						ev.errored = true
 					}
 				}
 			}
