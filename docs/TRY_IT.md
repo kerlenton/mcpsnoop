@@ -21,7 +21,15 @@ it.
 claude mcp add everything -- mcpsnoop -- npx -y @modelcontextprotocol/server-everything
 ```
 
-For Claude Desktop, add the same wrap to your `claude_desktop_config.json`.
+For Claude Desktop, add the server to your `claude_desktop_config.json` as usual,
+then let mcpsnoop make the same wrap for you.
+
+```bash
+mcpsnoop wrap everything
+```
+
+That backs the config up to `claude_desktop_config.json.mcpsnoop.bak` and
+rewrites only the `everything` entry, into this.
 
 ```json
 {
@@ -33,6 +41,11 @@ For Claude Desktop, add the same wrap to your `claude_desktop_config.json`.
   }
 }
 ```
+
+`command` gets the full path to the mcpsnoop binary rather than the bare name
+above, because Claude Desktop launches servers with the desktop session's PATH,
+which usually does not include `~/go/bin`. Editing the file by hand works just as
+well. When you're done, `mcpsnoop unwrap everything` puts it back.
 
 ## Watch it live
 

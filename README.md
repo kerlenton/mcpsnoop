@@ -48,7 +48,24 @@ To use it for real, wrap your server in your client's MCP config.
 
 Everything after `--` is the command that normally launches your server. Swap in
 whatever you already use, like `python server.py`, `npx -y @scope/server`, or a
-compiled binary. Then use your client as usual and open the UI.
+compiled binary.
+
+On Claude Desktop you don't have to make that edit by hand.
+
+```bash
+mcpsnoop wrap my-server     # route my-server through mcpsnoop
+mcpsnoop unwrap my-server   # put it back
+```
+
+`wrap` finds `claude_desktop_config.json`, copies it to
+`claude_desktop_config.json.mcpsnoop.bak` the first time, and rewrites only that
+one server's entry, so your formatting and every other server are left alone.
+Inside the rewritten entry the keys come back in alphabetical order. `unwrap`
+restores the file, and removes the backup once no server is wrapped any more.
+Restart Claude Desktop after either, since MCP servers are launched once at
+startup.
+
+Then use your client as usual and open the UI.
 
 ```bash
 mcpsnoop
@@ -114,6 +131,8 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
 | `mcpsnoop prune` | delete saved session logs older than a cutoff |
+| `mcpsnoop wrap <server>` | route one of Claude Desktop's servers through mcpsnoop |
+| `mcpsnoop unwrap <server>` | put that server's entry back the way it was |
 | `mcpsnoop remote <user@host>` | print the SSH tunnel command |
 | `mcpsnoop demo` | play a scripted session |
 
