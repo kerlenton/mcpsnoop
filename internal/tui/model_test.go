@@ -125,6 +125,47 @@ func TestStatusFilterSeparatesCancelledFromError(t *testing.T) {
 	}
 }
 
+func TestCallCancellationRowsAndFilters(t *testing.T) {
+	m := Model{}
+	t0 := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	cancelledCall := &store.CallView{
+		ID: "7", Method: "tools/call", State: store.Cancelled,
+		Start: t0, CancelledAt: t0.Add(250 * time.Millisecond), CancelReason: "moved on",
+	}
+	request := store.EventView{Kind: store.EventRequest, Method: "tools/call", Call: cancelledCall}
+	if cells := m.streamCells(request); cells.status != "cancel" || cells.dur != "" {
+		t.Fatalf("cancelled request cells = %+v", cells)
+	}
+	cancel := store.EventView{Kind: store.EventNotification, Method: "notifications/cancelled", Call: cancelledCall}
+	if cells := m.streamCells(cancel); cells.status != "cancel" {
+		t.Fatalf("cancellation notification cells = %+v", cells)
+	}
+	if !m.matchToken(cancel, "status:cancel") || m.matchToken(cancel, "status:cancelled") || m.matchToken(cancel, "status:late") {
+		t.Fatal("call cancellation filter overlapped task cancellation or late result")
+	}
+
+	lateCall := &store.CallView{
+		ID: "7", Method: "tools/call", State: store.Cancelled, LateResult: true,
+		Start: t0, End: t0.Add(time.Second), Result: json.RawMessage(`{"content":[]}`),
+	}
+	late := store.EventView{
+		Kind: store.EventResponse, Call: lateCall,
+		Observation: "result arrived 750ms after cancellation",
+	}
+	cells := m.streamCells(late)
+	if cells.status != "late" || cells.dur != "1s" || !strings.Contains(cells.detail, late.Observation) {
+		t.Fatalf("late result cells = %+v", cells)
+	}
+	if !m.matchToken(late, "status:late-result") || m.matchToken(late, "status:cancel") || m.matchToken(late, "status:cancelled") {
+		t.Fatal("late result filter overlapped cancellation filters")
+	}
+	m.full = []store.EventView{request}
+	m.inspect = 0
+	if got := m.pairWidget(); !strings.Contains(got, "cancel") {
+		t.Fatalf("cancelled request pair widget = %q", got)
+	}
+}
+
 func drive(t *testing.T, m Model, msg tea.Msg) Model {
 	t.Helper()
 	tm, _ := m.Update(msg)
@@ -1819,5 +1860,54 @@ func TestReplayAsksBeforeRunningTheRecordedCommand(t *testing.T) {
 	m = typeRunes(t, m, "n")
 	if m.replaying {
 		t.Fatal("declining must not start a replay")
+	}
+}
+
+// TestCancelAndLateRowsAreSelectableByWhatTheySay. The row for a
+// notifications/cancelled frame labels itself, and status: has to find it by the
+// same word. Labelling every such frame "cancel" while the filter required a call
+// that was not yet a late result meant the token shown and the token that selects
+// disagreed as soon as the result turned up.
+func TestCancelAndLateRowsAreSelectableByWhatTheySay(t *testing.T) {
+	build := func(late bool) Model {
+		st := store.New()
+		t0 := time.Now()
+		st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow"}}`))
+		st.Ingest(env(2, proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}`))
+		if late {
+			st.Ingest(env(3, proxy.ServerToClient, `{"jsonrpc":"2.0","id":7,"result":{"content":[]}}`))
+		}
+		_ = t0
+		m := ready(t, st)
+		return drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	}
+
+	for _, tc := range []struct {
+		name, token string
+		late        bool
+	}{
+		{"cancelled", "cancel", false},
+		{"late result", "late", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := build(tc.late)
+			var labelled bool
+			for _, e := range m.full {
+				if e.Method != "notifications/cancelled" {
+					continue
+				}
+				labelled = true
+				// Both sides, the word the row prints and the word status: selects by.
+				if got := m.streamCells(e).status; got != tc.token {
+					t.Fatalf("the cancellation row says %q, want %q", got, tc.token)
+				}
+				if !m.matchStatus(e, tc.token) {
+					t.Fatalf("the row says %q but status:%s does not select it", tc.token, tc.token)
+				}
+			}
+			if !labelled {
+				t.Fatal("the cancellation frame is missing from the timeline")
+			}
+		})
 	}
 }

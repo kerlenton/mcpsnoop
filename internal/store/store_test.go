@@ -164,6 +164,76 @@ func resp(seq uint64, ts time.Time, dir proxy.Direction, id, body string) proxy.
 	return proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: seq, TS: ts, Direction: dir, Raw: json.RawMessage(raw)}
 }
 
+func TestCancellationSettlesPendingCall(t *testing.T) {
+	s := New()
+	t0 := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	s.Ingest(req(1, t0, proxy.ClientToServer, `"job-1"`, "tools/call", `{"name":"slow"}`))
+	cancelledAt := t0.Add(250 * time.Millisecond)
+	cancel := s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: cancelledAt,
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"job-1","reason":"no longer needed"}}`),
+	})
+
+	if cancel.Call == nil || cancel.Call.State != Cancelled {
+		t.Fatalf("cancelled call = %+v", cancel.Call)
+	}
+	if cancel.Call.CancelledAt != cancelledAt || cancel.Call.CancelReason != "no longer needed" {
+		t.Fatalf("cancellation metadata = %s %q", cancel.Call.CancelledAt, cancel.Call.CancelReason)
+	}
+	if cancel.Call.LateResult || cancel.Call.Duration() != 0 {
+		t.Fatalf("unanswered cancellation has late=%v duration=%s", cancel.Call.LateResult, cancel.Call.Duration())
+	}
+	if cancel.Warning != "" {
+		t.Fatalf("cancellation warning = %q, want none", cancel.Warning)
+	}
+	header := s.Sessions()[0]
+	if header.Pending != 0 || header.Errors != 0 || header.LateResults != 0 {
+		t.Fatalf("session counts = pending %d errors %d late %d", header.Pending, header.Errors, header.LateResults)
+	}
+	if got := s.Timeline("s1")[0].Call.State; got != Cancelled {
+		t.Fatalf("request state = %s, want cancelled", got)
+	}
+}
+
+func TestLateResponseAfterCancellationRemainsAnObservation(t *testing.T) {
+	s := New()
+	t0 := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	s.Ingest(req(1, t0, proxy.ClientToServer, "7", "tools/call", `{"name":"slow"}`))
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0.Add(250 * time.Millisecond),
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}`),
+	})
+	late := s.Ingest(resp(3, t0.Add(time.Second), proxy.ServerToClient, "7", `"result":{"content":[]}`))
+
+	if late.Call == nil || late.Call.State != Cancelled || !late.Call.LateResult {
+		t.Fatalf("late response call = %+v", late.Call)
+	}
+	if late.Observation != "result arrived 750ms after cancellation" || late.Warning != "" {
+		t.Fatalf("late response observation=%q warning=%q", late.Observation, late.Warning)
+	}
+	if string(late.Call.Result) != `{"content":[]}` || late.Call.Duration() != time.Second {
+		t.Fatalf("late result=%s duration=%s", late.Call.Result, late.Call.Duration())
+	}
+	header := s.Sessions()[0]
+	if header.Pending != 0 || header.Errors != 0 || header.LateResults != 1 {
+		t.Fatalf("session counts = pending %d errors %d late %d", header.Pending, header.Errors, header.LateResults)
+	}
+	summary, ok := s.ToolSummary("s1")
+	if !ok || len(summary.Tools) != 1 || summary.Tools[0].P50 != time.Second {
+		t.Fatalf("tool summary = %+v, ok=%v", summary, ok)
+	}
+
+	duplicate := s.Ingest(resp(4, t0.Add(2*time.Second), proxy.ServerToClient, "7", `"result":{"content":["again"]}`))
+	if !strings.Contains(duplicate.Warning, "duplicate response") {
+		t.Fatalf("duplicate warning = %q", duplicate.Warning)
+	}
+	if got := s.Sessions()[0].LateResults; got != 1 {
+		t.Fatalf("late results = %d, want 1", got)
+	}
+}
+
 func TestReusedRequestIdKeepsPendingCounterAndTimelineInSync(t *testing.T) {
 	s := New()
 	t0 := time.Now()
@@ -193,6 +263,79 @@ func TestReusedRequestIdKeepsPendingCounterAndTimelineInSync(t *testing.T) {
 	}
 	if !strings.Contains(events[1].Warning, "reuses an id already in flight") {
 		t.Fatalf("second request should warn about id reuse, got %q", events[1].Warning)
+	}
+}
+
+func TestNullRequestIDsRemainDistinct(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	first := s.Ingest(req(1, t0, proxy.ClientToServer, "null", "tools/call", `{"name":"read_file"}`))
+	second := s.Ingest(req(2, t0.Add(time.Millisecond), proxy.ClientToServer, "null", "tools/call", `{"name":"write_file"}`))
+
+	want := "request id is null; MCP requires a string or integer id"
+	if first.Warning != want || second.Warning != want {
+		t.Fatalf("null id warnings = %q and %q, want %q", first.Warning, second.Warning, want)
+	}
+	if strings.Contains(second.Warning, "reuses an id") {
+		t.Fatalf("null ids must not be treated as reusable identifiers: %q", second.Warning)
+	}
+	response := s.Ingest(resp(3, t0.Add(2*time.Millisecond), proxy.ServerToClient, "null", `"error":{"code":-32700,"message":"parse error"}`))
+	if !strings.Contains(response.Warning, "no matching request") {
+		t.Fatalf("null response warning = %q, want an unmatched response", response.Warning)
+	}
+	if got := s.Sessions()[0].Pending; got != 2 {
+		t.Fatalf("pending = %d, want 2", got)
+	}
+	calls := s.Calls("s1")
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(calls))
+	}
+	if calls[0].State != Pending || calls[1].State != Pending {
+		t.Fatalf("null id calls should both remain pending: %+v", calls)
+	}
+	if calls[0].ToolName != "read_file" || calls[1].ToolName != "write_file" {
+		t.Fatalf("tool names = %q and %q", calls[0].ToolName, calls[1].ToolName)
+	}
+}
+
+func TestInvalidRequestIDTypesWarn(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+		want string
+	}{
+		{"string", `"abc"`, ""},
+		{"integer", "42", ""},
+		{"negative integer", "-7", ""},
+		// JSON has several spellings for one integer, and JSON Schema's own
+		// "integer" matches any number with a zero fractional part. A client whose
+		// serializer round-trips an id through a float is conforming, so judging the
+		// spelling rather than the value would warn on correct traffic.
+		{"integer written as a float", "1.0", ""},
+		{"integer written with an exponent", "1e3", ""},
+		{"integer past the safe range", "12345678901234567890", ""},
+		{"null", "null", "request id is null; MCP requires a string or integer id"},
+		{"fraction", "1.5", "request id 1.5 is not an integer; MCP requires a string or integer id"},
+		{"boolean", "true", "request id has type boolean; MCP requires a string or integer id"},
+		{"array", "[]", "request id has type array; MCP requires a string or integer id"},
+		{"object", "{}", "request id has type object; MCP requires a string or integer id"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := New()
+			ev := s.Ingest(req(1, time.Now(), proxy.ClientToServer, test.id, "ping", ""))
+			if ev.Warning != test.want {
+				t.Fatalf("warning = %q, want %q", ev.Warning, test.want)
+			}
+		})
+	}
+}
+
+func TestNullErrorResponseDoesNotUseRequestIDWarning(t *testing.T) {
+	s := New()
+	ev := s.Ingest(resp(1, time.Now(), proxy.ServerToClient, "null", `"error":{"code":-32700,"message":"parse error"}`))
+	if strings.Contains(ev.Warning, "request id") {
+		t.Fatalf("null error response got request warning %q", ev.Warning)
 	}
 }
 
@@ -1722,8 +1865,12 @@ func TestSubscriptionsListenClosesOnCancelledNotification(t *testing.T) {
 		t.Fatalf("pending = %d, want 0 after the server closes the stream", h.Pending)
 	}
 	events := s.Timeline("s1")
-	if events[0].Call == nil || events[0].Call.State != Completed {
-		t.Fatalf("listen call should be completed after notifications/cancelled, got %v", events[0].Call.State)
+	// The teardown is a cancellation, not a completion. What completes the call is
+	// the graceful empty result the server SHOULD send after it, which arrives on
+	// its own frame and is covered by
+	// TestGracefulSubscriptionClosureIsNotALateResult.
+	if events[0].Call == nil || events[0].Call.State != Cancelled {
+		t.Fatalf("listen call should be cancelled after notifications/cancelled, got %v", events[0].Call.State)
 	}
 }
 
@@ -1751,8 +1898,14 @@ func TestSubscriptionsListenClosesOnAStringRequestID(t *testing.T) {
 			})
 
 			events := s.Timeline("s1")
-			if events[0].Call == nil || events[0].Call.State != Completed {
-				t.Fatalf("the teardown should close the stream, got %v", events[0].Call.State)
+			// A teardown is a cancellation rather than a completion, and it carries
+			// the reason the server gave. The graceful empty result the server SHOULD
+			// send afterwards is the completion signal, and it arrives separately.
+			if events[0].Call == nil || events[0].Call.State != Cancelled {
+				t.Fatalf("the teardown should cancel the stream, got %v", events[0].Call.State)
+			}
+			if events[0].Call.CancelReason != "shutting down" {
+				t.Fatalf("cancel reason = %q, want the server's own", events[0].Call.CancelReason)
 			}
 			if h := s.Sessions()[0]; h.Pending != 0 {
 				t.Fatalf("pending = %d, want 0", h.Pending)
@@ -2092,5 +2245,174 @@ func TestTwoClientsThroughOneProxyKeepSeparateIDSpaces(t *testing.T) {
 	s2.Ingest(conn(req(1, t0, proxy.ClientToServer, "1", "tools/list", `{}`), "10.0.0.1:5001"))
 	if ev := s2.Ingest(conn(req(2, t0, proxy.ClientToServer, "1", "tools/list", `{}`), "10.0.0.1:5001")); ev.Warning == "" {
 		t.Fatal("one sender reusing an id in flight must still be reported")
+	}
+}
+
+// TestNullResultResponseNamesTheRealViolation. Separating null-id requests means
+// a null-id response matches none of them, and "response id has no matching
+// request" then sends the reader after a frame that is not missing. The result
+// carrying a null id is the actual violation, since the spec requires a result to
+// carry the same id as its request. An error response stays exempt, because the
+// spec lets one omit the id "in error cases where the ID could not be read due a
+// malformed request".
+func TestNullResultResponseNamesTheRealViolation(t *testing.T) {
+	s := New()
+	ev := s.Ingest(resp(1, time.Now(), proxy.ServerToClient, "null", `"result":{}`))
+	if !strings.Contains(ev.Warning, "result response id is null") {
+		t.Fatalf("warning = %q, want the null result id named", ev.Warning)
+	}
+
+	errored := New().Ingest(resp(1, time.Now(), proxy.ServerToClient, "null",
+		`"error":{"code":-32700,"message":"parse error"}`))
+	if strings.Contains(errored.Warning, "id is null") {
+		t.Fatalf("an error response may omit the id, got %q", errored.Warning)
+	}
+}
+
+// TestLateResultKeepsTheErrorAxis. A cancellation settles the call, but the
+// answer that arrives afterwards is still the server's answer, and an error in
+// it is still an error. Leaving it off the error axis made a real -32603 read as
+// errors=0 and pass a default check run, which is a regression against the
+// behaviour before cancellation had a state of its own.
+func TestLateResultKeepsTheErrorAxis(t *testing.T) {
+	for _, tc := range []struct {
+		name, response string
+		wantErrored    bool
+	}{
+		{"protocol error", `"error":{"code":-32603,"message":"boom"}`, true},
+		{"tool error", `"result":{"isError":true,"content":[]}`, true},
+		{"an ordinary late result", `"result":{"content":[]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New()
+			t0 := time.Now()
+			s.Ingest(req(1, t0, proxy.ClientToServer, "7", "tools/call", `{"name":"slow"}`))
+			s.Ingest(notif(2, t0, proxy.ClientToServer, "notifications/cancelled", `{"requestId":7}`))
+			s.Ingest(resp(3, t0.Add(time.Second), proxy.ServerToClient, "7", tc.response))
+
+			calls := s.Calls("s1")
+			if len(calls) != 1 || calls[0].State != Cancelled || !calls[0].LateResult {
+				t.Fatalf("call = %+v, want one cancelled call with a late result", calls)
+			}
+			if calls[0].Errored != tc.wantErrored {
+				t.Fatalf("errored = %v, want %v", calls[0].Errored, tc.wantErrored)
+			}
+			want := 0
+			if tc.wantErrored {
+				want = 1
+			}
+			if got := s.Sessions()[0].Errors; got != want {
+				t.Fatalf("session errors = %d, want %d", got, want)
+			}
+		})
+	}
+}
+
+// TestCancelLeavesATaskAugmentedCallAlone. A tools/call answered with a task
+// handle stays Pending on purpose while the work continues under its taskId, and
+// its terminal state arrives through notifications/tasks. Settling it on a
+// cancellation threw that state away, so a task that ended failed reported
+// errors=0. The spec puts this among the cancellations a server may ignore,
+// "Processing has already completed", and cancelling the work is tasks/cancel.
+func TestCancelLeavesATaskAugmentedCallAlone(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "3", "tools/call", `{"name":"slow"}`))
+	s.Ingest(resp(2, t0, proxy.ServerToClient, "3", `"result":{"resultType":"task","taskId":"t1","status":"working"}`))
+	s.Ingest(notif(3, t0, proxy.ClientToServer, "notifications/cancelled", `{"requestId":3}`))
+	s.Ingest(notif(4, t0.Add(time.Second), proxy.ServerToClient, "notifications/tasks",
+		`{"taskId":"t1","status":"failed","error":{"code":-32603,"message":"boom"}}`))
+
+	calls := s.Calls("s1")
+	if len(calls) != 1 {
+		t.Fatalf("calls = %+v, want one", calls)
+	}
+	if calls[0].State == Cancelled {
+		t.Fatal("a cancellation must not settle a call whose work continues under a task")
+	}
+	if calls[0].TaskStatus != "failed" || !calls[0].Errored {
+		t.Fatalf("call = %+v, want the failed task state to have landed", calls[0])
+	}
+	if got := s.Sessions()[0].Errors; got != 1 {
+		t.Fatalf("session errors = %d, want 1", got)
+	}
+}
+
+// TestLateResultStillDeclaresWhatTheServerHas. The payload of a late response is
+// still the server's answer. Dropping the per-method side effects left a late
+// tools/list with an empty inventory, and `check --fail-on drift` then compared
+// nothing and printed green.
+func TestLateResultStillDeclaresWhatTheServerHas(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", `{}`))
+	s.Ingest(notif(2, t0, proxy.ClientToServer, "notifications/cancelled", `{"requestId":1}`))
+	s.Ingest(resp(3, t0.Add(time.Second), proxy.ServerToClient, "1",
+		`"result":{"tools":[{"name":"search","inputSchema":{"type":"object"}}],"resultType":"complete"}`))
+
+	defs, ok := s.ToolDefinitions("s1")
+	if !ok || len(defs) != 1 {
+		t.Fatalf("tool definitions = %v %d, want the late listing to have landed", ok, len(defs))
+	}
+}
+
+// TestGracefulSubscriptionClosureIsNotALateResult. A server tearing down a
+// subscription sends notifications/cancelled and then, per the spec, "SHOULD
+// respond to the original subscriptions/listen request with an empty result
+// before closing the stream". That result is the intended end of the exchange, so
+// it must be neither a late result nor the duplicate the response branch used to
+// report on it.
+func TestGracefulSubscriptionClosureIsNotALateResult(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "subscriptions/listen",
+		`{"notifications":{"toolsListChanged":true}}`))
+	s.Ingest(notif(2, t0.Add(time.Second), proxy.ServerToClient, "notifications/cancelled",
+		`{"requestId":1,"reason":"shutdown"}`))
+	ev := s.Ingest(resp(3, t0.Add(2*time.Second), proxy.ServerToClient, "1",
+		`"result":{"resultType":"complete"}`))
+
+	if ev.Warning != "" {
+		t.Fatalf("the graceful closure must be silent, got %q", ev.Warning)
+	}
+	calls := s.Calls("s1")
+	if len(calls) != 1 || calls[0].State != Cancelled || calls[0].LateResult {
+		t.Fatalf("call = %+v, want one cancelled call with no late result", calls)
+	}
+	if h := s.Sessions()[0]; h.LateResults != 0 {
+		t.Fatalf("late results = %d, want 0", h.LateResults)
+	}
+}
+
+// TestPercentilesSkipCallsThatNeverAnswered. A superseded or cancelled call has
+// no end, so its duration is a negative epoch span. Letting either into the
+// aggregate put -2562047h47m16.854775808s into the per-tool percentiles and the
+// slowest-calls list. A cancelled call whose result arrived late does have a real
+// duration and must still count.
+func TestPercentilesSkipCallsThatNeverAnswered(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"slow"}`))
+	s.Ingest(notif(2, t0, proxy.ClientToServer, "notifications/cancelled", `{"requestId":1}`))
+	s.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/call", `{"name":"slow"}`))
+	s.Ingest(notif(4, t0, proxy.ClientToServer, "notifications/cancelled", `{"requestId":2}`))
+	s.Ingest(resp(5, t0.Add(2*time.Second), proxy.ServerToClient, "2", `"result":{"content":[]}`))
+
+	summary, ok := s.ToolSummary("s1")
+	if !ok || len(summary.Tools) != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	tool := summary.Tools[0]
+	if tool.P50 < 0 || tool.P95 < 0 || tool.P99 < 0 {
+		t.Fatalf("a call that never answered reached the percentiles: %+v", tool)
+	}
+	// Only the one that did answer contributes, and it contributes its real span.
+	if tool.P50 != 2*time.Second {
+		t.Fatalf("p50 = %v, want the late result's own 2s", tool.P50)
+	}
+	for _, slow := range summary.Slowest {
+		if slow.Duration < 0 {
+			t.Fatalf("slowest calls carry a negative duration: %+v", slow)
+		}
 	}
 }

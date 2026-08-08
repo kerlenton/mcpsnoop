@@ -163,6 +163,119 @@ func TestBuildExportsSupersededCallNotAsOk(t *testing.T) {
 	}
 }
 
+func TestBuildKeepsNullIDCallsDistinct(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "null-id.jsonl")
+	t0 := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "files", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":null,"method":"tools/call","params":{"name":"read_file"}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "files", Seq: 2, TS: t0.Add(time.Second),
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":null,"method":"tools/call","params":{"name":"write_file"}}`),
+	})
+
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Calls) != 2 || len(out.Events) != 2 {
+		t.Fatalf("calls/events = %d/%d, want 2/2", len(out.Calls), len(out.Events))
+	}
+	for i, want := range []string{"read_file", "write_file"} {
+		if out.Events[i].CallIndex == nil || *out.Events[i].CallIndex != i {
+			t.Fatalf("event %d call index = %v, want %d", i, out.Events[i].CallIndex, i)
+		}
+		if out.Calls[i].ToolName != want {
+			t.Fatalf("call %d tool = %q, want %q", i, out.Calls[i].ToolName, want)
+		}
+	}
+}
+
+func TestBuildExportsCallCancellationAndLateResult(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cancelled-call.jsonl")
+	t0 := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	cancelledAt := t0.Add(250 * time.Millisecond)
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow"}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 2, TS: cancelledAt,
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7,"reason":"moved on"}}`),
+	})
+
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Session.Pending != 0 || cancelled.Session.LateResults != 0 || len(cancelled.Calls) != 1 {
+		t.Fatalf("cancelled summary/calls = %+v %+v", cancelled.Session, cancelled.Calls)
+	}
+	call := cancelled.Calls[0]
+	if call.State != "cancelled" || call.Status != "call_cancelled" {
+		t.Fatalf("cancelled state/status = %q/%q", call.State, call.Status)
+	}
+	if call.CancelledAt == nil || *call.CancelledAt != cancelledAt || call.CancelReason != "moved on" {
+		t.Fatalf("cancelled metadata = %v %q", call.CancelledAt, call.CancelReason)
+	}
+	if call.EndedAt != nil || call.DurationMS != nil || call.LateResult || len(call.Result) != 0 {
+		t.Fatalf("unanswered cancellation exported as %+v", call)
+	}
+
+	st.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 3, TS: t0.Add(time.Second),
+		Direction: proxy.ServerToClient,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":7,"result":{"content":[]}}`),
+	})
+	late, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call = late.Calls[0]
+	if late.Session.LateResults != 1 || call.Status != "late_result" || !call.LateResult {
+		t.Fatalf("late result summary/call = %+v %+v", late.Session, call)
+	}
+	if call.EndedAt == nil || call.DurationMS == nil || *call.DurationMS != 1000 {
+		t.Fatalf("late result timing = ended %v duration %v", call.EndedAt, call.DurationMS)
+	}
+	if len(late.Events) != 3 || late.Events[2].Observation != "result arrived 750ms after cancellation" {
+		t.Fatalf("late result event = %+v", late.Events)
+	}
+
+	var text bytes.Buffer
+	if err := Write(&text, late, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"late results: 1", "status=late_result duration_ms=1000", "observation=result arrived 750ms after cancellation"} {
+		if !strings.Contains(text.String(), want) {
+			t.Fatalf("text export missing %q\n%s", want, text.String())
+		}
+	}
+
+	var otlp bytes.Buffer
+	if err := Write(&otlp, late, Options{Format: FormatOTLP}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"mcpsnoop.session.late_results", "mcpsnoop.call.cancelled_at", "mcpsnoop.call.cancel_reason", "mcpsnoop.call.late_result", "STATUS_CODE_UNSET"} {
+		if !strings.Contains(otlp.String(), want) {
+			t.Fatalf("OTLP export missing %q\n%s", want, otlp.String())
+		}
+	}
+}
+
 func TestBuildExportsCancelledTaskWithoutFlaggingAnError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cancel.jsonl")
 	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)

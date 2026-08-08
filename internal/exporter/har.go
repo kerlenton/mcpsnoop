@@ -204,6 +204,10 @@ func harStatus(status string) (int, string) {
 		return 200, "OK"
 	case "error":
 		return 500, "Error"
+	case "late_result":
+		return 200, "Late Result"
+	case "call_cancelled":
+		return 0, "Cancelled"
 	case "":
 		return 0, "No Response"
 	default:

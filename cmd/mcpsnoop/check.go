@@ -20,12 +20,13 @@ const (
 	checkWarn       checkSignal = "warn"
 	checkMismatch   checkSignal = "mismatch"
 	checkPending    checkSignal = "pending"
+	checkLateResult checkSignal = "late-result"
 	checkDrift      checkSignal = "drift"
 	checkDeprecated checkSignal = "deprecated"
 	checkIncomplete checkSignal = "incomplete"
 )
 
-var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated, checkIncomplete}
+var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLateResult, checkDrift, checkDeprecated, checkIncomplete}
 
 type checkOutputFormat string
 
@@ -42,6 +43,7 @@ type checkSummary struct {
 	warnings        int
 	mismatches      int
 	pending         int
+	lateResults     int
 	deprecated      int
 	missingFrames   uint64
 	drift           store.ToolDrift
@@ -55,7 +57,7 @@ func newCheckCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "check [session-id|log.jsonl|-]",
 		Short: "Fail when a captured session violates a signal or an assertion",
-		Long:  "Check a captured session against signals (errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, dropped frames that leave the capture incomplete, tool-definition drift) and assertions (a tool-call latency budget, and tools that must or must not have been called). With no session, the newest session log is checked. Use - to read from stdin.",
+		Long:  "Check a captured session against signals (errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, results that arrived after cancellation, dropped frames that leave the capture incomplete, tool-definition drift) and assertions (a tool-call latency budget, and tools that must or must not have been called). With no session, the newest session log is checked. Use - to read from stdin.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			signals, err := parseCheckSignals(failOn)
@@ -113,8 +115,8 @@ func newCheckCmd() *cobra.Command {
 				}
 			default:
 				for i, summary := range summaries {
-					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d deprecated=%d missing_frames=%d\n",
-						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.deprecated, summary.missingFrames)
+					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d late_results=%d deprecated=%d missing_frames=%d\n",
+						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.lateResults, summary.deprecated, summary.missingFrames)
 					if summary.baselineCreated {
 						// No baseline existed, so this run trusted the current definitions
 						// rather than verifying them. Say so, or an ephemeral CI reads green
@@ -149,7 +151,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().SortFlags = false
-	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, drift, deprecated, incomplete")
+	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, late-result, drift, deprecated, incomplete")
 	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text, junit, or sarif")
 	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
 	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this duration (e.g. 500ms), disabled when zero")
@@ -188,9 +190,7 @@ func (a checkAssertions) eval(st *store.Store, sessionID string) []string {
 		var worstDuration time.Duration
 		var worstTool string
 		for _, c := range calls {
-			// Only a call that actually got a response has a real latency. Pending and
-			// superseded calls never did, so they are not judged here.
-			if !c.IsTool || !c.Done() || c.State == store.Superseded {
+			if !c.IsTool || !c.Done() || c.State == store.Superseded || (c.State == store.Cancelled && !c.LateResult) {
 				continue
 			}
 			duration := c.Duration()
@@ -230,10 +230,10 @@ func parseCheckSignals(value string) (map[checkSignal]bool, error) {
 	for _, part := range strings.Split(value, ",") {
 		signal := checkSignal(strings.TrimSpace(part))
 		switch signal {
-		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkDrift, checkDeprecated, checkIncomplete:
+		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLateResult, checkDrift, checkDeprecated, checkIncomplete:
 			signals[signal] = true
 		default:
-			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, drift, deprecated, or incomplete, got %q", part)
+			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, late-result, drift, deprecated, or incomplete, got %q", part)
 		}
 	}
 	return signals, nil
@@ -288,7 +288,13 @@ func loadCheckSession(cmd *cobra.Command, arg string) (checkLog, error) {
 func summarizeCheck(st *store.Store, baselines *toolbaseline.Manager) []checkSummary {
 	var summaries []checkSummary
 	for _, header := range st.Sessions() {
-		summary := checkSummary{sessionID: header.ID, errors: header.Errors, pending: header.Pending, missingFrames: header.MissingFrames}
+		summary := checkSummary{
+			sessionID:     header.ID,
+			errors:        header.Errors,
+			pending:       header.Pending,
+			lateResults:   header.LateResults,
+			missingFrames: header.MissingFrames,
+		}
 		if _, ok := st.ToolDefinitions(header.ID); ok {
 			report, created, err := toolbaseline.ObserveSession(baselines, st, header.ID)
 			if err != nil {
@@ -341,6 +347,8 @@ func (s checkSummary) count(signal checkSignal) int {
 		return s.mismatches
 	case checkPending:
 		return s.pending
+	case checkLateResult:
+		return s.lateResults
 	case checkDrift:
 		// A baseline error is not drift, but it means drift could not be verified,
 		// so count it as a drift failure for a run that selected the drift signal.
