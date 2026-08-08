@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 )
@@ -25,6 +26,7 @@ func TestAnalyzeSchemaClean(t *testing.T) {
 
 func TestAnalyzeSchemaOneOf(t *testing.T) {
 	schema := json.RawMessage(`{
+		"type":"object",
 		"oneOf": [
 			{"type":"string"},
 			{"type":"integer"}
@@ -44,6 +46,7 @@ func TestAnalyzeSchemaOneOf(t *testing.T) {
 
 func TestAnalyzeSchemaAnyOf(t *testing.T) {
 	schema := json.RawMessage(`{
+		"type":"object",
 		"anyOf": [
 			{"type":"string"},
 			{"type":"integer"}
@@ -63,6 +66,7 @@ func TestAnalyzeSchemaAnyOf(t *testing.T) {
 
 func TestAnalyzeSchemaAllOf(t *testing.T) {
 	schema := json.RawMessage(`{
+		"type":"object",
 		"allOf": [
 			{"type":"string"},
 			{"type":"integer"}
@@ -82,6 +86,7 @@ func TestAnalyzeSchemaAllOf(t *testing.T) {
 
 func TestAnalyzeSchemaNot(t *testing.T) {
 	schema := json.RawMessage(`{
+		"type":"object",
 		"not": {
 			"type":"string"
 		}
@@ -100,6 +105,7 @@ func TestAnalyzeSchemaNot(t *testing.T) {
 
 func TestAnalyzeSchemaRef(t *testing.T) {
 	schema := json.RawMessage(`{
+		"type":"object",
 		"$ref": "#/$defs/Foo"
 	}`)
 
@@ -133,6 +139,7 @@ func TestAnalyzeSchemaPropertyNamedLikeKeyword(t *testing.T) {
 
 func TestAnalyzeSchemaExternalRef(t *testing.T) {
 	schema := json.RawMessage(`{
+		"type":"object",
 		"$ref": "https://example.com/schema.json"
 	}`)
 
@@ -305,8 +312,8 @@ func TestAnalyzeSchemaReachesEveryContainer(t *testing.T) {
 		{"if", `{"type":"object","if":{"oneOf":[{"type":"string"}]}}`, FindingOneOf},
 		{"then", `{"type":"object","then":{"$ref":"https://example.com/x.json"}}`, FindingExternalRef},
 		{"else", `{"type":"object","else":{"anyOf":[{"type":"string"}]}}`, FindingAnyOf},
-		{"contains", `{"type":"array","contains":{"allOf":[{"type":"string"}]}}`, FindingAllOf},
-		{"prefixItems", `{"type":"array","prefixItems":[{"oneOf":[{"type":"string"}]}]}`, FindingOneOf},
+		{"contains", `{"type":"object","properties":{"xs":{"type":"array","contains":{"allOf":[{"type":"string"}]}}}}`, FindingAllOf},
+		{"prefixItems", `{"type":"object","properties":{"xs":{"type":"array","prefixItems":[{"oneOf":[{"type":"string"}]}]}}}`, FindingOneOf},
 		{"patternProperties", `{"type":"object","patternProperties":{"^a":{"$ref":"#/$defs/A"}}}`, FindingRef},
 		{"$defs", `{"type":"object","$defs":{"X":{"oneOf":[{"type":"string"}]}}}`, FindingOneOf},
 		{"definitions", `{"type":"object","definitions":{"X":{"anyOf":[{"type":"string"}]}}}`, FindingAnyOf},
@@ -340,6 +347,80 @@ func TestAnalyzeSchemaClassifiesRefsByFormOnly(t *testing.T) {
 		got := analyzeSchema(schema)
 		if len(got) != 1 || got[0].Kind != want {
 			t.Fatalf("$ref %q: got %v, want [%s]", ref, got, want)
+		}
+	}
+}
+
+// A tool's inputSchema must be a JSON Schema object whose root type is "object".
+// The constraint is in $defs.Tool of every schema revision mcpsnoop can observe,
+// so none of these cases needs a revision gate.
+func TestAnalyzeSchemaNonObjectRoot(t *testing.T) {
+	cases := map[string]string{
+		"dialect marker only":  `{"$schema":"http://json-schema.org/draft-07/schema#"}`,
+		"empty object":         `{}`,
+		"array root":           `{"type":"array","items":{"type":"string"}}`,
+		"boolean schema":       `true`,
+		"null":                 `null`,
+		"string root":          `{"type":"string"}`,
+		"type is not a string": `{"type":["object","null"]}`,
+	}
+	for name, schema := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := analyzeSchema(json.RawMessage(schema))
+			if !slices.Contains(got, SchemaFinding{Kind: FindingNonObjectRoot}) {
+				t.Fatalf("got %v, want a %s finding", got, FindingNonObjectRoot)
+			}
+		})
+	}
+}
+
+// An absent inputSchema fails the same rule: $defs.Tool.required is
+// ["inputSchema", "name"], so there is nothing for a client to validate against.
+func TestAnalyzeSchemaAbsentInputSchemaIsANonObjectRoot(t *testing.T) {
+	got := analyzeSchema(nil)
+
+	want := []SchemaFinding{{Kind: FindingNonObjectRoot}}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// The two forms the Tools page names for a tool that takes no parameters. Both
+// are correct and must stay silent, or every parameterless tool reports.
+func TestAnalyzeSchemaObjectRootIsClean(t *testing.T) {
+	for _, schema := range []string{
+		`{"type":"object"}`,
+		`{"type":"object","additionalProperties":false}`,
+		`{"$schema":"http://json-schema.org/draft-07/schema#","type":"object"}`,
+	} {
+		got := analyzeSchema(json.RawMessage(schema))
+		if slices.Contains(got, SchemaFinding{Kind: FindingNonObjectRoot}) {
+			t.Fatalf("schema %s: got %v, want no %s finding", schema, got, FindingNonObjectRoot)
+		}
+	}
+}
+
+// The reason travels into the warning, so it has to name what was actually on
+// the wire rather than just say the schema was wrong. Bisecting a listing is the
+// cost of a warning that does not.
+func TestSchemaRootViolationNamesWhatWasSeen(t *testing.T) {
+	cases := map[string]string{
+		``:                                "no inputSchema",
+		`{}`:                              "an inputSchema with no root type",
+		`{"type":null}`:                   "an inputSchema with a null root type",
+		`{"type":"array"}`:                `an inputSchema with root type "array"`,
+		`{"type":["object"]}`:             `an inputSchema whose root type is not the string "object"`,
+		`true`:                            "an inputSchema that is not a JSON object",
+		`null`:                            "an inputSchema that is not a JSON object",
+		`[{"type":"object"}]`:             "an inputSchema that is not a JSON object",
+		`{"not valid json`:                "an inputSchema that is not a JSON object",
+		`{"type":"object"}`:               "",
+		`{"$schema":"x","type":"object"}`: "",
+	}
+	for schema, want := range cases {
+		if got := schemaRootViolation(json.RawMessage(schema)); got != want {
+			t.Fatalf("schema %q: got %q, want %q", schema, got, want)
 		}
 	}
 }

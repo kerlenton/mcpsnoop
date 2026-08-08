@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 )
 
@@ -11,6 +12,10 @@ import (
 type SchemaFindingKind string
 
 const (
+	// FindingNonObjectRoot is the one kind here that is a violation rather than
+	// an observation. Every other finding says a schema may travel badly; this
+	// one says a conforming client rejects the tool outright.
+	FindingNonObjectRoot   SchemaFindingKind = "nonObjectRoot"
 	FindingOneOf           SchemaFindingKind = "oneOf"
 	FindingAnyOf           SchemaFindingKind = "anyOf"
 	FindingAllOf           SchemaFindingKind = "allOf"
@@ -33,19 +38,69 @@ type SchemaFinding struct {
 // them lets a caller treat "more than one finding" as "more than one kind of
 // problem", which is the question a reader actually has.
 func analyzeSchema(raw json.RawMessage) []SchemaFinding {
+	var findings []SchemaFinding
+	seen := make(map[SchemaFindingKind]bool, 8)
+
+	// First, so the violation leads the list the walk order would otherwise
+	// decide. A rootless schema still gets walked, because naming the construct
+	// it uses is worth having next to the reason a client refused it.
+	if schemaRootViolation(raw) != "" {
+		addFinding(&findings, seen, FindingNonObjectRoot)
+	}
+
 	if len(raw) == 0 {
-		return nil
+		return findings
 	}
 
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
-		return nil
+		return findings
 	}
 
-	var findings []SchemaFinding
-	seen := make(map[SchemaFindingKind]bool, 7)
 	walkSchema(v, &findings, seen)
 	return findings
+}
+
+// schemaRootViolation reports how a tool's inputSchema fails the root-object
+// rule, in words naming what was seen, or "" when it satisfies it. Nothing is
+// resolved and no dialect is interpreted: the verdict is decided by the bytes.
+//
+// $defs.Tool.inputSchema carries "required": ["type"] with "type" a const of
+// "object", and $defs.Tool.required is ["inputSchema", "name"], so an absent
+// inputSchema fails the same way a rootless one does. The identical constraint
+// appears in the 2026-07-28, 2025-11-25 and 2025-06-18 schema files, which is
+// why this needs no revision gate.
+//
+// The rule is an inputSchema rule only. outputSchema's entry has no "required"
+// and no const, and the Tools page shows an array-rooted outputSchema in its
+// list_users example, so this is never asked about one.
+func schemaRootViolation(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "no inputSchema"
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil || root == nil {
+		// Covers true, false, null, an array, a number, a string, and bytes that
+		// are not JSON at all. A boolean schema is valid JSON Schema in the
+		// abstract and still not a tool inputSchema, which must be an object.
+		return "an inputSchema that is not a JSON object"
+	}
+	switch t := root["type"].(type) {
+	case nil:
+		if _, present := root["type"]; present {
+			return "an inputSchema with a null root type"
+		}
+		return "an inputSchema with no root type"
+	case string:
+		if t == "object" {
+			return ""
+		}
+		return "an inputSchema with root type " + strconv.Quote(t)
+	default:
+		// A type union like ["object","null"] is not the const the schema demands,
+		// and a client validating against $defs.Tool rejects it the same way.
+		return `an inputSchema whose root type is not the string "object"`
+	}
 }
 
 func addFinding(findings *[]SchemaFinding, seen map[SchemaFindingKind]bool, kind SchemaFindingKind) {

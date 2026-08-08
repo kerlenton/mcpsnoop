@@ -1563,13 +1563,17 @@ func (m Model) summaryContent() string {
 	return header + "\n\n" + strings.Join(sections, "\n\n")
 }
 
-// schemaHeadlineOrder ranks findings for the single-label SCHEMA column. An
-// external reference leads because it points outside the wire entirely, which is
-// both the least portable case and the one the spec warns implementers about.
-// The composition keywords follow, then an internal reference, then an untyped
-// property, which is the weakest signal since a description often carries the
-// meaning a type would.
+// schemaHeadlineOrder ranks findings for the single-label SCHEMA column. A
+// non-object root leads because it is the only entry here that is a violation
+// rather than an observation: the others say a schema may be read differently
+// across clients, that one says a conforming client refuses the tool outright.
+// An external reference follows because it points outside the wire entirely,
+// which is both the least portable case and the one the spec warns implementers
+// about. The composition keywords come next, then an internal reference, then an
+// untyped property, which is the weakest signal since a description often
+// carries the meaning a type would.
 var schemaHeadlineOrder = []store.SchemaFindingKind{
+	store.FindingNonObjectRoot,
 	store.FindingExternalRef,
 	store.FindingOneOf,
 	store.FindingAnyOf,
@@ -1597,6 +1601,8 @@ func headlineFinding(findings []store.SchemaFinding) store.SchemaFindingKind {
 // narrow SCHEMA column. Display wording is a TUI concern, not the store's.
 func schemaKindLabel(k store.SchemaFindingKind) string {
 	switch k {
+	case store.FindingNonObjectRoot:
+		return "no obj root"
 	case store.FindingExternalRef:
 		return "ext ref"
 	case store.FindingUntypedProperty:
