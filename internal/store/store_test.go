@@ -1290,7 +1290,7 @@ func TestToolDefinitionsCaptureDescriptionsSchemasAndCompletePagination(t *testi
 	}
 
 	s.Ingest(req(3, t0, proxy.ClientToServer, "2", "tools/list", `{"cursor":"p2"}`))
-	s.Ingest(resp(4, t0, proxy.ServerToClient, "2", `"result":{"tools":[{"name":"fetch","description":"Fetch a page","inputSchema":{"oneOf":[{"type":"object"},{"type":"string"}]}}]}`))
+	s.Ingest(resp(4, t0, proxy.ServerToClient, "2", `"result":{"tools":[{"name":"fetch","description":"Fetch a page","inputSchema":{"type":"object","oneOf":[{"type":"object"},{"type":"string"}]}}]}`))
 
 	definitions, ok := s.ToolDefinitions("s1")
 	if !ok {

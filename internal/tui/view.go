@@ -1427,8 +1427,11 @@ func (m Model) capsTitle(label, version string, w int) string {
 // summary table column widths, all padded with lipgloss.Width so styled cells
 // stay aligned.
 const (
-	sumToolW   = 18
-	sumSchemaW = 7
+	sumToolW = 18
+	// Wide enough for the longest schema label plus the "+" that means there is
+	// more than one kind. At the label's own width the marker is truncated away
+	// and a tool with one problem renders exactly like a tool with five.
+	sumSchemaW = 8
 	sumCallsW  = 7
 	sumErrW    = 6
 	sumLatW    = 10
@@ -1547,9 +1550,11 @@ func (m Model) summaryContent() string {
 		if tool.Pending > 0 && tool.Pending == tool.Calls {
 			lat = m.styles.pending.Render(m.spinnerFrame())
 		}
-		// SCHEMA names the most notable construct a tool's advertised schema uses
-		// that is known to travel badly across clients, plus a "+" when there is
-		// more than one kind. Purely observational, so it carries the warn color,
+		// SCHEMA names the most notable thing about a tool's advertised schema,
+		// plus a "+" when there is more than one kind. All but a missing root type
+		// are observations about how a schema travels across clients rather than
+		// verdicts on it, and even that one is a fact about a definition rather
+		// than about a call, so the column carries the warn color throughout and
 		// never the ERR column's red.
 		// An empty cell is left blank rather than dotted. The ERR column already
 		// uses · to mean zero, and repeating it here both adds noise on the common
@@ -1600,13 +1605,17 @@ func (m Model) summaryContent() string {
 	return header + "\n\n" + strings.Join(sections, "\n\n")
 }
 
-// schemaHeadlineOrder ranks findings for the single-label SCHEMA column. An
-// external reference leads because it points outside the wire entirely, which is
-// both the least portable case and the one the spec warns implementers about.
-// The composition keywords follow, then an internal reference, then an untyped
-// property, which is the weakest signal since a description often carries the
-// meaning a type would.
+// schemaHeadlineOrder ranks findings for the single-label SCHEMA column. A
+// non-object root leads because it is the only entry here that is a violation
+// rather than an observation: the others say a schema may be read differently
+// across clients, that one says a conforming client refuses the tool outright.
+// An external reference follows because it points outside the wire entirely,
+// which is both the least portable case and the one the spec warns implementers
+// about. The composition keywords come next, then an internal reference, then an
+// untyped property, which is the weakest signal since a description often
+// carries the meaning a type would.
 var schemaHeadlineOrder = []store.SchemaFindingKind{
+	store.FindingNonObjectRoot,
 	store.FindingExternalRef,
 	store.FindingOneOf,
 	store.FindingAnyOf,
@@ -1634,6 +1643,8 @@ func headlineFinding(findings []store.SchemaFinding) store.SchemaFindingKind {
 // narrow SCHEMA column. Display wording is a TUI concern, not the store's.
 func schemaKindLabel(k store.SchemaFindingKind) string {
 	switch k {
+	case store.FindingNonObjectRoot:
+		return "no root"
 	case store.FindingExternalRef:
 		return "ext ref"
 	case store.FindingUntypedProperty:

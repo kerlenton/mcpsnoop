@@ -545,20 +545,27 @@ calling wrongly is often a tool whose schema asked for more than the client
 delivers.
 
 The tool summary, opened with `s`, has a SCHEMA column naming the most notable
-construct each advertised tool uses, with a trailing `+` when the schema uses
-more than one kind.
+thing about each advertised tool's schema, with a trailing `+` when there is more
+than one kind.
 
 | Shown | Means |
 |---|---|
+| `no root` | the `inputSchema` is absent, is not a JSON object, or has a root type other than `"object"` |
 | `ext ref` | a `$ref` pointing outside the document, which is also the case the spec warns implementers not to follow blindly |
 | `oneOf`, `anyOf`, `allOf`, `not` | a composition keyword, handled inconsistently across clients |
 | `ref` | a `$ref` pointing inside the same document |
 | `untyped` | a property that declares no type and no other way of saying what it accepts |
 
-This is an observation, not a verdict. A schema using `oneOf` is not wrong, only
-likely to be read differently by different clients, so the column carries the
-warning color and never the red of the ERR column. There is no `check` signal for
-it, and nothing about MCP traffic changes.
+All but the first are observations rather than verdicts. A schema using `oneOf`
+is not wrong, only likely to be read differently by different clients. `no root`
+is the exception: the `Tool` definition requires `inputSchema` and pins its root
+type to `"object"`, so a client validating a listing rejects that tool outright
+and it never becomes callable, with nothing on the wire to say why. `no root`
+leads the column for that reason, and a schema mcpsnoop's own redaction scrubbed
+is never reported, since an unreadable schema is not a wrong one.
+
+The column carries the warning color and never the red of the ERR column. There
+is no `check` signal for any of it yet, and nothing about MCP traffic changes.
 
 Nothing is resolved or fetched. An external `$ref` is recognized by its form
 alone, and the schema it points at is never read.
