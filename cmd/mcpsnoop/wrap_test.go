@@ -337,7 +337,7 @@ func TestWrapReportsAProblemTheUserCanFix(t *testing.T) {
 		{
 			name: "malformed config",
 			args: []string{"everything"}, config: "{ not json", code: 1,
-			want: []string{"as a JSON object"},
+			want: []string{"as JSON", "invalid character"},
 		},
 		{
 			name: "no mcpServers section",
@@ -545,5 +545,298 @@ func TestWrapClientsAreRegisteredNotHardcoded(t *testing.T) {
 	wrapOK(t, newUnwrapCmd, "everything", "--client", "test-client", "--config", cfgPath)
 	if got := readConfig(t, cfgPath); got != config {
 		t.Fatalf("unwrap for a registered client:\n got %q\nwant %q", got, config)
+	}
+}
+
+// TestWrapFollowsASymlinkedConfig. A config kept under stow or chezmoi is a
+// symlink into a dotfile repository. os.Rename does not follow the final
+// component, so renaming onto the link replaced it with a regular file and the
+// repository copy stopped being the file Claude Desktop reads, with nothing said
+// about it either way.
+func TestWrapFollowsASymlinkedConfig(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "dotfiles", "claude.json")
+	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(real, []byte(wrapFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := newWrapTest(t, wrapFixture)
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("this filesystem will not take a symlink: %v", err)
+	}
+
+	wrapOK(t, newWrapCmd, "everything", "--config", link)
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the symlink was replaced by a regular file, so the dotfile repository no longer owns the config")
+	}
+	if !strings.Contains(readConfig(t, real), stubWrapperPath) {
+		t.Fatal("the edit did not reach the file the link points at")
+	}
+}
+
+// TestUnwrapKeepsAnEditJSONNormalisationWouldHide. The restore overwrites the
+// whole file, so the check that the backup still describes it has to keep every
+// distinction the file makes. Deciding it by unmarshalling into any does not:
+// every number lands in a float64, so correcting an id from ...92 to ...93 while
+// wrapped compared equal, and unwrap put the old value back and deleted the
+// backup, leaving no way to it.
+func TestUnwrapKeepsAnEditJSONNormalisationWouldHide(t *testing.T) {
+	const withID = `{
+    "accountId": 9007199254740992,
+    "mcpServers": {
+        "everything": {
+            "command": "npx",
+            "args": ["server.js"]
+        }
+    }
+}
+`
+	path := newWrapTest(t, withID)
+	wrapOK(t, newWrapCmd, "everything", "--config", path)
+
+	edited := strings.Replace(readConfig(t, path), "9007199254740992", "9007199254740993", 1)
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wrapOK(t, newUnwrapCmd, "everything", "--config", path)
+
+	if got := readConfig(t, path); !strings.Contains(got, "9007199254740993") {
+		t.Fatalf("the correction was reverted by the restore:\n%s", got)
+	}
+	if _, err := os.Stat(path + backupSuffix); err != nil {
+		t.Fatal("the backup was removed even though it no longer describes the config")
+	}
+}
+
+// TestWrapRefusesADuplicateServerName. Every JSON parser keeps the last of a
+// repeated name and this walk finds the first, so editing here rewrote an entry
+// the client never reads. wrap reported success, the traffic did not change, and
+// there was nothing to go on.
+func TestWrapRefusesADuplicateServerName(t *testing.T) {
+	const duplicated = `{
+    "mcpServers": {
+        "everything": { "command": "old", "args": ["v1"] },
+        "everything": { "command": "new", "args": ["v2"] }
+    }
+}
+`
+	path := newWrapTest(t, duplicated)
+	before := readConfig(t, path)
+
+	code, _, stderr := executeWrapCmd(t, newWrapCmd, "everything", "--config", path)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "appears twice") {
+		t.Fatalf("the message must name the duplicate: %q", stderr)
+	}
+	if readConfig(t, path) != before {
+		t.Fatal("the config was rewritten anyway")
+	}
+}
+
+// TestWrapKeepsTheUntouchedBackupAcrossTwoServers. There is one backup per
+// config, and its whole value is being the file as it was before mcpsnoop
+// touched anything. Overwriting it on the second wrap put an already-wrapped
+// config there, and unwrapping that second server then matched it, restored it
+// and deleted it while the first server was still wrapped, leaving a modified
+// config and no backup at all under a message that reads as an all-clear.
+func TestWrapKeepsTheUntouchedBackupAcrossTwoServers(t *testing.T) {
+	path := newWrapTest(t, wrapFixture)
+	backup := path + backupSuffix
+
+	wrapOK(t, newWrapCmd, "everything", "--config", path)
+	wrapOK(t, newWrapCmd, "other", "--config", path)
+	if got := readConfig(t, backup); got != wrapFixture {
+		t.Fatalf("the second wrap overwrote the backup:\n%s", got)
+	}
+
+	wrapOK(t, newUnwrapCmd, "other", "--config", path)
+	if _, err := os.Stat(backup); err != nil {
+		t.Fatal("the backup went while \"everything\" was still wrapped")
+	}
+
+	out := wrapOK(t, newUnwrapCmd, "everything", "--config", path)
+	if got := readConfig(t, path); got != wrapFixture {
+		t.Fatalf("the config did not come back byte for byte:\n%s", got)
+	}
+	if _, err := os.Stat(backup); err == nil {
+		t.Fatal("the backup stayed even though nothing is wrapped any more")
+	}
+	if !strings.Contains(out, "nothing is wrapped any more") {
+		t.Fatalf("unwrap must say why it removed the backup: %q", out)
+	}
+}
+
+// TestUnwrapSaysTheBackupIsStillThere. On the splice path the backup stays, and
+// it holds a second copy of every env block in the config. A user who is not
+// told it is there has no reason to go looking for it.
+func TestUnwrapSaysTheBackupIsStillThere(t *testing.T) {
+	path := newWrapTest(t, wrapFixture)
+	wrapOK(t, newWrapCmd, "everything", "--config", path)
+
+	edited := strings.Replace(readConfig(t, path), "Ctrl+Space", "Alt+Space", 1)
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := wrapOK(t, newUnwrapCmd, "everything", "--config", path)
+	if !strings.Contains(out, "secrets in env blocks included") {
+		t.Fatalf("unwrap must say the backup is a copy of the config: %q", out)
+	}
+	if _, err := os.Stat(path + backupSuffix); err != nil {
+		t.Fatal("the backup should be kept when the config moved on")
+	}
+}
+
+// TestWrapKeepsTheConfigsLineEndings. encoding/json ends every line with a bare
+// \n, so a Windows config came back with CRLF outside the rewritten entry and LF
+// inside it. Mixed terminators in one file are a whole-file diff the next time
+// anything normalises it, on the platform this command goes out of its way to
+// support.
+func TestWrapKeepsTheConfigsLineEndings(t *testing.T) {
+	path := newWrapTest(t, strings.ReplaceAll(wrapFixture, "\n", "\r\n"))
+
+	wrapOK(t, newWrapCmd, "everything", "--config", path)
+
+	got := readConfig(t, path)
+	if cr, lf := strings.Count(got, "\r\n"), strings.Count(got, "\n"); cr != lf {
+		t.Fatalf("%d CRLF against %d LF, so the file now mixes terminators:\n%q", cr, lf, got)
+	}
+	wrapOK(t, newUnwrapCmd, "everything", "--config", path)
+	if got := readConfig(t, path); got != strings.ReplaceAll(wrapFixture, "\n", "\r\n") {
+		t.Fatalf("a CRLF config did not survive the round trip:\n%q", got)
+	}
+}
+
+// TestWrapRefusesAnEmptyConfigFlag. Cobra cannot tell a flag that was never
+// passed from one passed as empty, and treating both as absent meant a script
+// written as `mcpsnoop wrap "$SRV" --config "$CFG"` with CFG unset edited the
+// user's live Claude Desktop config. It is the one path where this writes to a
+// file the caller never named.
+func TestWrapRefusesAnEmptyConfigFlag(t *testing.T) {
+	for _, newCmd := range []func() *cobra.Command{newWrapCmd, newUnwrapCmd} {
+		code, _, stderr := executeWrapCmd(t, newCmd, "everything", "--config", "")
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2", code)
+		}
+		if !strings.Contains(stderr, "empty path") {
+			t.Fatalf("the message must say what was wrong: %q", stderr)
+		}
+	}
+}
+
+// TestWrapRefusesToWriteOverAConfigThatMoved. wrap is a read, a rewrite and a
+// write, and Claude Desktop rewrites this same file whenever a connector is
+// toggled. Without the recheck the whole of somebody else's edit disappears and
+// both sides report success.
+func TestWrapRefusesToWriteOverAConfigThatMoved(t *testing.T) {
+	path := newWrapTest(t, wrapFixture)
+	t.Cleanup(func() { writeConfigHook = nil })
+
+	moved := strings.Replace(wrapFixture, `"Ctrl+Space"`, `"Alt+Space"`, 1)
+	writeConfigHook = func() {
+		writeConfigHook = nil
+		if err := os.WriteFile(path, []byte(moved), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	code, _, stderr := executeWrapCmd(t, newWrapCmd, "everything", "--config", path)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "changed while mcpsnoop was working on it") {
+		t.Fatalf("the message must say why nothing was written: %q", stderr)
+	}
+	if got := readConfig(t, path); got != moved {
+		t.Fatalf("the other writer's config was overwritten:\n%s", got)
+	}
+}
+
+// TestWrapSaysWhenTheWrappedCommandIsNotThisBinary. isWrapped matches the name
+// and not the path, so an entry can be wrapped around an mcpsnoop that has since
+// moved. Saying only "nothing to do" left the user running the one command that
+// would fix it and being told there was nothing to fix.
+func TestWrapSaysWhenTheWrappedCommandIsNotThisBinary(t *testing.T) {
+	path := newWrapTest(t, wrapFixture)
+	wrapOK(t, newWrapCmd, "everything", "--config", path)
+
+	orig := wrapperPath
+	wrapperPath = func() string { return "/usr/local/bin/mcpsnoop" }
+	t.Cleanup(func() { wrapperPath = orig })
+
+	out := wrapOK(t, newWrapCmd, "everything", "--config", path)
+	if !strings.Contains(out, "nothing to do") {
+		t.Fatalf("a second wrap is still a no-op: %q", out)
+	}
+	if !strings.Contains(out, stubWrapperPath) || !strings.Contains(out, "/usr/local/bin/mcpsnoop") {
+		t.Fatalf("the note must name both paths: %q", out)
+	}
+	if !strings.Contains(out, "unwrap") {
+		t.Fatalf("the note must say how to re-point it: %q", out)
+	}
+}
+
+// TestSameJSONKeepsEveryDistinctionTheFileMakes. sameJSON decides whether unwrap
+// overwrites the whole config with the backup, so a false yes throws away
+// whatever the user changed in between. json.Unmarshal into any answers this
+// question wrongly twice over, collapsing large integers into a float64 and
+// keeping only the last of a repeated name.
+func TestSameJSONKeepsEveryDistinctionTheFileMakes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a, b string
+		same bool
+	}{
+		{"reordered keys", `{"a":1,"b":2}`, `{"b":2,"a":1}`, true},
+		{"reindented", "{\n  \"a\": [1, 2]\n}", `{"a":[1,2]}`, true},
+		{"integers past float64", `{"id":9007199254740992}`, `{"id":9007199254740993}`, false},
+		{"integer against float", `{"id":1}`, `{"id":1.0}`, false},
+		{"exponent against digits", `{"id":100}`, `{"id":1e2}`, false},
+		{"a discarded duplicate", `{"a":9,"a":2}`, `{"a":7,"a":2}`, false},
+		{"a genuine difference", `{"a":1}`, `{"a":2}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameJSON([]byte(tc.a), []byte(tc.b)); got != tc.same {
+				t.Fatalf("sameJSON(%s, %s) = %v, want %v", tc.a, tc.b, got, tc.same)
+			}
+		})
+	}
+}
+
+// TestUnwrapKeepsTheBackupWhileAHandWrappedServerRemains. A user can wrap an
+// entry by hand before mcpsnoop ever runs, and then the backup mcpsnoop takes
+// holds a config that is already partly wrapped. Restoring it is right, removing
+// it is not: the other server still runs through mcpsnoop and the copy of the
+// config is still the only way back.
+func TestUnwrapKeepsTheBackupWhileAHandWrappedServerRemains(t *testing.T) {
+	handWrapped := strings.Replace(wrapFixture,
+		`"other": { "command": "python", "args": ["server.py"] }`,
+		`"other": { "command": "`+stubWrapperPath+`", "args": ["--", "python", "server.py"] }`, 1)
+	path := newWrapTest(t, handWrapped)
+
+	wrapOK(t, newWrapCmd, "everything", "--config", path)
+	out := wrapOK(t, newUnwrapCmd, "everything", "--config", path)
+
+	if got := readConfig(t, path); got != handWrapped {
+		t.Fatalf("the config did not come back byte for byte:\n%s", got)
+	}
+	if _, err := os.Stat(path + backupSuffix); err != nil {
+		t.Fatal(`the backup went while "other" still runs through mcpsnoop`)
+	}
+	if strings.Contains(out, "nothing is wrapped any more") {
+		t.Fatalf("unwrap claimed the config is clear while a server is still wrapped: %q", out)
 	}
 }
