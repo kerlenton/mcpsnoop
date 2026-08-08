@@ -741,3 +741,63 @@ func TestCheckJUnitSurfacesTheBaselineState(t *testing.T) {
 		t.Fatalf("a baseline error must not be reported as a tool change:\n%s", stdout)
 	}
 }
+
+// TestCheckFailsOnSchemaFindings. schema is the one member of checkSignalOrder
+// with no gate test, and five separate mutations of its path survived the whole
+// suite: the count returning zero, the selector being rejected, the section not
+// being printed, the section being empty, and the junit reason falling through
+// to "signal". This walks the flag end to end, from parsing it to failing on it
+// to naming what failed.
+func TestCheckFailsOnSchemaFindings(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[`+
+			`{"name":"search","inputSchema":{"type":"object","properties":{"q":{"oneOf":[{"type":"string"},{"type":"integer"}]}}}},`+
+			`{"name":"lookup","inputSchema":{"type":"object","$schema":"http://json-schema.org/draft-07/schema#"}}`+
+			`]}}`),
+	)
+
+	// The observations never fail a default run, which is what makes them
+	// observations rather than the violation.
+	code, stdout, _ := executeCheck(t, []string{"-"}, log)
+	if code != 0 {
+		t.Fatalf("exit = %d on the default gate, want 0\n%s", code, stdout)
+	}
+	if got := checkTextSignalCount(t, stdout, "schema_findings"); got != 2 {
+		t.Fatalf("schema_findings = %d, want 2", got)
+	}
+
+	code, stdout, _ = executeCheck(t, []string{"--fail-on", "schema", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d under --fail-on schema, want 1\n%s", code, stdout)
+	}
+	// The section names the tool under its kind, or a failing run says only that
+	// two findings exist and leaves the reader to find them.
+	for _, want := range []string{"schema findings:", "oneOf: search", "nonDefaultDialect: lookup", "check failed: schema"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+
+	_, junit, _ := executeCheck(t, []string{"--format", "junit", "--fail-on", "schema", "-"}, log)
+	if !strings.Contains(junit, `<failure message="session s1 has 2 schema findings"`) {
+		t.Fatalf("junit does not name the schema failure:\n%s", junit)
+	}
+}
+
+// TestCheckRejectsAnUnknownSignalAndAcceptsEveryKnownOne. parseCheckSignals is a
+// hand-kept switch beside checkSignalOrder, so a signal added to the list and
+// forgotten there is rejected as a typo the moment somebody selects it.
+func TestCheckRejectsAnUnknownSignalAndAcceptsEveryKnownOne(t *testing.T) {
+	names := make([]string, 0, len(checkSignalOrder))
+	for _, signal := range checkSignalOrder {
+		names = append(names, string(signal))
+	}
+	if _, err := parseCheckSignals(strings.Join(names, ",")); err != nil {
+		t.Fatalf("every signal in checkSignalOrder must be selectable: %v", err)
+	}
+	if _, err := parseCheckSignals("schemas"); err == nil {
+		t.Fatal("an unknown signal must be rejected rather than silently ignored")
+	}
+}

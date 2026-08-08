@@ -572,6 +572,45 @@ func TestDialectIsUnverifiableAfterRedaction(t *testing.T) {
 	if got := analyzeInputSchema(scrubbed, false); !slices.Contains(got, SchemaFinding{Kind: FindingNonDefaultDialect}) {
 		t.Fatalf("an unredacted capture spelling the placeholder reported %v", got)
 	}
+
+	// A --redact-value pattern rewrites its match in place rather than replacing
+	// the value, so scrubbing a hostname out of a $schema leaves a URI that is
+	// still mostly the server's. An equality test does not see that, and the
+	// reader then judges bytes mcpsnoop wrote as a dialect the server chose.
+	for _, uri := range []string{
+		`https://[REDACTED]/draft/2020-12/schema`,
+		`https://json-schema.org/[REDACTED]/2020-12/schema`,
+		`https://schemas.[REDACTED]/dialect/v1`,
+	} {
+		partial := json.RawMessage(`{"type":"object","$schema":"` + uri + `"}`)
+		if got := analyzeInputSchema(partial, true); slices.Contains(got, SchemaFinding{Kind: FindingNonDefaultDialect}) {
+			t.Fatalf("a partly scrubbed %s reported %v", uri, got)
+		}
+	}
+}
+
+// TestAScrubbedRefIsNotPromotedToAnExternalOne. The classification is by prefix,
+// and the placeholder does not start with "#", so a scrubbed reference read by
+// its bytes becomes the external kind, which is the one the spec warns
+// implementers not to follow blindly and the one the TUI ranks highest. The flip
+// is always toward the scarier verdict on a capture that cannot show which it
+// was.
+func TestAScrubbedRefIsNotPromotedToAnExternalOne(t *testing.T) {
+	for _, ref := range []string{`[REDACTED]`, `#/$defs/[REDACTED]`, `https://[REDACTED]/x.json`} {
+		schema := json.RawMessage(`{"type":"object","properties":{"a":{"$ref":"` + ref + `"}}}`)
+		got := analyzeInputSchema(schema, true)
+		if slices.Contains(got, SchemaFinding{Kind: FindingExternalRef}) {
+			t.Fatalf("a scrubbed ref %q was reported as external: %v", ref, got)
+		}
+		if !slices.Contains(got, SchemaFinding{Kind: FindingRef}) {
+			t.Fatalf("a scrubbed ref %q lost its finding entirely: %v", ref, got)
+		}
+	}
+	// Unredacted, the same bytes are still classified by what they say.
+	plain := json.RawMessage(`{"type":"object","properties":{"a":{"$ref":"https://example.com/x.json"}}}`)
+	if got := analyzeInputSchema(plain, false); !slices.Contains(got, SchemaFinding{Kind: FindingExternalRef}) {
+		t.Fatalf("a real external ref reported %v", got)
+	}
 }
 
 // TestObservationalKindsAreEveryKindButTheViolation. ObservationalSchemaKinds

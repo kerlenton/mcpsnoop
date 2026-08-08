@@ -154,6 +154,16 @@ func unverifiableAfterRedaction(redacted bool, values ...string) bool {
 	return redacted && slices.Contains(values, redactedMarker)
 }
 
+// partlyRedacted is unverifiableAfterRedaction for a value a rule can rewrite in
+// place rather than replace. A --redact-value pattern matching part of a URI
+// leaves a string that is neither what the server sent nor the placeholder, so
+// an equality test does not see it and the reader judges bytes mcpsnoop wrote.
+// Gated on the frame having been rewritten for the same reason as its sibling,
+// since the marker is a substring either peer may send.
+func partlyRedacted(redacted bool, value string) bool {
+	return redacted && strings.Contains(value, redactedMarker)
+}
+
 // mcpParamHeaderWarnings compares each bound header against the argument it
 // mirrors. redacted says the frame passed through mcpsnoop's own redaction,
 // which is what makes the placeholder below trustworthy as a placeholder.

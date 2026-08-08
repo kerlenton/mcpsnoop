@@ -116,7 +116,7 @@ func analyzeSchema(raw json.RawMessage, redacted, checkRoot bool) []SchemaFindin
 	if declaresNonDefaultDialect(v, redacted) {
 		addFinding(&findings, seen, FindingNonDefaultDialect)
 	}
-	walkSchema(v, &findings, seen)
+	walkSchema(v, &findings, seen, redacted)
 	return findings
 }
 
@@ -137,7 +137,10 @@ func declaresNonDefaultDialect(v any, redacted bool) bool {
 	if !ok || uri == "" {
 		return false
 	}
-	if unverifiableAfterRedaction(redacted, uri) {
+	// partlyRedacted rather than an equality test: a value rule rewrites a match in
+	// place, so scrubbing a hostname out of a $schema leaves a URI that is still
+	// mostly the server's and no longer the dialect it named.
+	if partlyRedacted(redacted, uri) {
 		return false
 	}
 	// The trailing "#" is the empty fragment, which names the same document, and
@@ -245,7 +248,7 @@ func isTyped(schema map[string]any) bool {
 	return false
 }
 
-func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]bool) {
+func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]bool, redacted bool) {
 	node, ok := v.(map[string]any)
 	if !ok {
 		return
@@ -268,8 +271,13 @@ func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]boo
 		// A reference starting with # points inside this document. Anything else
 		// points outside it, which is both a portability problem and the case the
 		// spec warns implementers not to follow blindly.
+		//
+		// A scrubbed reference is reported as the internal kind. The placeholder
+		// does not start with #, so classifying by the bytes would promote every
+		// redacted reference to the scarier verdict, on a capture that cannot show
+		// which one it was.
 		kind := FindingExternalRef
-		if strings.HasPrefix(ref, "#") {
+		if strings.HasPrefix(ref, "#") || partlyRedacted(redacted, ref) {
 			kind = FindingRef
 		}
 		addFinding(findings, seen, kind)
@@ -281,7 +289,7 @@ func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]boo
 				if !isTyped(schema) {
 					addFinding(findings, seen, FindingUntypedProperty)
 				}
-				walkSchema(schema, findings, seen)
+				walkSchema(schema, findings, seen, redacted)
 			}
 		}
 	}
@@ -290,7 +298,7 @@ func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]boo
 	for _, key := range []string{"oneOf", "anyOf", "allOf", "prefixItems"} {
 		if arr, ok := node[key].([]any); ok {
 			for _, child := range arr {
-				walkSchema(child, findings, seen)
+				walkSchema(child, findings, seen, redacted)
 			}
 		}
 	}
@@ -299,7 +307,7 @@ func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]boo
 	// is just as real as one at the top, so the walk has to reach them.
 	for _, key := range []string{"not", "items", "additionalProperties", "if", "then", "else", "contains", "propertyNames"} {
 		if child, ok := node[key]; ok {
-			walkSchema(child, findings, seen)
+			walkSchema(child, findings, seen, redacted)
 		}
 	}
 
@@ -307,7 +315,7 @@ func walkSchema(v any, findings *[]SchemaFinding, seen map[SchemaFindingKind]boo
 	for _, key := range []string{"$defs", "definitions", "patternProperties", "dependentSchemas"} {
 		if group, ok := node[key].(map[string]any); ok {
 			for _, child := range group {
-				walkSchema(child, findings, seen)
+				walkSchema(child, findings, seen, redacted)
 			}
 		}
 	}

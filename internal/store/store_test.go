@@ -1325,8 +1325,13 @@ func TestNonObjectRootInputSchemaWarnsOnToolsList(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("events = %d, want 2", len(events))
 	}
-	if !strings.Contains(events[1].Warning, `tool "read_file" inputSchema is not an object schema`) {
-		t.Fatalf("warning = %q", events[1].Warning)
+	// The reason names what was actually on the wire. "the schema is wrong" would
+	// leave a reader bisecting a listing, which is the cost issue #199 measured in
+	// weeks.
+	for _, want := range []string{`tool "read_file" advertises`, "no root type", `root type is "object"`} {
+		if !strings.Contains(events[1].Warning, want) {
+			t.Fatalf("warning = %q, want it to mention %q", events[1].Warning, want)
+		}
 	}
 	definitions, ok := s.ToolDefinitions("s1")
 	if !ok || len(definitions) != 1 {
@@ -1351,8 +1356,8 @@ func TestNonObjectRootOnPartialToolsListStillWarns(t *testing.T) {
 		`"result":{"tools":[{"name":"read_file","inputSchema":{}}],"nextCursor":"p2"}`))
 
 	events := s.Timeline("s1")
-	if !strings.Contains(events[1].Warning, `tool "read_file" inputSchema is not an object schema`) {
-		t.Fatalf("warning = %q, want nonObjectRoot on partial listing", events[1].Warning)
+	if !strings.Contains(events[1].Warning, `tool "read_file" advertises an inputSchema with no root type`) {
+		t.Fatalf("warning = %q, want the root violation on a partial listing", events[1].Warning)
 	}
 }
 

@@ -570,21 +570,37 @@ than one kind.
 | Shown | Means |
 |---|---|
 | `no root` | the `inputSchema` is absent, is not a JSON object, or has a root type other than `"object"` |
+| `dialect` | a `$schema` naming a dialect other than the 2020-12 the revision defaults to |
 | `ext ref` | a `$ref` pointing outside the document, which is also the case the spec warns implementers not to follow blindly |
 | `oneOf`, `anyOf`, `allOf`, `not` | a composition keyword, handled inconsistently across clients |
 | `ref` | a `$ref` pointing inside the same document |
 | `untyped` | a property that declares no type and no other way of saying what it accepts |
 
 All but the first are observations rather than verdicts. A schema using `oneOf`
-is not wrong, only likely to be read differently by different clients. `no root`
-is the exception: the `Tool` definition requires `inputSchema` and pins its root
-type to `"object"`, so a client validating a listing rejects that tool outright
-and it never becomes callable, with nothing on the wire to say why. `no root`
-leads the column for that reason, and a schema mcpsnoop's own redaction scrubbed
-is never reported, since an unreadable schema is not a wrong one.
+is not wrong, only likely to be read differently by different clients, and a
+schema may declare whatever dialect it likes. `no root` is the exception: the
+`Tool` definition requires `inputSchema` and pins its root type to `"object"`, so
+a client validating a listing rejects that tool outright and it never becomes
+callable, with nothing on the wire to say why. `no root` leads the column for
+that reason, and a schema mcpsnoop's own redaction scrubbed is never reported,
+since an unreadable schema is not a wrong one.
 
-The column carries the warning color and never the red of the ERR column. There
-is no `check` signal for any of it yet, and nothing about MCP traffic changes.
+That split decides what `check` does with them. `no root` is a warning on the
+`tools/list` frame, so it fails the default `error,invalid,warn` gate with no
+flag at all, which is the point: a server that ships an unusable tool answers
+every handshake normally and simply never receives a `tools/call`. The
+observations are counted as `schema_findings` and reported under `schema
+findings:`, and only fail the run when you add `schema` to `--fail-on`. Both
+reach `--format junit` and `--format sarif`, and `export` carries the per-tool
+list under `summary.definitions.per_tool[].findings`.
+
+```bash
+mcpsnoop check session.jsonl                     # a non-object root already fails this
+mcpsnoop check --fail-on schema session.jsonl    # and now so do the observations
+```
+
+The column carries the warning color and never the red of the ERR column, and
+mcpsnoop still changes nothing about the traffic it forwards.
 
 Nothing is resolved or fetched. An external `$ref` is recognized by its form
 alone, and the schema it points at is never read.

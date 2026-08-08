@@ -270,10 +270,11 @@ type session struct {
 	// is parked here and Ingest drains it onto the tools/list response frame that
 	// carried the definitions.
 	paramHeaderInvalid []paramHeaderViolation
-	// schemaRootInvalid names tools whose inputSchema is not an object schema.
-	// Parked and drained the same way as paramHeaderInvalid so a partly paginated
-	// listing still reports the violation on the frame that carried it.
-	schemaRootInvalid []string
+	// schemaRootInvalid names tools whose inputSchema is not an object schema,
+	// with the reason in the words schemaRootViolation composed. Parked and
+	// drained the same way as paramHeaderInvalid so a partly paginated listing
+	// still reports the violation on the frame that carried it.
+	schemaRootInvalid []paramHeaderViolation
 
 	command []string
 	cwd     string
@@ -481,9 +482,14 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			}
 		}
 		sess.paramHeaderInvalid = nil
-		for _, tool := range sess.schemaRootInvalid {
+		// A client validating a listing rejects the tool outright and never calls
+		// it, with nothing on the wire to say why, so this is the frame to say it
+		// on. The reason names what was actually there, since "the schema is wrong"
+		// leaves a reader bisecting a listing.
+		for _, invalid := range sess.schemaRootInvalid {
 			ev.warning = appendWarning(ev.warning,
-				"tool "+strconv.Quote(tool)+" inputSchema is not an object schema")
+				"tool "+strconv.Quote(invalid.tool)+" advertises "+invalid.reason+
+					`, and 2026-07-28 requires one whose root type is "object"`)
 		}
 		sess.schemaRootInvalid = nil
 		if c != nil {
@@ -1241,7 +1247,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 	}
 
 	var invalidParamHeaderTools []paramHeaderViolation
-	var invalidSchemaRootTools []string
+	var invalidSchemaRootTools []paramHeaderViolation
 	for _, rawTool := range r.Tools {
 		var tool struct {
 			Name string `json:"name"`
@@ -1311,8 +1317,9 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 		findings := mergeSchemaFindings(
 			analyzeInputSchema(schema, redacted),
 			analyzeOutputSchema(tool.OutputSchema, redacted))
-		if slices.ContainsFunc(findings, func(f SchemaFinding) bool { return f.Kind == FindingNonObjectRoot }) {
-			invalidSchemaRootTools = append(invalidSchemaRootTools, tool.Name)
+		if reason := schemaRootViolation(schema, redacted); reason != "" {
+			invalidSchemaRootTools = append(invalidSchemaRootTools,
+				paramHeaderViolation{tool: tool.Name, reason: reason})
 		}
 
 		sess.toolDefinitions[tool.Name] = ToolDefinition{
