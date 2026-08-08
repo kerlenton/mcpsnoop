@@ -117,7 +117,11 @@ func statusRank(status string) int {
 	switch status {
 	case "error":
 		return 2
-	case "pending":
+	case "pending", "call_cancelled", "late_result":
+		// A call the client gave up on, and a result that arrived after it did,
+		// both end without the answer the caller wanted. Ranking them with ok made
+		// a run that went from ok to late_result print the change and still exit 0,
+		// so the line a human reads and the code a CI job reads disagreed.
 		return 1
 	default: // ok, and anything unexpected
 		return 0
