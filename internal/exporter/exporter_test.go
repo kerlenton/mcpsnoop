@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1386,5 +1387,35 @@ func TestLoadFileLinesCountsBlankLines(t *testing.T) {
 		if !ok || got != want {
 			t.Fatalf("seq %d is on line %d (ok=%v), want %d", seq, got, ok, want)
 		}
+	}
+}
+
+// TestNewlineCounterDropsOffsetsItHasWalkedPast. json.Decoder reads ahead of the
+// value it hands back, so the buffer is essentially never empty when lineAt runs
+// and a "reuse it once drained" rule never fires. That kept one int64 per line of
+// the capture alive for the whole load, on the format that never asked for a line
+// index at all.
+func TestNewlineCounterDropsOffsetsItHasWalkedPast(t *testing.T) {
+	const lines = 20000
+	body := strings.Repeat("x\n", lines)
+	// A reader that hands over the whole stream at once, which is the worst case:
+	// every newline is recorded before the first lineAt call walks past any.
+	counter := &newlineCounter{r: strings.NewReader(body)}
+	buf := make([]byte, len(body))
+	if _, err := io.ReadFull(counter, buf); err != nil {
+		t.Fatal(err)
+	}
+
+	for line := 1; line <= lines; line++ {
+		// Two bytes per line, so a value on line n ends just past offset 2n-1, one
+		// short of that line's own newline. Stopping there rather than walking past
+		// it is the point: it is the state a forward pass is always in, and the state
+		// the old "reuse it once drained" rule never recognised.
+		if got := counter.lineAt(int64(2*line - 1)); got != line {
+			t.Fatalf("lineAt(%d) = %d, want %d", 2*line-1, got, line)
+		}
+	}
+	if got := len(counter.offsets); got > 1 {
+		t.Fatalf("offsets = %d after walking %d lines, want only what is still ahead", got, lines)
 	}
 }

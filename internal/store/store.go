@@ -212,13 +212,18 @@ type event struct {
 	call               *call  // set for request/response events
 	taskCall           *call  // originating call for a task lifecycle frame
 	taskID             string
-	// errored marks the frame this session counted an error on. It is set at
-	// every site that increments sess.errors, so a reporter can name the frames
-	// behind the count instead of re-deriving the conditions and drifting from
-	// them. A transport failure and an unmatched error response carry no call at
-	// all, and a task failure is counted on its terminal frame rather than on the
-	// call's first response, so call.errored alone cannot stand in for this.
+	// errored marks a frame this session counted an error on. It is set at every
+	// site that increments sess.errors, so a reporter can name the frames behind
+	// the count instead of re-deriving the conditions and drifting from them. A
+	// transport failure and an unmatched error response carry no call at all, and
+	// a task failure is counted on its terminal frame rather than on the call's
+	// first response, so call.errored alone cannot stand in for this.
 	errored bool
+	// lateResult marks the frame this session counted a late result on, the same
+	// way errored marks a counted error. call.lateResult stays true for the rest
+	// of the capture and is visible from the request frame too, so it cannot
+	// stand in for this.
+	lateResult bool
 	// mrtrRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised. Empty on an ordinary request.
 	mrtrRoot string
@@ -430,6 +435,10 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		c, matched := sess.completeCall(ev.id, e.Direction, e.ConnID, e.TS, msg)
 		ev.call = c
 		if matched && c != nil && c.lateResult {
+			// One-for-one with sess.lateResults++: completeCall returns matched for the
+			// frame that incremented it and false for any further response to the same
+			// call, so this marks each counted late result exactly once.
+			ev.lateResult = true
 			ev.observation = "result arrived " + e.TS.Sub(c.cancelledAt).Round(time.Millisecond).String() + " after cancellation"
 		}
 		if c != nil && c.state != Pending && c.state != Streaming {

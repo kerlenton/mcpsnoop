@@ -33,8 +33,14 @@ func TestCheckSARIFCleanSessionDeclaresEveryRuleAndNoResults(t *testing.T) {
 	}
 
 	report := decodeCheckSARIF(t, stdout)
-	if report.Schema == "" || report.Version != sarifVersion {
-		t.Fatalf("$schema = %q, version = %q", report.Schema, report.Version)
+	// Pinned as literals rather than compared against the constants that produced
+	// them, which would hold whatever typo the constants held. Code scanning names
+	// this exact $schema and accepts no version but 2.1.0.
+	if report.Schema != "https://json.schemastore.org/sarif-2.1.0.json" {
+		t.Fatalf("$schema = %q, want the URI code scanning documents", report.Schema)
+	}
+	if report.Version != "2.1.0" {
+		t.Fatalf("version = %q, want 2.1.0, the only version code scanning ingests", report.Version)
 	}
 	if len(report.Runs) != 1 {
 		t.Fatalf("runs = %d, want exactly one for the whole file", len(report.Runs))
@@ -47,8 +53,9 @@ func TestCheckSARIFCleanSessionDeclaresEveryRuleAndNoResults(t *testing.T) {
 	// closes.
 	want := []string{
 		"mcpsnoop/error", "mcpsnoop/invalid", "mcpsnoop/warn", "mcpsnoop/mismatch",
-		"mcpsnoop/pending", "mcpsnoop/drift", "mcpsnoop/deprecated", "mcpsnoop/incomplete",
-		"mcpsnoop/assertion",
+		"mcpsnoop/pending", "mcpsnoop/late-result", "mcpsnoop/drift", "mcpsnoop/deprecated",
+		"mcpsnoop/incomplete",
+		"mcpsnoop/assertion", "mcpsnoop/report-truncated",
 	}
 	if len(driver.Rules) != len(want) {
 		t.Fatalf("rules = %d, want %d", len(driver.Rules), len(want))
@@ -58,8 +65,10 @@ func TestCheckSARIFCleanSessionDeclaresEveryRuleAndNoResults(t *testing.T) {
 		if rule.ID != id {
 			t.Fatalf("rule %d = %q, want %q", i, rule.ID, id)
 		}
-		if rule.Name == "" || rule.ShortDescription.Text == "" || rule.FullDescription.Text == "" {
-			t.Fatalf("rule %q is missing a name or a description: %+v", id, rule)
+		// help.text as well: code scanning marks it required and renders it as the
+		// alert's "how to fix" panel, which is blank without one.
+		if rule.Name == "" || rule.ShortDescription.Text == "" || rule.FullDescription.Text == "" || rule.Help.Text == "" {
+			t.Fatalf("rule %q is missing a name, a description or its help: %+v", id, rule)
 		}
 	}
 }
@@ -643,4 +652,256 @@ func checkTextSignalCount(t *testing.T, out, signal string) int {
 	}
 	t.Fatalf("text report names no %s count:\n%s", signal, out)
 	return 0
+}
+
+// TestEverySignalHasItsOwnSARIFRule. checkSARIFRules walks checkSignalOrder, so a
+// signal added to that list reaches the report on its own. What it does not get
+// on its own is a description, and the fallback hands out a placeholder that
+// would land in a code-scanning alert as the whole explanation. Adding
+// late-result did exactly that and only the rule count caught it.
+func TestEverySignalHasItsOwnSARIFRule(t *testing.T) {
+	for _, signal := range checkSignalOrder {
+		name, short, full, help := checkSARIFSignalRule(signal)
+		if name == string(signal) {
+			t.Errorf("signal %q fell through to the placeholder rule name", signal)
+		}
+		if short == "An mcpsnoop check signal" || full == "A signal reported by mcpsnoop check." {
+			t.Errorf("signal %q has no description of its own", signal)
+		}
+		if help == "See the mcpsnoop documentation." {
+			t.Errorf("signal %q has no help of its own", signal)
+		}
+	}
+}
+
+// TestCheckSARIFReportsEverySignalTheGateCounts. A rule declared with nothing
+// that can ever emit it is worse than no rule: the run goes red, the Security
+// tab shows the rule, and there is no alert to open. late-result shipped exactly
+// that way, and the rule walk above did not catch it because a description is
+// not a result. This walks emission instead, comparing the report against the
+// counts the text format prints for the same capture.
+func TestCheckSARIFReportsEverySignalTheGateCounts(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t, everySignalEnvelopes()...)
+
+	_, textOut, _ := executeCheck(t, []string{"-"}, log)
+	_, sarifOut, _ := executeCheck(t, []string{"--format", "sarif", "-"}, log)
+	report := decodeCheckSARIF(t, sarifOut)
+
+	// drift needs a baseline and incomplete needs a dropped frame, neither of
+	// which belongs in one hand-written capture. Both are covered on their own.
+	skip := map[checkSignal]bool{checkDrift: true, checkIncomplete: true}
+	counted := 0
+	for _, signal := range checkSignalOrder {
+		if skip[signal] {
+			continue
+		}
+		want := checkTextSignalCount(t, textOut, checkTextCountField(signal))
+		if want == 0 {
+			t.Fatalf("the fixture must trigger %s, or this test proves nothing about it:\n%s", signal, textOut)
+		}
+		counted++
+		if got := len(sarifResultsFor(report, sarifRuleID(signal))); got != want {
+			t.Fatalf("sarif reported %d %s results, the gate counted %d:\n%s", got, signal, want, sarifOut)
+		}
+	}
+	if counted != len(checkSignalOrder)-len(skip) {
+		t.Fatalf("walked %d signals, want every one of checkSignalOrder bar the skipped", counted)
+	}
+}
+
+// checkTextCountField maps a signal to the field the text report prints it
+// under, so the walk above compares against the gate rather than a constant.
+func checkTextCountField(signal checkSignal) string {
+	switch signal {
+	case checkWarn:
+		return "warnings"
+	case checkMismatch:
+		return "mismatches"
+	case checkLateResult:
+		return "late_results"
+	case checkIncomplete:
+		return "missing_frames"
+	case checkError:
+		return "errors"
+	}
+	return string(signal)
+}
+
+// everySignalEnvelopes is one session triggering every signal a single capture
+// can carry, so a walk over checkSignalOrder has something to measure.
+func everySignalEnvelopes() []proxy.Envelope {
+	return []proxy.Envelope{
+		// error: a call answered with a JSON-RPC error.
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search"}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"boom"}}`),
+		// invalid: a frame that is not JSON-RPC at all.
+		checkEnvelope(3, proxy.ServerToClient, `{"hello":"world"}`),
+		// warn: a response carrying neither result nor error.
+		checkEnvelope(4, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"ping"}`),
+		checkEnvelope(5, proxy.ServerToClient, `{"jsonrpc":"2.0","id":2}`),
+		// mismatch: an Mcp-Method header naming a different method than the body.
+		{
+			SessionID: "s1", ServerLabel: "srv", Seq: 6, TS: time.Unix(6, 0),
+			Direction: proxy.ClientToServer, Transport: proxy.TransportHTTP,
+			MCPMethod: "resources/read",
+			Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search"}}`),
+		},
+		checkEnvelope(7, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`),
+		// late-result: a cancelled call the server answered anyway.
+		checkEnvelope(8, proxy.ClientToServer, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"slow"}}`),
+		checkEnvelope(9, proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":4}}`),
+		checkEnvelope(10, proxy.ServerToClient, `{"jsonrpc":"2.0","id":4,"result":{"content":[]}}`),
+		// deprecated: logging, which 2026-07-28 retired in favour of stderr.
+		checkEnvelope(11, proxy.ClientToServer, `{"jsonrpc":"2.0","id":5,"method":"logging/setLevel","params":{"level":"debug"}}`),
+		checkEnvelope(12, proxy.ServerToClient, `{"jsonrpc":"2.0","id":5,"result":{}}`),
+		// pending: a call still open when the capture ends.
+		checkEnvelope(13, proxy.ClientToServer, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"hang"}}`),
+	}
+}
+
+// TestCheckOnlySARIFPaysForTheLineIndex. The index retains one map entry per
+// captured frame for the whole run, and only SARIF ever reads it, so building it
+// for text, junit and baseline was a cost the default format paid for nothing.
+func TestCheckOnlySARIFPaysForTheLineIndex(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.jsonl")
+	writeCheckLog(t, path, checkSignalEnvelopes()...)
+
+	// Only sarif names a line, so only sarif asks for the index.
+	for _, format := range []checkOutputFormat{checkFormatText, checkFormatJUnit} {
+		if format.needsLineIndex() {
+			t.Errorf("%s reports per session, so it must not build a per-frame index", format)
+		}
+	}
+	if !checkFormatSARIF.needsLineIndex() {
+		t.Error("sarif anchors its results at a line, so it must build the index")
+	}
+
+	cmd := newCheckCmd()
+	withLines, err := loadCheckSession(cmd, path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withLines.lines) == 0 {
+		t.Fatal("a sarif run must get the index, or its results carry no region")
+	}
+	without, err := loadCheckSession(cmd, path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if without.lines != nil {
+		t.Fatalf("a run that never names a line built %d index entries", len(without.lines))
+	}
+	// The store itself is unchanged either way, so nothing but the index moves.
+	if len(without.store.Timeline(without.sessionID)) != len(withLines.store.Timeline(withLines.sessionID)) {
+		t.Fatal("skipping the index changed what was loaded")
+	}
+}
+
+// TestCheckSARIFNamesTheLateResultAndItsDelay. The delay is what separates the
+// race the specification allows for, a cancellation crossing a reply in flight,
+// from a server that carried on working after being told to stop, so a result
+// that only said "late" would leave the reader unable to tell them apart.
+func TestCheckSARIFNamesTheLateResultAndItsDelay(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Chdir(dir)
+	writeCheckLog(t, filepath.Join(dir, "late.jsonl"),
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow"}}`),
+		checkEnvelope(2, proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}`),
+		checkEnvelope(5, proxy.ServerToClient, `{"jsonrpc":"2.0","id":7,"result":{"content":[]}}`),
+	)
+
+	code, stdout, _ := executeCheck(t, []string{"--format", "sarif", "--fail-on", "late-result", "late.jsonl"}, "")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, stdout)
+	}
+	report := decodeCheckSARIF(t, stdout)
+	results := sarifResultsFor(report, "mcpsnoop/late-result")
+	if len(results) != 1 {
+		t.Fatalf("late-result results = %d, want one; a red build with nothing to open is the bug this pins\n%s",
+			len(results), stdout)
+	}
+	for _, want := range []string{"tools/call slow (id 7)", "after cancellation"} {
+		if !strings.Contains(results[0].Message.Text, want) {
+			t.Fatalf("the late-result message must carry %q: %q", want, results[0].Message.Text)
+		}
+	}
+	if results[0].Level != "error" {
+		t.Fatalf("late-result level = %q, want error when the gate selected it", results[0].Level)
+	}
+	// The frame the answer arrived on, which is line 3 while its Seq is 5.
+	if got := sarifRegionOf(t, results[0]).StartLine; got != 3 {
+		t.Fatalf("region startLine = %d, want 3, the line the late answer arrived on", got)
+	}
+}
+
+// TestCheckSARIFCapsTheResultsAndSaysSo. Code scanning refuses a run holding
+// more than 25,000 results, so an unbounded report on a large capture never
+// reaches the Security tab at all, and silently keeps only the top 5,000 below
+// that. A capped report that says what it left out beats both.
+func TestCheckSARIFCapsTheResultsAndSaysSo(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	var envelopes []proxy.Envelope
+	// Two findings per round trip, an error and a warning, enough of them to
+	// overflow the cap and few enough errors that the cut has a real preference
+	// to express rather than simply running out of room.
+	for i := uint64(0); i < sarifMaxResults/2+100; i++ {
+		envelopes = append(envelopes,
+			checkEnvelope(2*i+1, proxy.ClientToServer,
+				`{"jsonrpc":"2.0","id":`+strconv.FormatUint(i+1, 10)+`,"method":"tools/call","params":{"name":"search"}}`),
+			checkEnvelope(2*i+2, proxy.ServerToClient,
+				`{"jsonrpc":"2.0","id":`+strconv.FormatUint(i+1, 10)+`,"error":{"code":-32000,"message":"boom"},"result":{}}`))
+	}
+	log := encodeCheckLog(t, envelopes...)
+
+	_, textOut, _ := executeCheck(t, []string{"-"}, log)
+	errors := checkTextSignalCount(t, textOut, "errors")
+	warnings := checkTextSignalCount(t, textOut, "warnings")
+	found := errors + warnings
+	if found <= sarifMaxResults || errors >= sarifMaxResults {
+		t.Fatalf("the fixture must overflow the cap with room for the gate to choose, got %d errors and %d warnings",
+			errors, warnings)
+	}
+
+	// Gated on error alone, so the warnings are notes and the cut has a real
+	// preference to express rather than two rules at one level.
+	code, stdout, _ := executeCheck(t, []string{"--format", "sarif", "--fail-on", "error", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	report := decodeCheckSARIF(t, stdout)
+	if got := len(report.Runs[0].Results); got != sarifMaxResults {
+		t.Fatalf("results = %d, want exactly the cap of %d", got, sarifMaxResults)
+	}
+
+	notice := sarifResultsFor(report, "mcpsnoop/report-truncated")
+	if len(notice) != 1 {
+		t.Fatalf("a truncated report must say so, got %d notices", len(notice))
+	}
+	if !strings.Contains(notice[0].Message.Text, strconv.Itoa(found-sarifMaxResults+1)) {
+		t.Fatalf("the notice must name how many findings were left out: %q", notice[0].Message.Text)
+	}
+	// A warning, not an error: the gate decides whether the run passes, and the
+	// reporter must not fail a green one on its own.
+	if notice[0].Level != "warning" {
+		t.Fatalf("truncation level = %q, want warning", notice[0].Level)
+	}
+	// Every finding the gate failed on survives and the notes give way, since the
+	// other order would cut the alerts a reader has to act on. What room is left
+	// is still filled, so nothing is dropped that the report could have carried.
+	if got := len(sarifResultsFor(report, "mcpsnoop/error")); got != errors {
+		t.Fatalf("kept %d of %d errors, want all of them before any note", got, errors)
+	}
+	notes := 0
+	for _, result := range report.Runs[0].Results {
+		if result.Level == "note" {
+			notes++
+		}
+	}
+	if want := sarifMaxResults - 1 - errors; notes != want {
+		t.Fatalf("kept %d notes, want %d: the errors first, then the cap filled", notes, want)
+	}
 }

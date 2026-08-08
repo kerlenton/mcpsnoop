@@ -17,7 +17,10 @@ import (
 )
 
 const (
-	sarifSchema  = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+	// sarifSchema is the URI code scanning documents for a 2.1.0 log. The OASIS
+	// repository's own copy has moved twice and the path most producers still
+	// emit is a 404, which leaves a schema-aware reader with nothing to resolve.
+	sarifSchema  = "https://json.schemastore.org/sarif-2.1.0.json"
 	sarifVersion = "2.1.0"
 	// sarifDriverName and sarifInformationURI name the tool a code-scanning alert
 	// is attributed to, so both stay fixed regardless of how the binary was built.
@@ -26,13 +29,27 @@ const (
 	// sarifAssertionRuleID covers the --max-duration, --expect-tool and
 	// --forbid-tool failures, which are not signals and so have no signal name.
 	sarifAssertionRuleID = "mcpsnoop/assertion"
+	// sarifTruncationRuleID reports the report's own limit having been reached.
+	// It is not a signal either, and it describes this file rather than the
+	// traffic, but a reader who is not told the list was cut reads it as the
+	// whole story.
+	sarifTruncationRuleID = "mcpsnoop/report-truncated"
 	// sarifFingerprintKey is versioned, so a later change to how a finding is
 	// identified starts a fresh alert rather than silently rewriting the history
 	// of the alerts raised under the old scheme.
 	sarifFingerprintKey = "mcpsnoopFinding/v1"
 
-	sarifLevelError = "error"
-	sarifLevelNote  = "note"
+	sarifLevelError   = "error"
+	sarifLevelWarning = "warning"
+	sarifLevelNote    = "note"
+
+	// sarifMaxResults caps the results one run emits. Code scanning rejects a
+	// file outright above 25,000 results in a run and displays only the top 5,000
+	// of what it does accept, so an unbounded report either never reaches the
+	// Security tab or arrives silently cut. A capture can pass both thresholds
+	// without being pathological: one systematically misconfigured gateway yields
+	// two findings per request.
+	sarifMaxResults = 5000
 )
 
 type sarifLog struct {
@@ -57,11 +74,15 @@ type sarifDriver struct {
 	Rules          []sarifRule `json:"rules"`
 }
 
+// sarifRule carries help as well as the two descriptions, because code scanning
+// marks help.text required and renders it as the alert's "how to fix" panel. A
+// rule without one leaves that panel empty on every alert mcpsnoop raises.
 type sarifRule struct {
 	ID               string       `json:"id"`
 	Name             string       `json:"name"`
 	ShortDescription sarifMessage `json:"shortDescription"`
 	FullDescription  sarifMessage `json:"fullDescription"`
+	Help             sarifMessage `json:"help"`
 }
 
 type sarifMessage struct {
@@ -74,8 +95,11 @@ type sarifResult struct {
 	Level     string          `json:"level"`
 	Message   sarifMessage    `json:"message"`
 	Locations []sarifLocation `json:"locations,omitempty"`
-	// PartialFingerprints is what lets a consumer recognise a finding it has seen
-	// before across runs, so an unchanged one is not reported twice.
+	// PartialFingerprints identifies the finding rather than where it landed, so
+	// a consumer that reads the key can recognise the same finding in a later
+	// report over the same capture. Code scanning is not that consumer: it
+	// computes its own primaryLocationLineHash and ignores tool-defined keys, so
+	// this is written for everything else that reads SARIF.
 	PartialFingerprints map[string]string `json:"partialFingerprints"`
 }
 
@@ -138,8 +162,20 @@ func buildCheckSARIF(log checkLog, summaries []checkSummary, selected map[checkS
 			// run outright, so it is never a note. It also has no frame: it judges the
 			// session as a whole.
 			b.add(summary.sessionID, sarifAssertionRuleID, sarifLevelError,
-				fmt.Sprintf("session %s: %s", summary.sessionID, msg), msg, 0, false)
+				fmt.Sprintf("session %s: %s", summary.sessionID, msg), msg, 0)
 		}
+	}
+	if found := len(b.results); found > sarifMaxResults {
+		dropped := b.truncate()
+		// A warning, not an error: the gate has already decided whether this run
+		// passes, and a report that turned a green run red on its own would be the
+		// reporter overruling it. A note would be ranked below every finding if code
+		// scanning ever had to cut the list further, which is exactly when it must
+		// survive.
+		b.add("", sarifTruncationRuleID, sarifLevelWarning,
+			fmt.Sprintf("the capture holds %d findings, more than a code-scanning upload accepts in one run, so %d of them were left out of this report; the text and junit formats report all of them",
+				found, dropped),
+			"report-truncated", 0)
 	}
 	return sarifLog{
 		Schema:  sarifSchema,
@@ -176,24 +212,24 @@ func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 		// and a log carrying no result at all would read as though it had.
 		b.add(sessionID, sarifRuleID(checkDrift), sarifLevelNote,
 			fmt.Sprintf("session %s: recorded first-seen tool baseline (trusted, not verified)", sessionID),
-			"baseline-recorded", 0, false)
+			"baseline-recorded", 0)
 	}
 
 	var toolListSeq uint64
-	var toolListSeen bool
 	pending := make(map[string]bool)
 	for _, event := range st.Timeline(sessionID) {
 		if event.Kind == store.EventResponse && event.Call != nil && event.Call.Method == "tools/list" {
 			// The last page, not the first: a paginated listing is only complete after
 			// it, and drift compares the complete list.
-			toolListSeq, toolListSeen = event.Seq, true
+			toolListSeq = event.Seq
 		}
 		if event.Errored {
-			// Keyed off the frame the store counted the error on, so the results are
-			// one per counted error. Deriving them from Call.Errored instead reported
-			// neither a transport failure nor an unmatched error response, both of
-			// which carry no call, and anchored an async task failure at the call's
-			// first response rather than at the frame that failed it.
+			// Keyed off the frames the store counted the errors on, so the report
+			// names them rather than re-deriving the conditions and drifting from the
+			// gate. Deriving them from Call.Errored instead reported neither a
+			// transport failure nor an unmatched error response, both of which carry
+			// no call, and anchored an async task failure at the call's first response
+			// rather than at the frame that failed it.
 			b.frame(sessionID, checkError, sarifErrorMessage(sessionID, event), event.Seq)
 		}
 		if event.Kind == store.EventInvalid {
@@ -215,6 +251,12 @@ func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 			b.frame(sessionID, checkDeprecated,
 				fmt.Sprintf("session %s frame %d: %s", sessionID, event.Seq, event.Deprecated), event.Seq)
 		}
+		if event.LateResult {
+			// Keyed off the frame the store counted it on, like the error axis above.
+			// Call.LateResult is true from the request frame onwards once the answer
+			// lands, so reading it here would report the same finding twice.
+			b.frame(sessionID, checkLateResult, sarifLateResultMessage(sessionID, event), event.Seq)
+		}
 		if event.Kind == store.EventRequest && event.Call != nil && event.Call.State == store.Pending {
 			// A multi round-trip retry continues the same call, so keying on the call
 			// reports one hung operation rather than one per round trip.
@@ -234,7 +276,7 @@ func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 		// sends the reader after something that never happened.
 		b.add(sessionID, sarifRuleID(checkDrift), driftLevel,
 			fmt.Sprintf("session %s: tool baseline error: %s", sessionID, summary.drift.BaselineError),
-			"baseline-error", toolListSeq, toolListSeen)
+			"baseline-error", toolListSeq)
 	}
 	// Looped over store.ToolDriftKinds so a kind the gate counts cannot go
 	// unreported here, leaving a failing run with no result to act on.
@@ -242,7 +284,7 @@ func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 		for _, name := range summary.drift.Names(kind) {
 			b.add(sessionID, sarifRuleID(checkDrift), driftLevel,
 				fmt.Sprintf("session %s: tool %q %s", sessionID, name, driftLabel(kind)),
-				string(kind)+"/"+name, toolListSeq, toolListSeen)
+				string(kind)+"/"+name, toolListSeq)
 		}
 	}
 
@@ -250,20 +292,21 @@ func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 		// The dropped frames never reached the log, so there is no line to point at.
 		b.add(sessionID, sarifRuleID(checkIncomplete), b.level(checkIncomplete),
 			checkSignalFailureReason(sessionID, checkIncomplete, int(summary.missingFrames)),
-			"missing-frames", 0, false)
+			"missing-frames", 0)
 	}
 }
 
 // frame appends a finding anchored at one captured frame.
 func (b *sarifBuilder) frame(sessionID string, signal checkSignal, message string, seq uint64) {
-	b.add(sessionID, sarifRuleID(signal), b.level(signal), message, strconv.FormatUint(seq, 10), seq, true)
+	b.add(sessionID, sarifRuleID(signal), b.level(signal), message, strconv.FormatUint(seq, 10), seq)
 }
 
 // add appends one result. anchor identifies the finding for its fingerprint and
 // is deliberately never the line number: a line moves whenever anything above it
 // changes, and a fingerprint that moved with it would close the alert and reopen
-// the same finding as a new one.
-func (b *sarifBuilder) add(sessionID, ruleID, level, message, anchor string, seq uint64, framed bool) {
+// the same finding as a new one. A seq of zero means the finding has no frame,
+// which both transports leave free by numbering from one.
+func (b *sarifBuilder) add(sessionID, ruleID, level, message, anchor string, seq uint64) {
 	result := sarifResult{
 		RuleID:    ruleID,
 		RuleIndex: b.ruleIndex[ruleID],
@@ -275,7 +318,7 @@ func (b *sarifBuilder) add(sessionID, ruleID, level, message, anchor string, seq
 	}
 	if b.uri != "" {
 		physical := sarifPhysicalLocation{ArtifactLocation: sarifArtifactLocation{URI: b.uri}}
-		if framed {
+		if seq != 0 {
 			if line, ok := b.lines.Line(sessionID, seq); ok {
 				physical.Region = &sarifRegion{StartLine: line}
 			}
@@ -283,6 +326,30 @@ func (b *sarifBuilder) add(sessionID, ruleID, level, message, anchor string, seq
 		result.Locations = []sarifLocation{{PhysicalLocation: physical}}
 	}
 	b.results = append(b.results, result)
+}
+
+// truncate cuts the report down to what a code-scanning upload will carry and
+// returns how many results were left out. The findings the gate failed on go
+// first, since a note dropped in favour of an error costs a reader nothing they
+// were going to act on, and one slot is held back for the result that says the
+// list was cut.
+func (b *sarifBuilder) truncate() int {
+	kept := make([]sarifResult, 0, sarifMaxResults)
+	// Two ordered passes rather than a sort, so results keep the order they were
+	// found in within a level and two runs over one log stay byte-identical.
+	for _, level := range []string{sarifLevelError, sarifLevelWarning, sarifLevelNote} {
+		for _, result := range b.results {
+			if len(kept) == sarifMaxResults-1 {
+				break
+			}
+			if result.Level == level {
+				kept = append(kept, result)
+			}
+		}
+	}
+	dropped := len(b.results) - len(kept)
+	b.results = kept
+	return dropped
 }
 
 // level ties the report to the gate: a signal named in --fail-on is an error,
@@ -303,14 +370,15 @@ func sarifRuleID(signal checkSignal) string { return "mcpsnoop/" + string(signal
 // sees the rule again without its result, so a rule that vanished from a green
 // run would leave its fixed finding open forever.
 func checkSARIFRules() []sarifRule {
-	rules := make([]sarifRule, 0, len(checkSignalOrder)+1)
+	rules := make([]sarifRule, 0, len(checkSignalOrder)+2)
 	for _, signal := range checkSignalOrder {
-		name, short, full := checkSARIFSignalRule(signal)
+		name, short, full, help := checkSARIFSignalRule(signal)
 		rules = append(rules, sarifRule{
 			ID:               sarifRuleID(signal),
 			Name:             name,
 			ShortDescription: sarifMessage{Text: short},
 			FullDescription:  sarifMessage{Text: full},
+			Help:             sarifMessage{Text: help},
 		})
 	}
 	return append(rules, sarifRule{
@@ -318,37 +386,59 @@ func checkSARIFRules() []sarifRule {
 		Name:             "AssertionFailure",
 		ShortDescription: sarifMessage{Text: "The session violates an asserted contract"},
 		FullDescription:  sarifMessage{Text: "A --max-duration, --expect-tool or --forbid-tool assertion failed: a completed tool call exceeded the latency budget, a tool that had to be called never was, or a forbidden tool was."},
+		Help:             sarifMessage{Text: "The result names which assertion failed and what the run actually did. Either the run stopped meeting the contract, or the contract has moved on and the flag on the check step needs updating."},
+	}, sarifRule{
+		ID:               sarifTruncationRuleID,
+		Name:             "ReportTruncated",
+		ShortDescription: sarifMessage{Text: "The capture held more findings than this report carries"},
+		FullDescription:  sarifMessage{Text: "Code scanning refuses a run holding more than 25,000 results and displays only the top 5,000 of what it accepts, so mcpsnoop caps the report and says how many findings it left out. The findings the gate failed on are kept first."},
+		Help:             sarifMessage{Text: "Run mcpsnoop check over the same capture with the default text format, or with --format junit, to see every finding. A capture this large usually means one systematic fault repeating, so fixing the first few findings tends to clear most of the rest."},
 	})
 }
 
-func checkSARIFSignalRule(signal checkSignal) (name, short, full string) {
+func checkSARIFSignalRule(signal checkSignal) (name, short, full, help string) {
 	switch signal {
 	case checkError:
 		return "CallError", "A call ended in an error",
-			"A request was answered with a JSON-RPC error, or with a result marked isError, or its task ended in a failure. It is the same axis the session error count and the CI gate read."
+			"A request was answered with a JSON-RPC error, or with a result marked isError, or its task ended in a failure. It is the same axis the session error count and the CI gate read.",
+			"Open the frame the result points at and read what the server actually said, which the message carries verbatim. A run that exercises failure paths on purpose can drop error from --fail-on, or capture only the traffic under test."
 	case checkInvalid:
 		return "InvalidFrame", "A frame is not valid JSON-RPC",
-			"A frame on the protocol channel could not be parsed as JSON-RPC, which usually means something wrote to the transport that is not part of the protocol, or the stream is corrupted."
+			"A frame on the protocol channel could not be parsed as JSON-RPC, which usually means something wrote to the transport that is not part of the protocol, or the stream is corrupted.",
+			"On stdio this is almost always a server logging to stdout, which the transport reserves for the protocol. Send that output to stderr instead. If the frame is JSON-RPC that mcpsnoop could not parse, the line the result points at is the whole evidence."
 	case checkWarn:
 		return "ProtocolWarning", "A frame violates a protocol expectation",
-			"A frame breaks an expectation the MCP or JSON-RPC specification sets, such as reusing an id already in flight, answering one id twice, or replying with neither result nor error."
+			"A frame breaks an expectation the MCP or JSON-RPC specification sets, such as reusing an id already in flight, answering one id twice, or replying with neither result nor error.",
+			"The message names the expectation and the frame that broke it. Fix the side that emitted the frame; mcpsnoop only observes, so nothing on the proxy changes this. A warning fails the gate by default, so a warning you accept has to leave --fail-on explicitly."
 	case checkMismatch:
 		return "RoutingMismatch", "A routing header disagrees with the body",
-			"An Mcp-Method, Mcp-Name, Mcp-Param-* or MCP-Protocol-Version header disagrees with the request body, rides a batch, or is missing where the negotiated revision requires it. A server's own -32020 rejection counts as the same condition."
+			"An Mcp-Method, Mcp-Name, Mcp-Param-* or MCP-Protocol-Version header disagrees with the request body, rides a batch, or is missing where the negotiated revision requires it. A server's own -32020 rejection counts as the same condition.",
+			"A gateway routing on the headers and a server reading the body are now looking at two different requests, so this is worth treating as a routing fault rather than cosmetics. The message names which header disagrees and with what."
 	case checkPending:
 		return "PendingCall", "A call never got a response",
-			"A request was captured with no response before the capture ended, so the caller was left waiting. Only a request that was still open at the end of the session counts."
+			"A request was captured with no response before the capture ended, so the caller was left waiting. Only a request that was still open at the end of the session counts.",
+			"Either the server never answered, or the capture stopped first. Check the end of the log before treating it as a hang, since a capture cut short leaves every in-flight call pending."
+	case checkLateResult:
+		return "LateResult", "A response arrived after its request was cancelled",
+			"The client cancelled a request and the server answered it anyway. The spec says a server receiving a cancellation SHOULD not send a response for it and that a client SHOULD ignore one that arrives, so this is wasted work on both sides rather than a protocol violation, which is why it is not in the default gate.",
+			"The message carries how long after the cancellation the answer arrived. A short delay is the race the specification allows for, since a cancellation can reach a server that has already replied. A long one means the server carried on working after being told to stop."
 	case checkDrift:
 		return "ToolDefinitionDrift", "An advertised tool definition changed after approval",
-			"An advertised tool differs from the trusted first-seen baseline for its server label in its description, title, input or output schema, annotations or icons, or a tool was added or removed. A baseline that could not be read is reported here too, since drift could not be verified."
+			"An advertised tool differs from the trusted first-seen baseline for its server label in its description, title, input or output schema, annotations or icons, or a tool was added or removed. A baseline that could not be read is reported here too, since drift could not be verified.",
+			"Read the change before accepting it: a description is a prompt an agent obeys, so rewriting one silently is how a trusted tool is repurposed. If the change is intended, re-record the baseline with mcpsnoop baseline. If the baseline could not be read at all, nothing was verified this run."
 	case checkDeprecated:
 		return "DeprecatedFeature", "A frame uses a deprecated protocol feature",
-			"A frame uses a feature the MCP specification has deprecated. Nothing is broken today, but the feature is on its way out and the traffic will need changing."
+			"A frame uses a feature the MCP specification has deprecated. Nothing is broken today, but the feature is on its way out and the traffic will need changing.",
+			"The message names the feature and what replaced it. Nothing fails until the feature is removed, so this is a note unless deprecated is named in --fail-on."
 	case checkIncomplete:
 		return "IncompleteCapture", "Frames were dropped, so the capture understates the session",
-			"Envelopes were dropped upstream, inferred from gaps in the per-session sequence numbers. Every other signal is then a floor rather than a total, because the dropped frames were never judged."
+			"Envelopes were dropped upstream, inferred from gaps in the per-session sequence numbers. Every other signal is then a floor rather than a total, because the dropped frames were never judged.",
+			"Every other count in this report is a floor, not a total, so a green run over an incomplete capture proves less than it looks. Frames are dropped when a sink cannot keep up, so a slow or blocked sink is the first place to look."
 	}
-	return string(signal), "An mcpsnoop check signal", "A signal reported by mcpsnoop check."
+	// Deliberately generic, and deliberately covered by a test that walks
+	// checkSignalOrder, because a signal reaching a code-scanning alert under a
+	// placeholder description is worse than one that never reaches it at all.
+	return string(signal), "An mcpsnoop check signal", "A signal reported by mcpsnoop check.", "See the mcpsnoop documentation."
 }
 
 // sarifErrorMessage names what went wrong on the frame the error was counted on,
@@ -392,6 +482,23 @@ func sarifErrorDetail(call store.CallView) string {
 	return "the call failed"
 }
 
+// sarifLateResultMessage names the call that was answered after its cancellation
+// and how late the answer was, since the delay is what separates the race the
+// spec allows for from a server that kept working after being told to stop. The
+// store writes that sentence as the frame's observation, so the two formats read
+// alike rather than paraphrasing each other.
+func sarifLateResultMessage(sessionID string, event store.EventView) string {
+	subject := "a cancelled call"
+	if event.Call != nil {
+		subject = sarifCallSubject(*event.Call)
+	}
+	if event.Observation == "" {
+		return fmt.Sprintf("session %s frame %d: %s was answered after it was cancelled", sessionID, event.Seq, subject)
+	}
+	return fmt.Sprintf("session %s frame %d: %s was answered after it was cancelled: %s",
+		sessionID, event.Seq, subject, event.Observation)
+}
+
 func sarifPendingMessage(sessionID string, seq uint64, call store.CallView) string {
 	return fmt.Sprintf("session %s frame %d: %s never got a response", sessionID, seq, sarifCallSubject(call))
 }
@@ -426,8 +533,9 @@ func sarifCallKey(call store.CallView) string {
 	return string(call.ReqDir) + "\x00" + call.ID + "\x00" + strconv.FormatInt(call.Start.UnixNano(), 10)
 }
 
-// sarifFingerprint is what lets a consumer recognise a finding across runs. It
-// is built from what the finding is, never from where it landed in the file.
+// sarifFingerprint identifies a finding by what it is, never by where it landed
+// in the file, so re-running check over a capture whose lines have moved
+// produces the same value.
 func sarifFingerprint(sessionID, ruleID, anchor string) string {
 	sum := sha256.Sum256([]byte(sessionID + "\x00" + ruleID + "\x00" + anchor))
 	return hex.EncodeToString(sum[:8])
@@ -435,10 +543,12 @@ func sarifFingerprint(sessionID, ruleID, anchor string) string {
 
 // sarifArtifactURI turns the session log path into the URI a result points at.
 // Code scanning resolves a relative URI against the root of the repository it
-// analysed and refuses a result whose artifact it cannot locate, so a log under
-// the working directory is reported relative to it. A log outside cannot
-// honestly be given a relative path, so it gets an absolute file: URI, which
-// will not render as an alert but also will not point at the wrong file.
+// analysed, so a log under the working directory is reported relative to it,
+// which is right whenever check runs at the root of the checkout as a workflow
+// step does by default. A log outside cannot honestly be given a relative path,
+// so it gets an absolute file: URI; code scanning converts that back against the
+// checkout when it can and otherwise leaves the alert without source context
+// rather than dropping it.
 func sarifArtifactURI(path string) string {
 	if path == "" {
 		return ""

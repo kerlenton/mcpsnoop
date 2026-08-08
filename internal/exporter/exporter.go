@@ -371,15 +371,19 @@ func (c *newlineCounter) Read(p []byte) (int, error) {
 
 // lineAt returns the 1-based line containing the byte before offset, which is
 // where a decoded value ends. Offsets must arrive in non-decreasing order, which
-// a single forward pass over the stream guarantees. The buffer is reused once
-// drained so a long capture does not retain one entry per line.
+// a single forward pass over the stream guarantees.
 func (c *newlineCounter) lineAt(offset int64) int {
 	for c.next < len(c.offsets) && c.offsets[c.next] < offset {
 		c.next++
 		c.passed++
 	}
-	if c.next == len(c.offsets) {
-		c.offsets = c.offsets[:0]
+	// The offsets already walked past are dropped on every call rather than only
+	// when the buffer happens to drain, which a json.Decoder reading ahead of the
+	// value it returns almost never leaves true: a long capture kept one entry per
+	// line for the whole load. What remains is bounded by the decoder's read-ahead,
+	// so the copy is over a handful of entries.
+	if c.next > 0 {
+		c.offsets = c.offsets[:copy(c.offsets, c.offsets[c.next:])]
 		c.next = 0
 	}
 	return c.passed + 1

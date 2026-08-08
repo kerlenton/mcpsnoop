@@ -75,7 +75,7 @@ func newCheckCmd() *cobra.Command {
 			if len(args) == 1 {
 				arg = args[0]
 			}
-			sessionLog, err := loadCheckSession(cmd, arg)
+			sessionLog, err := loadCheckSession(cmd, arg, format.needsLineIndex())
 			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
 				return exitCode(1)
@@ -252,6 +252,12 @@ func parseCheckOutputFormat(value string) (checkOutputFormat, error) {
 	}
 }
 
+// needsLineIndex reports whether a format points a reader at one line of the
+// log, which is the only thing the per-frame index is for. It costs a map entry
+// per captured frame held for the whole run, so a format that reports per
+// session rather than per frame must not pay for it.
+func (f checkOutputFormat) needsLineIndex() bool { return f == checkFormatSARIF }
+
 // checkLog is a loaded session log plus where it came from. A SARIF result has
 // to point at a file and a line, which neither the text nor the junit format
 // ever needed, so the path and the per-frame line index travel beside the store.
@@ -263,7 +269,10 @@ type checkLog struct {
 	lines     exporter.FrameLines
 }
 
-func loadCheckSession(cmd *cobra.Command, arg string) (checkLog, error) {
+// loadCheckSession reads the log a check or baseline run judges. withLines asks
+// for the per-frame line index, which only a caller that has to name a line
+// needs and which retains one map entry per captured frame until the run ends.
+func loadCheckSession(cmd *cobra.Command, arg string, withLines bool) (checkLog, error) {
 	if arg == "-" {
 		st, sessionID, err := exporter.Load(cmd.InOrStdin(), "stdin")
 		if err != nil {
@@ -274,6 +283,13 @@ func loadCheckSession(cmd *cobra.Command, arg string) (checkLog, error) {
 	path, err := exporter.ResolveSessionPath(arg)
 	if err != nil {
 		return checkLog{}, err
+	}
+	if !withLines {
+		st, sessionID, err := exporter.LoadFile(path)
+		if err != nil {
+			return checkLog{}, err
+		}
+		return checkLog{store: st, sessionID: sessionID, path: path}, nil
 	}
 	st, sessionID, lines, err := exporter.LoadFileLines(path)
 	if err != nil {
