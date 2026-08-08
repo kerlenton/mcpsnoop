@@ -26,12 +26,15 @@ type CallView struct {
 	// Errored is the "something went wrong" axis, distinct from Failed(): a
 	// cancelled task is Failed() (it delivered nothing) but not Errored (the user
 	// stopped it on purpose). The session error counter and the CI gate read this.
-	Errored    bool
-	Start      time.Time
-	End        time.Time
-	State      CallState
-	TaskID     string
-	TaskStatus string
+	Errored      bool
+	Start        time.Time
+	End          time.Time
+	State        CallState
+	CancelledAt  time.Time
+	CancelReason string
+	LateResult   bool
+	TaskID       string
+	TaskStatus   string
 }
 
 // Failed reports a protocol error, a tool-level error (result.isError), or any
@@ -43,12 +46,15 @@ type CallView struct {
 // alongside an error or a tool error.
 func (c CallView) Failed() bool { return c.Err != nil || c.ToolErr || c.State == Failed }
 
-// Done reports whether a response has arrived.
+// Done reports whether the call is no longer open.
 func (c CallView) Done() bool { return c.State != Pending && c.State != Streaming }
 
-// Duration is the request→response latency, or elapsed-so-far while the call is
-// still open, which covers both a pending request and a live stream.
+// Duration is the request-to-response latency, zero for a settled call without a
+// response, or elapsed time for a call that is still open.
 func (c CallView) Duration() time.Duration {
+	if c.State == Cancelled && !c.LateResult {
+		return 0
+	}
 	if c.Done() {
 		return c.End.Sub(c.Start)
 	}
@@ -100,9 +106,23 @@ type EventView struct {
 	// CacheStaleRefetch is set when a client re-fetches inside a declared ttlMs
 	// window. Structured like Deprecated and never fails check.
 	CacheStaleRefetch string
+	Observation       string
 	Call              *CallView // set for request/response events
 	TaskCall          *CallView // originating call for a tasks/* lifecycle frame
 	TaskID            string
+	// Errored marks a frame this session counted an error on, so a reporter can
+	// name the frames the Errors total came from. It is the frame to point a
+	// reader at: a transport failure and an unmatched error response have no
+	// Call, and a task failure lands on its terminal frame while Call.Errored,
+	// read off a live call, would retroactively mark that call's first response
+	// instead. Every counted error marks a frame; one frame that raises the count
+	// twice still marks once, so the marked frames are where the count came from
+	// rather than a running tally of it.
+	Errored bool
+	// LateResult marks the frame this session counted a late result on, one per
+	// LateResults. Call.LateResult says the call ever got one, which stays true
+	// for the rest of the capture and is visible from the request frame too.
+	LateResult bool
 	// MRTRRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised (SEP-2322). Empty on an ordinary request.
 	MRTRRoot string
@@ -126,6 +146,7 @@ type SessionHeader struct {
 	HasToolDrift         bool
 	HasToolBaselineError bool
 	MissingFrames        uint64 // envelopes dropped upstream, inferred from Seq gaps
+	LateResults          int
 }
 
 // ToolDefinition is the contract a server advertised for one MCP tool.
@@ -376,9 +397,12 @@ func (e *event) view(_ *session) EventView {
 		Deprecated:         e.deprecated,
 		CacheHint:          e.cacheHint,
 		CacheStaleRefetch:  e.cacheStaleRefetch,
+		Observation:        e.observation,
 		TaskID:             e.taskID,
 		MRTRRoot:           e.mrtrRoot,
 		MRTRStateIssue:     e.mrtrStateIssue,
+		Errored:            e.errored,
+		LateResult:         e.lateResult,
 	}
 	if e.call != nil {
 		cv := e.call.view()
@@ -393,22 +417,25 @@ func (e *event) view(_ *session) EventView {
 
 func (c *call) view() CallView {
 	return CallView{
-		RequestSeq: c.requestSeq,
-		ID:         c.id,
-		Method:     c.method,
-		ReqDir:     c.reqDir,
-		IsTool:     c.isTool,
-		ToolName:   c.toolName,
-		Params:     c.params,
-		Result:     c.result,
-		Err:        c.err,
-		ToolErr:    c.toolErr,
-		Errored:    c.errored,
-		Start:      c.start,
-		End:        c.end,
-		State:      c.state,
-		TaskID:     c.taskID,
-		TaskStatus: c.taskStatus,
+		RequestSeq:   c.requestSeq,
+		ID:           c.id,
+		Method:       c.method,
+		ReqDir:       c.reqDir,
+		IsTool:       c.isTool,
+		ToolName:     c.toolName,
+		Params:       c.params,
+		Result:       c.result,
+		Err:          c.err,
+		ToolErr:      c.toolErr,
+		Errored:      c.errored,
+		Start:        c.start,
+		End:          c.end,
+		State:        c.state,
+		CancelledAt:  c.cancelledAt,
+		CancelReason: c.cancelReason,
+		LateResult:   c.lateResult,
+		TaskID:       c.taskID,
+		TaskStatus:   c.taskStatus,
 	}
 }
 
@@ -433,6 +460,7 @@ func (s *Store) Sessions() []SessionHeader {
 			HasToolDrift:         sess.toolDrift.Count() > 0,
 			HasToolBaselineError: sess.toolDrift.BaselineError != "",
 			MissingFrames:        sess.missing,
+			LateResults:          sess.lateResults,
 		})
 	}
 	return out
@@ -765,9 +793,7 @@ func (s *Store) ToolSummary(sessionID string) (SessionToolSummary, bool) {
 			agg.stats.Pending++
 			continue
 		}
-		if c.state == Superseded {
-			// Its id was reused, so it was never answered. It still counts as a call
-			// (like a pending one), but has no real latency to feed the percentiles.
+		if c.state == Superseded || (c.state == Cancelled && !c.lateResult) {
 			continue
 		}
 		if c.errored {

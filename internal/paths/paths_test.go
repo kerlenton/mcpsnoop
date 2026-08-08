@@ -1,7 +1,11 @@
 package paths
 
 import (
+	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -78,6 +82,96 @@ func TestCheckLabelKeepsADoubledDotContained(t *testing.T) {
 		if !strings.HasPrefix(filepath.Clean(got), filepath.Clean(SessionsDir())+string(filepath.Separator)) {
 			t.Fatalf("label %q escaped the sessions dir: %s", label, got)
 		}
+	}
+}
+
+// TestClaudeDesktopConfigTracksTheOSConfigDir keeps the one assumption the
+// helper rests on honest across every platform CI builds for: os.UserConfigDir
+// already resolves to the directory Claude Desktop keeps its config under, so
+// there is no per-OS branch here to drift.
+func TestClaudeDesktopConfigTracksTheOSConfigDir(t *testing.T) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		t.Skipf("no user config dir on this machine: %v", err)
+	}
+	got, err := ClaudeDesktopConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "Claude", "claude_desktop_config.json"); got != want {
+		t.Fatalf("ClaudeDesktopConfig() = %q, want %q", got, want)
+	}
+}
+
+// TestClaudeDesktopConfigCreatesNothing. The path belongs to another
+// application, so resolving it must not bring any part of it into existence the
+// way Base and its callers deliberately do.
+//
+// The user config dir is pointed at an empty root first. Sampling existence on
+// the real one proves nothing, because every machine with Claude Desktop
+// installed already has the directory and the check passes whatever the helper
+// does, which is how it passed with an os.MkdirAll injected into it.
+func TestClaudeDesktopConfigCreatesNothing(t *testing.T) {
+	root := setUserConfigDir(t)
+
+	got, err := ClaudeDesktopConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, root) {
+		t.Fatalf("ClaudeDesktopConfig() = %q, which is not under the redirected root %q", got, root)
+	}
+	for dir := filepath.Dir(got); len(dir) > len(root); dir = filepath.Dir(dir) {
+		if exists(dir) {
+			t.Fatalf("resolving the path created %q", dir)
+		}
+	}
+	if exists(got) {
+		t.Fatalf("resolving the path created %q", got)
+	}
+}
+
+// setUserConfigDir points os.UserConfigDir at an empty directory and returns it,
+// through whichever variable the running platform actually consults.
+func setUserConfigDir(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("AppData", root)
+		return root
+	case "darwin":
+		t.Setenv("HOME", root)
+		return filepath.Join(root, "Library", "Application Support")
+	default:
+		t.Setenv("XDG_CONFIG_HOME", root)
+		return root
+	}
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+// TestClaudeDesktopConfigFollowsXDGConfigHome is linux-only because that is the
+// only platform where os.UserConfigDir consults XDG.
+func TestClaudeDesktopConfigFollowsXDGConfigHome(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("XDG_CONFIG_HOME is only consulted on linux")
+	}
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+
+	got, err := ClaudeDesktopConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, "Claude", "claude_desktop_config.json"); got != want {
+		t.Fatalf("ClaudeDesktopConfig() = %q, want %q", got, want)
+	}
+	if exists(filepath.Dir(got)) {
+		t.Fatalf("ClaudeDesktopConfig created %q under a fresh config home", filepath.Dir(got))
 	}
 }
 

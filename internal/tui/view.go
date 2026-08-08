@@ -660,6 +660,12 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			} else if e.Call.State == store.Superseded {
 				// Its id was reused while in flight, so it will never be answered.
 				c.status = "superseded"
+			} else if e.Call.State == store.Cancelled {
+				c.status = "cancel"
+				if e.Call.LateResult {
+					c.status = "late"
+					c.dur = e.Call.Duration().Round(time.Millisecond).String()
+				}
 			}
 		}
 	case store.EventResponse:
@@ -668,6 +674,16 @@ func (m Model) streamCells(e store.EventView) streamCell {
 		if e.Call != nil {
 			c.dur = e.Call.Duration().Round(time.Millisecond).String()
 			switch {
+			case e.Call.State == store.Cancelled && e.Call.LateResult:
+				c.status = "late"
+				switch {
+				case e.Call.Err != nil:
+					c.detail = rpcErrorText(*e.Call.Err)
+				case e.Call.ToolErr:
+					c.detail = toolErrorText(e.Call.Result)
+				default:
+					c.detail = compactJSON(e.Call.Result)
+				}
 			case e.Call.TaskID != "" && e.Call.State == store.Pending:
 				c.status = e.Call.TaskStatus
 				c.detail = compactJSON(e.Call.Result)
@@ -688,6 +704,15 @@ func (m Model) streamCells(e store.EventView) streamCell {
 		if e.Method == "notifications/progress" {
 			if p, ok := parseProgress(e.Raw); ok {
 				c.progress = &p
+			}
+		}
+		if e.Method == "notifications/cancelled" && e.Call != nil {
+			// Labelled by the call's outcome rather than by the frame, so the token
+			// shown is the one status: selects. A cancellation whose result turned up
+			// afterwards reads "late" on both.
+			c.status = "cancel"
+			if e.Call.LateResult {
+				c.status = "late"
 			}
 		}
 	case store.EventInvalid:
@@ -750,6 +775,13 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = e.CacheStaleRefetch
 		} else {
 			c.detail = e.CacheStaleRefetch + " · " + c.detail
+		}
+	}
+	if e.Observation != "" {
+		if c.detail == "" {
+			c.detail = e.Observation
+		} else {
+			c.detail = e.Observation + " · " + c.detail
 		}
 	}
 	if !e.CacheHint.Empty() {
@@ -910,6 +942,8 @@ func (m Model) statusStyle(e store.EventView) lipgloss.Style {
 			return m.styles.follow
 		case e.Call.State == store.Superseded:
 			return m.styles.warn // never answered, not a success
+		case e.Call.State == store.Cancelled:
+			return m.styles.warn
 		case e.Call.Failed():
 			return m.styles.respErr
 		default:
@@ -984,7 +1018,7 @@ func (m Model) renderHelp() string {
 	filter := helpGroup{"STREAM FILTER QUERY", [][2]string{
 		{"<text>", "substring over method, tool, id, payload"},
 		{"tool:echo", "by tool name"},
-		{"status:err|warn|ok|pending|bad|mismatch", "by outcome"},
+		{"status:err|warn|ok|pending|cancel|late|bad|mismatch", "by outcome"},
 		{"kind:req|resp|notify|stderr|invalid", "by message type"},
 		{"dir:c2s|s2c", "by direction"},
 		{"method:tools/call", "by method"},
@@ -1166,6 +1200,9 @@ func (m Model) pairWidget() string {
 		}
 		if e.Call.State == store.Streaming {
 			return cur + arrow + m.styles.follow.Render("streaming")
+		}
+		if e.Call.State == store.Cancelled && !e.Call.LateResult {
+			return cur + arrow + m.styles.warn.Render("cancel")
 		}
 		if pi, ok := m.pairIndex(m.inspect); ok {
 			return cur + arrow + m.styles.req.Render(fmt.Sprintf("resp %d", m.full[pi].Seq))
@@ -1390,8 +1427,11 @@ func (m Model) capsTitle(label, version string, w int) string {
 // summary table column widths, all padded with lipgloss.Width so styled cells
 // stay aligned.
 const (
-	sumToolW   = 18
-	sumSchemaW = 7
+	sumToolW = 18
+	// Wide enough for the longest schema label plus the "+" that means there is
+	// more than one kind. At the label's own width the marker is truncated away
+	// and a tool with one problem renders exactly like a tool with five.
+	sumSchemaW = 8
 	sumCallsW  = 7
 	sumErrW    = 6
 	sumLatW    = 10
@@ -1510,9 +1550,11 @@ func (m Model) summaryContent() string {
 		if tool.Pending > 0 && tool.Pending == tool.Calls {
 			lat = m.styles.pending.Render(m.spinnerFrame())
 		}
-		// SCHEMA names the most notable construct a tool's advertised schema uses
-		// that is known to travel badly across clients, plus a "+" when there is
-		// more than one kind. Purely observational, so it carries the warn color,
+		// SCHEMA names the most notable thing about a tool's advertised schema,
+		// plus a "+" when there is more than one kind. All but a missing root type
+		// are observations about how a schema travels across clients rather than
+		// verdicts on it, and even that one is a fact about a definition rather
+		// than about a call, so the column carries the warn color throughout and
 		// never the ERR column's red.
 		// An empty cell is left blank rather than dotted. The ERR column already
 		// uses · to mean zero, and repeating it here both adds noise on the common
@@ -1563,12 +1605,17 @@ func (m Model) summaryContent() string {
 	return header + "\n\n" + strings.Join(sections, "\n\n")
 }
 
-// schemaHeadlineOrder ranks findings for the single-label SCHEMA column. An
-// external reference leads because it points outside the wire entirely, which is
-// both the least portable case and the one the spec warns implementers about.
-// The composition keywords follow, then an internal reference, then an untyped
-// property, which is the weakest signal since a description often carries the
-// meaning a type would.
+// schemaHeadlineOrder ranks findings for the single-label SCHEMA column. A
+// non-object root leads because it is the only entry here that is a violation
+// rather than an observation: the others say a schema may be read differently
+// across clients, that one says a conforming client refuses the tool outright.
+// A non-default dialect comes next because it changes how every keyword below it
+// is read, so it frames the rest rather than sitting beside them.
+// An external reference follows because it points outside the wire entirely,
+// which is both the least portable case and the one the spec warns implementers
+// about. The composition keywords come next, then an internal reference, then an
+// untyped property, which is the weakest signal since a description often
+// carries the meaning a type would.
 var schemaHeadlineOrder = []store.SchemaFindingKind{
 	store.FindingNonObjectRoot,
 	store.FindingNonDefaultDialect,
@@ -1600,7 +1647,7 @@ func headlineFinding(findings []store.SchemaFinding) store.SchemaFindingKind {
 func schemaKindLabel(k store.SchemaFindingKind) string {
 	switch k {
 	case store.FindingNonObjectRoot:
-		return "bad root"
+		return "no root"
 	case store.FindingNonDefaultDialect:
 		return "dialect"
 	case store.FindingExternalRef:

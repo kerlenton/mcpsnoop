@@ -114,6 +114,27 @@ func TestHARMapsCallOutcomeToStatus(t *testing.T) {
 	}
 }
 
+// TestHARDistinguishesCancelledCallsAndLateResults. A HAR viewer reads the status
+// column, so a call the client gave up on and a result that arrived after it must
+// not both render as the 200 an ordinary call gets.
+func TestHARDistinguishesCancelledCallsAndLateResults(t *testing.T) {
+	start := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	duration := 1000.0
+	got := writeHARForTest(t, SessionExport{
+		Session: SessionSummary{ID: "s1"},
+		Calls: []CallExport{
+			{ID: "1", Method: "tools/call", Status: "call_cancelled", StartedAt: start},
+			{ID: "2", Method: "tools/call", Status: "late_result", StartedAt: start, DurationMS: &duration, Result: json.RawMessage(`{"content":[]}`)},
+		},
+	})
+	if response := got.Log.Entries[0].Response; response.Status != 0 || response.StatusText != "Cancelled" {
+		t.Fatalf("cancelled HAR response = %+v", response)
+	}
+	if response := got.Log.Entries[1].Response; response.Status != 200 || response.StatusText != "Late Result" {
+		t.Fatalf("late HAR response = %+v", response)
+	}
+}
+
 // Every tools/call would otherwise share one URL, which is the column a HAR
 // viewer is scanned by.
 func TestHARURLCarriesLabelAndTool(t *testing.T) {

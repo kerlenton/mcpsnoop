@@ -139,7 +139,17 @@ func demoScript() []demoFrame {
 		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true},"logging":{}},"serverInfo":{"name":"demo-server","version":"1.0.0"}}}`, pause: 400 * time.Millisecond},
 		{dir: proxy.ClientToServer, raw: `{"jsonrpc":"2.0","method":"notifications/initialized"}`, pause: 500 * time.Millisecond},
 		{dir: proxy.ClientToServer, raw: `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, pause: 400 * time.Millisecond},
-		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"echo","description":"Echo back a message"},{"name":"get_sum","description":"Add two numbers"},{"name":"slow_search","description":"A search that takes a while"},{"name":"big_payload","description":"Return a large value"},{"name":"flaky","description":"Sometimes fails"}]}}`, pause: 600 * time.Millisecond},
+		// Each tool carries the inputSchema the spec requires of one, matching the
+		// arguments the calls below actually send. Advertising them bare left every
+		// row of the demo's own summary table reporting a missing root type, which
+		// is a real finding against a fixture nobody meant as a bad example.
+		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","id":1,"result":{"tools":[` +
+			`{"name":"echo","description":"Echo back a message","inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}},` +
+			`{"name":"get_sum","description":"Add two numbers","inputSchema":{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]}},` +
+			`{"name":"slow_search","description":"A search that takes a while","inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}},` +
+			`{"name":"big_payload","description":"Return a large value","inputSchema":{"type":"object","additionalProperties":false}},` +
+			`{"name":"flaky","description":"Sometimes fails","inputSchema":{"type":"object","additionalProperties":false}}` +
+			`]}}`, pause: 600 * time.Millisecond},
 		{dir: proxy.ClientToServer, raw: `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"message":"hello from the demo"}}}`, pause: 400 * time.Millisecond},
 		{dir: proxy.ServerToClient, raw: `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Echo: hello from the demo"}]}}`, pause: 500 * time.Millisecond},
 		{dir: proxy.ClientToServer, raw: `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_sum","arguments":{"a":40,"b":2}}}`, pause: 350 * time.Millisecond},

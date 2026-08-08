@@ -148,6 +148,8 @@ func checkSignalFailureReason(sessionID string, signal checkSignal, count int) s
 		singular, plural = "routing mismatch", "routing mismatches"
 	case checkPending:
 		singular, plural = "pending call", "pending calls"
+	case checkLateResult:
+		singular, plural = "late result", "late results"
 	case checkDrift:
 		singular, plural = "tool definition change", "tool definition changes"
 	case checkDeprecated:

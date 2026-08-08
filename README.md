@@ -48,7 +48,24 @@ To use it for real, wrap your server in your client's MCP config.
 
 Everything after `--` is the command that normally launches your server. Swap in
 whatever you already use, like `python server.py`, `npx -y @scope/server`, or a
-compiled binary. Then use your client as usual and open the UI.
+compiled binary.
+
+On Claude Desktop you don't have to make that edit by hand.
+
+```bash
+mcpsnoop wrap my-server     # route my-server through mcpsnoop
+mcpsnoop unwrap my-server   # put it back
+```
+
+`wrap` finds `claude_desktop_config.json`, copies it to
+`claude_desktop_config.json.mcpsnoop.bak` the first time, and rewrites only that
+one server's entry, so your formatting and every other server are left alone.
+Inside the rewritten entry the keys come back in alphabetical order. `unwrap`
+restores the file, and removes the backup once no server is wrapped any more.
+Restart Claude Desktop after either, since MCP servers are launched once at
+startup.
+
+Then use your client as usual and open the UI.
 
 ```bash
 mcpsnoop
@@ -109,11 +126,13 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop` | open the live TUI |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, har, or otlp |
-| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, or hung calls |
+| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, hung calls, or late results |
 | `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
 | `mcpsnoop prune` | delete saved session logs older than a cutoff |
+| `mcpsnoop wrap <server>` | route one of Claude Desktop's servers through mcpsnoop |
+| `mcpsnoop unwrap <server>` | put that server's entry back the way it was |
 | `mcpsnoop remote <user@host>` | print the SSH tunnel command |
 | `mcpsnoop demo` | play a scripted session |
 
@@ -223,12 +242,14 @@ matches the method, tool, id, and payload.
 | `task:` | task id | `task:01J...` |
 | `dir:` | direction (`c2s`, `s2c`) | `dir:s2c` |
 | `kind:` | frame type (`req`, `resp`, `notify`, `stderr`, `invalid`) | `kind:invalid` |
-| `status:` | call outcome (`ok`, `error`, `cancelled`, `pending`, `bad`, `warn`, `mismatch`) | `status:error` |
+| `status:` | call outcome (`ok`, `error`, `cancel`, `late`, `cancelled`, `pending`, `bad`, `warn`, `mismatch`, or an HTTP status like `401`) | `status:error` |
 
 Stack tokens to get specific.
 
 ```text
 tool:search status:pending        # in-flight calls to one search tool
+status:cancel                     # calls the client gave up on (status:cancelled is a cancelled task)
+status:late                       # results that arrived after the cancellation
 method:tools/call status:error    # tool calls that failed
 dir:s2c kind:req                  # server-initiated requests (servers before 2026-07-28)
 ```
@@ -360,17 +381,19 @@ leave the capture incomplete, tool-definition drift, or use of deprecated
 protocol features.
 
 ```bash
-mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,drift,deprecated,incomplete,schema] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit|sarif] [--fail-on error,invalid,warn,mismatch,pending,late-result,drift,deprecated,incomplete,schema] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
-to gate on calls that never got a response, `mismatch` to gate specifically on a
+to gate on calls that never got a response, `late-result` to gate on responses
+that arrived after cancellation, `mismatch` to gate specifically on a
 routing header (Mcp-Method or Mcp-Name) disagreeing with the body, `drift` to gate
 on tool definitions changing after approval, `deprecated` to gate on features
 the spec has deprecated, or `incomplete` to gate on captures with dropped frames.
 Pass a comma-separated subset to select only the
 conditions relevant to a job. Omit the session to check the newest capture, or use
-`-` to read JSONL from stdin.
+`-` to read JSONL from stdin. Late results are reported as `late_results` without
+affecting the default error, invalid, or warning signals.
 The dropped-frame count travels with the artifacts too, so a capture that
 understates itself says so wherever it is opened: `missing_frames` in the JSON
 export, `log.comment` in HAR, and the `mcpsnoop.session.missing_frames` resource
@@ -393,6 +416,24 @@ definition remain observational only. Existing key- and value-based redaction
 also applies to captured parameter-header values before they reach a sink.
 Use `--format junit` to write one JUnit `<testcase>` per signal and session;
 failures follow the same `--fail-on` selection as the text output.
+Use `--format sarif` to write a SARIF 2.1.0 log instead. Where junit reports one
+aggregate per signal, SARIF reports one result per finding, carrying the session,
+the frame `Seq` and the frame's own warning or drift text, and pointing at the
+line of the log the frame was decoded from. A signal named in `--fail-on` is
+reported at level `error` and one outside it at level `note`, so the report and
+the gate never disagree. Code scanning rejects a file whose run holds more than
+25,000 results and displays only the top 5,000 of what it accepts, so the report
+is capped at 5,000: the findings the gate failed on first, then a
+`mcpsnoop/report-truncated` result saying how many were left out. The text and
+junit formats stay complete.
+
+A result points at the log with a path relative to the working directory, which
+code scanning then resolves against the repository root. The alert renders with
+its surrounding lines only when that path is a file in the analysed commit, so a
+capture the workflow generated into `artifacts/` opens an alert carrying the
+message, the rule and the line number but no source view. Committing a capture
+you want rendered in full is the only way to get one. A log read from the state
+directory or from stdin gets no path at all.
 
 ```bash
 mcpsnoop check build-agent
@@ -425,6 +466,34 @@ mcpsnoop check --expect-tool search --forbid-tool delete --max-duration 2s run.j
   with:
     name: mcpsnoop-junit
     path: test-results/mcpsnoop.xml
+```
+
+To put the findings in the Security tab instead, hand the SARIF log to
+`upload-sarif`. The job needs `security-events: write`, or the upload answers
+403. `check` exits non-zero on a finding, so the upload step needs `if: always()`
+to run at all on the runs that have something to report; `continue-on-error`
+hands the verdict to the code scanning check, which fails on an `error`-level
+alert and can be made a required check. Drop it if you would rather the check
+step itself be what turns the job red.
+
+```yaml
+permissions:
+  # required for all workflows
+  security-events: write
+  # only required for workflows in private repositories
+  actions: read
+  contents: read
+
+steps:
+- name: Check captured MCP session
+  continue-on-error: true
+  run: mcpsnoop check --format sarif artifacts/session.jsonl > mcpsnoop.sarif
+- name: Upload mcpsnoop SARIF report
+  if: always()
+  uses: github/codeql-action/upload-sarif@v4
+  with:
+    sarif_file: mcpsnoop.sarif
+    category: mcpsnoop
 ```
 
 ### Detect tool definition drift
@@ -495,20 +564,27 @@ calling wrongly is often a tool whose schema asked for more than the client
 delivers.
 
 The tool summary, opened with `s`, has a SCHEMA column naming the most notable
-construct each advertised tool uses, with a trailing `+` when the schema uses
-more than one kind.
+thing about each advertised tool's schema, with a trailing `+` when there is more
+than one kind.
 
 | Shown | Means |
 |---|---|
+| `no root` | the `inputSchema` is absent, is not a JSON object, or has a root type other than `"object"` |
 | `ext ref` | a `$ref` pointing outside the document, which is also the case the spec warns implementers not to follow blindly |
 | `oneOf`, `anyOf`, `allOf`, `not` | a composition keyword, handled inconsistently across clients |
 | `ref` | a `$ref` pointing inside the same document |
 | `untyped` | a property that declares no type and no other way of saying what it accepts |
 
-This is an observation, not a verdict. A schema using `oneOf` is not wrong, only
-likely to be read differently by different clients, so the column carries the
-warning color and never the red of the ERR column. There is no `check` signal for
-it, and nothing about MCP traffic changes.
+All but the first are observations rather than verdicts. A schema using `oneOf`
+is not wrong, only likely to be read differently by different clients. `no root`
+is the exception: the `Tool` definition requires `inputSchema` and pins its root
+type to `"object"`, so a client validating a listing rejects that tool outright
+and it never becomes callable, with nothing on the wire to say why. `no root`
+leads the column for that reason, and a schema mcpsnoop's own redaction scrubbed
+is never reported, since an unreadable schema is not a wrong one.
+
+The column carries the warning color and never the red of the ERR column. There
+is no `check` signal for any of it yet, and nothing about MCP traffic changes.
 
 Nothing is resolved or fetched. An external `$ref` is recognized by its form
 alone, and the schema it points at is never read.

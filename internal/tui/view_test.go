@@ -68,3 +68,64 @@ func TestTruncateAppendsEllipsisWhenItCuts(t *testing.T) {
 		t.Fatalf("a cut result should end with an ellipsis, got %q", got)
 	}
 }
+
+// TestSchemaColumnLabelsFitBesideTheMoreMarker locks the two things the SCHEMA
+// column promises. The label is shown whole, and the trailing "+" that means
+// "more than one kind" is still visible when it applies. Both are decided by
+// cellL truncating to sumSchemaW, so a label one cell too long silently eats the
+// marker and the row for a tool with five problems becomes the row for a tool
+// with one. Nothing else in the TUI lists a tool's findings, so that marker is
+// the only sign more exists.
+func TestSchemaColumnLabelsFitBesideTheMoreMarker(t *testing.T) {
+	blank := cellL("", sumSchemaW)
+	byCell := map[string]store.SchemaFindingKind{}
+	for _, kind := range store.SchemaFindingKinds {
+		label := schemaKindLabel(kind)
+		one, many := cellL(label, sumSchemaW), cellL(label+"+", sumSchemaW)
+		if strings.Contains(one, "…") {
+			t.Errorf("%s: label %q does not fit the %d-cell column, renders %q", kind, label, sumSchemaW, one)
+		}
+		if !strings.HasSuffix(strings.TrimRight(many, " "), "+") {
+			t.Errorf("%s: the + meaning more than one kind is truncated away, renders %q", kind, many)
+		}
+		for _, cell := range []string{one, many} {
+			if cell == blank {
+				t.Errorf("%s renders as the blank cell a clean schema uses", kind)
+			}
+			if prev, dup := byCell[cell]; dup {
+				t.Errorf("%s renders %q, which is already what %s renders", kind, cell, prev)
+			}
+			byCell[cell] = kind
+		}
+	}
+}
+
+// TestSchemaHeadlineOrderRanksEveryKind. headlineFinding falls back to
+// findings[0], which is the order the schema walk happened to meet them in, so a
+// kind missing from the ranking can outrank a violation. schemaKindLabel falls
+// back to the raw enum name, which for a kind like nonObjectRoot is 13 cells in
+// an 8-cell column. Driven off store.SchemaFindingKinds for the same reason the
+// drift section is driven off store.ToolDriftKinds.
+func TestSchemaHeadlineOrderRanksEveryKind(t *testing.T) {
+	ranked := make(map[store.SchemaFindingKind]bool, len(schemaHeadlineOrder))
+	for _, kind := range schemaHeadlineOrder {
+		ranked[kind] = true
+	}
+	for _, kind := range store.SchemaFindingKinds {
+		if !ranked[kind] {
+			t.Errorf("%s is not ranked, so it wins the column only by where the walk met it", kind)
+		}
+	}
+	if len(schemaHeadlineOrder) != len(store.SchemaFindingKinds) {
+		t.Errorf("ranking has %d kinds, the store emits %d", len(schemaHeadlineOrder), len(store.SchemaFindingKinds))
+	}
+
+	// The violation outranks every observation, which is the whole reason the
+	// order is written down rather than taken from the walk.
+	for _, other := range store.SchemaFindingKinds[1:] {
+		findings := []store.SchemaFinding{{Kind: other}, {Kind: store.FindingNonObjectRoot}}
+		if got := headlineFinding(findings); got != store.FindingNonObjectRoot {
+			t.Errorf("a schema with %s and a non-object root headlines %s, want the violation", other, got)
+		}
+	}
+}
