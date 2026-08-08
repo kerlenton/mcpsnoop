@@ -432,7 +432,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.id = string(msg.ID)
 		ev.warning = validationWarning(msg)
 		sess.caps.applyResponseMeta(msg.Result)
-		c, matched := sess.completeCall(ev.id, e.Direction, e.ConnID, e.TS, msg)
+		c, matched := sess.completeCall(ev.id, e.Direction, e.ConnID, e.TS, msg, e.Redacted)
 		ev.call = c
 		if matched && c != nil && c.lateResult {
 			// One-for-one with sess.lateResults++: completeCall returns matched for the
@@ -880,7 +880,7 @@ func requestCallKey(id string, rawID json.RawMessage, e proxy.Envelope) callKey 
 
 // completeCall matches a response to a request. The bool is false for an
 // unmatched response or a duplicate of an already-observed result. Caller holds the lock.
-func (sess *session) completeCall(id string, respDir proxy.Direction, conn string, ts time.Time, msg proxy.RPCMessage) (*call, bool) {
+func (sess *session) completeCall(id string, respDir proxy.Direction, conn string, ts time.Time, msg proxy.RPCMessage, redacted bool) (*call, bool) {
 	c := sess.calls[callKey{dir: opposite(respDir), id: id, conn: conn}]
 	if c == nil {
 		return nil, false // unmatched response (request missed or before backfill)
@@ -915,7 +915,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 		// The payload is still the server's answer, so what it declares has to
 		// land. Without this a late tools/list left the tool inventory empty and
 		// `check --fail-on drift` compared nothing and printed green.
-		sess.applyResponseSideEffects(c, msg)
+		sess.applyResponseSideEffects(c, msg, redacted)
 		return c, true
 	}
 	if c.state != Pending && c.state != Streaming {
@@ -962,7 +962,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 	if wasPending {
 		sess.pending--
 	}
-	sess.applyResponseSideEffects(c, msg)
+	sess.applyResponseSideEffects(c, msg, redacted)
 	return c, true
 }
 
@@ -970,14 +970,14 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 // Shared by the ordinary path and the late one, because a response that arrived
 // after a cancellation is still the server's answer and still declares what the
 // server has.
-func (sess *session) applyResponseSideEffects(c *call, msg proxy.RPCMessage) {
+func (sess *session) applyResponseSideEffects(c *call, msg proxy.RPCMessage, redacted bool) {
 	switch c.method {
 	case "initialize":
 		sess.caps.applyResponse(msg.Result)
 	case "server/discover":
 		sess.caps.applyDiscover(msg.Result)
 	case "tools/list":
-		sess.applyToolsList(c.params, msg.Result)
+		sess.applyToolsList(c.params, msg.Result, redacted)
 	}
 }
 
@@ -1210,7 +1210,7 @@ func (c *capabilities) applyResponseMeta(result json.RawMessage) {
 // request is a fresh page one, so its response is the server's current tool set
 // and supersedes what we had (a tools/list_changed re-list can drop tools). A
 // cursored request is a pagination continuation, so it extends the set.
-func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
+func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted bool) {
 	// The tools array is decoded element by element so each definition's exact
 	// bytes stay available to measure, and so one malformed entry skips only
 	// itself. Decoding straight into a typed slice did neither: it discarded the
@@ -1302,7 +1302,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage) {
 			OutputSchema: append(json.RawMessage(nil), tool.OutputSchema...),
 			Annotations:  append(json.RawMessage(nil), tool.Annotations...),
 			Icons:        append(json.RawMessage(nil), tool.Icons...),
-			Findings:     analyzeSchema(schema),
+			Findings:     analyzeSchema(schema, redacted),
 			paramHeaders: paramHeaders,
 			Cost: ToolCost{
 				Name:             tool.Name,

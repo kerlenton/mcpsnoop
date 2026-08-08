@@ -6,6 +6,9 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
+
+	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
 
 func TestAnalyzeSchemaClean(t *testing.T) {
@@ -17,7 +20,7 @@ func TestAnalyzeSchemaClean(t *testing.T) {
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 
 	if len(got) != 0 {
 		t.Fatalf("got %v findings, want none", got)
@@ -33,7 +36,7 @@ func TestAnalyzeSchemaOneOf(t *testing.T) {
 		]
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 
 	want := []SchemaFinding{
 		{Kind: FindingOneOf},
@@ -53,7 +56,7 @@ func TestAnalyzeSchemaAnyOf(t *testing.T) {
 		]
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 
 	want := []SchemaFinding{
 		{Kind: FindingAnyOf},
@@ -73,7 +76,7 @@ func TestAnalyzeSchemaAllOf(t *testing.T) {
 		]
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 
 	want := []SchemaFinding{
 		{Kind: FindingAllOf},
@@ -92,7 +95,7 @@ func TestAnalyzeSchemaNot(t *testing.T) {
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 
 	want := []SchemaFinding{
 		{Kind: FindingNot},
@@ -109,7 +112,7 @@ func TestAnalyzeSchemaRef(t *testing.T) {
 		"$ref": "#/$defs/Foo"
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 
 	want := []SchemaFinding{
 		{Kind: FindingRef},
@@ -130,7 +133,7 @@ func TestAnalyzeSchemaPropertyNamedLikeKeyword(t *testing.T) {
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 
 	if len(got) != 0 {
 		t.Fatalf("got %v, want none", got)
@@ -143,7 +146,7 @@ func TestAnalyzeSchemaExternalRef(t *testing.T) {
 		"$ref": "https://example.com/schema.json"
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 
 	want := []SchemaFinding{
 		{Kind: FindingExternalRef},
@@ -162,7 +165,7 @@ func TestAnalyzeSchemaUntypedProperty(t *testing.T) {
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 
 	want := []SchemaFinding{
 		{Kind: FindingUntypedProperty},
@@ -188,7 +191,7 @@ func TestAnalyzeSchemaNestedUntypedProperty(t *testing.T) {
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 
 	want := []SchemaFinding{
 		{Kind: FindingUntypedProperty},
@@ -217,7 +220,7 @@ func TestAnalyzeSchemaTopLevelWithoutTypeIsNotFlaggedAsUntypedProperty(t *testin
 		]
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 
 	for _, finding := range got {
 		if finding.Kind == FindingUntypedProperty {
@@ -259,7 +262,7 @@ func TestAnalyzeSchemaConstructOnAPropertyIsNotAlsoUntyped(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := analyzeSchema(json.RawMessage(tc.schema))
+			got := analyzeSchema(json.RawMessage(tc.schema), false)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
@@ -274,7 +277,7 @@ func TestAnalyzeSchemaEnumAndConstAreNotUntyped(t *testing.T) {
 		`{"type":"object","properties":{"mode":{"enum":["fast","slow"]}}}`,
 		`{"type":"object","properties":{"version":{"const":2}}}`,
 	} {
-		if got := analyzeSchema(json.RawMessage(schema)); len(got) != 0 {
+		if got := analyzeSchema(json.RawMessage(schema), false); len(got) != 0 {
 			t.Fatalf("analyzeSchema(%s) = %v, want no findings", schema, got)
 		}
 	}
@@ -292,7 +295,7 @@ func TestAnalyzeSchemaDeduplicatesByKind(t *testing.T) {
 		}
 	}`)
 
-	got := analyzeSchema(schema)
+	got := analyzeSchema(schema, false)
 	want := []SchemaFinding{{Kind: FindingUntypedProperty}}
 
 	if !reflect.DeepEqual(got, want) {
@@ -322,7 +325,7 @@ func TestAnalyzeSchemaReachesEveryContainer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := analyzeSchema(json.RawMessage(tc.schema))
+			got := analyzeSchema(json.RawMessage(tc.schema), false)
 			if len(got) != 1 || got[0].Kind != tc.want {
 				t.Fatalf("got %v, want exactly [%s]", got, tc.want)
 			}
@@ -344,7 +347,7 @@ func TestAnalyzeSchemaClassifiesRefsByFormOnly(t *testing.T) {
 	}
 	for ref, want := range cases {
 		schema := json.RawMessage(`{"type":"object","properties":{"u":{"$ref":` + strconv.Quote(ref) + `}}}`)
-		got := analyzeSchema(schema)
+		got := analyzeSchema(schema, false)
 		if len(got) != 1 || got[0].Kind != want {
 			t.Fatalf("$ref %q: got %v, want [%s]", ref, got, want)
 		}
@@ -366,7 +369,7 @@ func TestAnalyzeSchemaNonObjectRoot(t *testing.T) {
 	}
 	for name, schema := range cases {
 		t.Run(name, func(t *testing.T) {
-			got := analyzeSchema(json.RawMessage(schema))
+			got := analyzeSchema(json.RawMessage(schema), false)
 			if !slices.Contains(got, SchemaFinding{Kind: FindingNonObjectRoot}) {
 				t.Fatalf("got %v, want a %s finding", got, FindingNonObjectRoot)
 			}
@@ -377,7 +380,7 @@ func TestAnalyzeSchemaNonObjectRoot(t *testing.T) {
 // An absent inputSchema fails the same rule: $defs.Tool.required is
 // ["inputSchema", "name"], so there is nothing for a client to validate against.
 func TestAnalyzeSchemaAbsentInputSchemaIsANonObjectRoot(t *testing.T) {
-	got := analyzeSchema(nil)
+	got := analyzeSchema(nil, false)
 
 	want := []SchemaFinding{{Kind: FindingNonObjectRoot}}
 
@@ -394,16 +397,17 @@ func TestAnalyzeSchemaObjectRootIsClean(t *testing.T) {
 		`{"type":"object","additionalProperties":false}`,
 		`{"$schema":"http://json-schema.org/draft-07/schema#","type":"object"}`,
 	} {
-		got := analyzeSchema(json.RawMessage(schema))
+		got := analyzeSchema(json.RawMessage(schema), false)
 		if slices.Contains(got, SchemaFinding{Kind: FindingNonObjectRoot}) {
 			t.Fatalf("schema %s: got %v, want no %s finding", schema, got, FindingNonObjectRoot)
 		}
 	}
 }
 
-// The reason travels into the warning, so it has to name what was actually on
-// the wire rather than just say the schema was wrong. Bisecting a listing is the
-// cost of a warning that does not.
+// The reason is what a warning will carry, so it has to name what was actually
+// on the wire rather than just say the schema was wrong. Bisecting a listing is
+// the cost of a warning that does not. Pinned now so the wording is settled
+// before anything renders it.
 func TestSchemaRootViolationNamesWhatWasSeen(t *testing.T) {
 	cases := map[string]string{
 		``:                                "no inputSchema",
@@ -419,8 +423,82 @@ func TestSchemaRootViolationNamesWhatWasSeen(t *testing.T) {
 		`{"$schema":"x","type":"object"}`: "",
 	}
 	for schema, want := range cases {
-		if got := schemaRootViolation(json.RawMessage(schema)); got != want {
+		if got := schemaRootViolation(json.RawMessage(schema), false); got != want {
 			t.Fatalf("schema %q: got %q, want %q", schema, got, want)
 		}
+	}
+}
+
+// TestSchemaRootIsUnverifiableAfterRedaction. --redact-path is the documented
+// way to scrub something inside a schema, and it can replace the schema itself
+// or just its root type. Reading either placeholder as a missing root type
+// reports a conforming server for the user's own privacy setting, on the axis
+// the follow-up wires to a warning that fails a default check run. The sibling
+// x-mcp-header check answers the same input the same way and says why.
+func TestSchemaRootIsUnverifiableAfterRedaction(t *testing.T) {
+	for name, schema := range map[string]string{
+		"the whole schema":  `"[REDACTED]"`,
+		"the root type":     `{"type":"[REDACTED]","properties":{"q":{"type":"string"}}}`,
+		"type and the rest": `{"$schema":"[REDACTED]","type":"[REDACTED]"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := schemaRootViolation(json.RawMessage(schema), true); got != "" {
+				t.Fatalf("redacted schema reported %q, want silence", got)
+			}
+			// Only mcpsnoop's own rewriting earns that silence. The placeholder is a
+			// string either peer may send, so a check that stops at the bytes alone is
+			// a check the traffic can switch off.
+			if got := schemaRootViolation(json.RawMessage(schema), false); got == "" {
+				t.Fatal("an unredacted capture spelling the placeholder must still be judged")
+			}
+		})
+	}
+
+	// Redaction excuses the root verdict and nothing else. A scrubbed root does
+	// not hide what the rest of the document uses.
+	got := analyzeSchema(json.RawMessage(`{"type":"[REDACTED]","properties":{"a":{"oneOf":[{"type":"string"}]}}}`), true)
+	if slices.Contains(got, SchemaFinding{Kind: FindingNonObjectRoot}) {
+		t.Fatalf("got %v, want no %s finding on a redacted root", got, FindingNonObjectRoot)
+	}
+	if !slices.Contains(got, SchemaFinding{Kind: FindingOneOf}) {
+		t.Fatalf("got %v, want the oneOf the walk can still see", got)
+	}
+}
+
+// TestToolsListVerdictSurvivesRedaction drives the whole ingest path, since the
+// flag has to travel from the envelope through completeCall and applyToolsList
+// to reach the check. A unit test on schemaRootViolation alone would pass with
+// the wiring cut.
+func TestToolsListVerdictSurvivesRedaction(t *testing.T) {
+	const listing = `"result":{"tools":[{"name":"search","inputSchema":{"type":"object","properties":{"q":{"type":"string"}}}}]}`
+	findings := func(redacted bool, raw string) []SchemaFinding {
+		t.Helper()
+		s := New()
+		t0 := time.Unix(0, 0)
+		s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", `{}`))
+		e := resp(2, t0, proxy.ServerToClient, "1", raw)
+		e.Redacted = redacted
+		s.Ingest(e)
+		definitions, ok := s.ToolDefinitions("s1")
+		if !ok || len(definitions) != 1 {
+			t.Fatalf("tool definitions = %v, ok = %v", definitions, ok)
+		}
+		return definitions[0].Findings
+	}
+
+	if got := findings(false, listing); len(got) != 0 {
+		t.Fatalf("a conforming listing reported %v", got)
+	}
+	// What --redact-path '$.result.tools[*].inputSchema' leaves behind.
+	if got := findings(true, `"result":{"tools":[{"name":"search","inputSchema":"[REDACTED]"}]}`); len(got) != 0 {
+		t.Fatalf("a scrubbed schema reported %v, which accuses the server of the user's own redaction", got)
+	}
+	// What --redact-path '$..type' leaves behind.
+	if got := findings(true, `"result":{"tools":[{"name":"search","inputSchema":{"type":"[REDACTED]"}}]}`); len(got) != 0 {
+		t.Fatalf("a scrubbed root type reported %v", got)
+	}
+	// A genuinely rootless schema on a redacted frame is still the server's doing.
+	if got := findings(true, `"result":{"tools":[{"name":"search","inputSchema":{"type":"array"}}]}`); len(got) == 0 {
+		t.Fatal("redaction must not excuse a root type the server really sent")
 	}
 }

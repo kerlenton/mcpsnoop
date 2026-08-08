@@ -6,9 +6,10 @@ import (
 	"strings"
 )
 
-// SchemaFindingKind names a JSON Schema construct that clients handle
-// inconsistently. A finding is an observation, not a verdict: a schema using
-// oneOf is not wrong, only likely to be interpreted differently across clients.
+// SchemaFindingKind names something worth knowing about a tool's advertised
+// input schema. All but one are observations rather than verdicts: a schema
+// using oneOf is not wrong, only likely to be interpreted differently across
+// clients. FindingNonObjectRoot is the exception and says so on its own doc.
 type SchemaFindingKind string
 
 const (
@@ -25,6 +26,21 @@ const (
 	FindingUntypedProperty SchemaFindingKind = "untypedProperty"
 )
 
+// SchemaFindingKinds is every kind analyzeSchema can report, in the order the
+// constants declare them. Exported for the same reason ToolDriftKinds is: a
+// renderer that ranks or labels kinds from a hand-kept list of its own has no
+// way to notice a kind added here, and would show the raw enum name for it.
+var SchemaFindingKinds = []SchemaFindingKind{
+	FindingNonObjectRoot,
+	FindingOneOf,
+	FindingAnyOf,
+	FindingAllOf,
+	FindingNot,
+	FindingRef,
+	FindingExternalRef,
+	FindingUntypedProperty,
+}
+
 type SchemaFinding struct {
 	Kind SchemaFindingKind
 }
@@ -37,14 +53,14 @@ type SchemaFinding struct {
 // entries of the same kind are indistinguishable and add nothing; collapsing
 // them lets a caller treat "more than one finding" as "more than one kind of
 // problem", which is the question a reader actually has.
-func analyzeSchema(raw json.RawMessage) []SchemaFinding {
+func analyzeSchema(raw json.RawMessage, redacted bool) []SchemaFinding {
 	var findings []SchemaFinding
 	seen := make(map[SchemaFindingKind]bool, 8)
 
 	// First, so the violation leads the list the walk order would otherwise
 	// decide. A rootless schema still gets walked, because naming the construct
 	// it uses is worth having next to the reason a client refused it.
-	if schemaRootViolation(raw) != "" {
+	if schemaRootViolation(raw, redacted) != "" {
 		addFinding(&findings, seen, FindingNonObjectRoot)
 	}
 
@@ -62,8 +78,9 @@ func analyzeSchema(raw json.RawMessage) []SchemaFinding {
 }
 
 // schemaRootViolation reports how a tool's inputSchema fails the root-object
-// rule, in words naming what was seen, or "" when it satisfies it. Nothing is
-// resolved and no dialect is interpreted: the verdict is decided by the bytes.
+// rule, in words naming what was seen, or "" when it satisfies it or when
+// mcpsnoop cannot tell. Nothing is resolved and no dialect is interpreted: the
+// verdict is decided by the bytes.
 //
 // $defs.Tool.inputSchema carries "required": ["type"] with "type" a const of
 // "object", and $defs.Tool.required is ["inputSchema", "name"], so an absent
@@ -71,12 +88,27 @@ func analyzeSchema(raw json.RawMessage) []SchemaFinding {
 // appears in the 2026-07-28, 2025-11-25 and 2025-06-18 schema files, which is
 // why this needs no revision gate.
 //
-// The rule is an inputSchema rule only. outputSchema's entry has no "required"
-// and no const, and the Tools page shows an array-rooted outputSchema in its
-// list_users example, so this is never asked about one.
-func schemaRootViolation(raw json.RawMessage) string {
+// The rule is an inputSchema rule only. On 2026-07-28 outputSchema's entry has
+// no "required" and no const, and the Tools page shows an array-rooted
+// outputSchema in its list_users example, so this is never asked about one.
+// Extending it there would need the revision gate this does not, since
+// 2025-11-25 and 2025-06-18 do constrain an outputSchema root to "object".
+//
+// redacted says the frame passed through mcpsnoop's own redaction, which is what
+// makes the placeholder below trustworthy as a placeholder rather than a value
+// a peer chose to send.
+func schemaRootViolation(raw json.RawMessage, redacted bool) string {
 	if len(raw) == 0 {
 		return "no inputSchema"
+	}
+	// A schema the user asked mcpsnoop to scrub is unreadable, not wrong. Saying
+	// otherwise turns a privacy setting into an accusation against a server that
+	// was conforming, which is the answer the sibling x-mcp-header check already
+	// gives for the same input and the reason it gives it. --redact-path is the
+	// documented way to name something inside a schema, so this is a supported
+	// workflow rather than a misuse.
+	if unverifiableAfterRedaction(redacted, redactedSchemaRoot(raw)) {
+		return ""
 	}
 	var root map[string]any
 	if err := json.Unmarshal(raw, &root); err != nil || root == nil {
@@ -101,6 +133,22 @@ func schemaRootViolation(raw json.RawMessage) string {
 		// and a client validating against $defs.Tool rejects it the same way.
 		return `an inputSchema whose root type is not the string "object"`
 	}
+}
+
+// redactedSchemaRoot returns whichever of the two things a redaction rule can
+// replace decides the root verdict, the whole schema or just its type, so one
+// call covers both. Anything else it returns is a value that was never going to
+// match the placeholder anyway.
+func redactedSchemaRoot(raw json.RawMessage) string {
+	var whole string
+	if json.Unmarshal(raw, &whole) == nil {
+		return whole
+	}
+	var root struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(raw, &root)
+	return root.Type
 }
 
 func addFinding(findings *[]SchemaFinding, seen map[SchemaFindingKind]bool, kind SchemaFindingKind) {
