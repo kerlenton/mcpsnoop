@@ -126,7 +126,7 @@ func TestHTMLSurfacesSupersededStatus(t *testing.T) {
 	}
 	// statusOf surfaces superseded on a request row while ok still yields an empty
 	// cell (the ternary returns "" for anything else).
-	if !strings.Contains(html, `call.status === "pending" || call.status === "superseded" ? call.status : ""`) {
+	if !strings.Contains(html, `["pending", "superseded", "call_cancelled", "late_result"].includes(call.status) ? call.status : ""`) {
 		t.Fatal("statusOf does not surface the superseded status on a request row")
 	}
 	// The CSS rule that colors it (as warn) must exist.
@@ -135,8 +135,42 @@ func TestHTMLSurfacesSupersededStatus(t *testing.T) {
 	}
 }
 
+// TestHTMLSurfacesCallCancellationStatuses. A cancelled call and a late result
+// each need their own status token and their own CSS rule, or both render as an
+// ordinary row in the one export people forward to somebody else.
+func TestHTMLSurfacesCallCancellationStatuses(t *testing.T) {
+	cancelledIndex, lateIndex := 0, 1
+	data := SessionExport{
+		Session: SessionSummary{ID: "s1", LateResults: 1},
+		Calls: []CallExport{
+			{Index: cancelledIndex, ID: "1", Method: "tools/call", Status: "call_cancelled"},
+			{Index: lateIndex, ID: "2", Method: "tools/call", Status: "late_result", LateResult: true},
+		},
+		Events: []EventExport{
+			{Seq: 1, Kind: "request", CallIndex: &cancelledIndex},
+			{Seq: 2, Kind: "response", CallIndex: &lateIndex, Observation: "result arrived after cancellation"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatHTML}); err != nil {
+		t.Fatal(err)
+	}
+	html := buf.String()
+	for _, want := range []string{
+		`"status":"call_cancelled"`,
+		`"status":"late_result"`,
+		`"observation":"result arrived after cancellation"`,
+		`["Late results", data.session.late_results]`,
+		`.status.call_cancelled, .status.late_result`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("HTML missing %q", want)
+		}
+	}
+}
+
 // TestWriteHTMLStillEscapesMarkup. The HTML export is the one writer that must
-// keep escaping: its payload lands in template.JS inside a script block, where
+// keep escaping. Its payload lands in template.JS inside a script block, where
 // template.JS disables the contextual escaping html/template would apply, and a
 // tool result containing </script> would otherwise close the element and run as
 // markup. Wire fidelity loses to stored XSS in a file opened in a browser.

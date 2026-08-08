@@ -109,7 +109,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop` | open the live TUI |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, har, or otlp |
-| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, or hung calls |
+| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, hung calls, or late results |
 | `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
@@ -223,12 +223,14 @@ matches the method, tool, id, and payload.
 | `task:` | task id | `task:01J...` |
 | `dir:` | direction (`c2s`, `s2c`) | `dir:s2c` |
 | `kind:` | frame type (`req`, `resp`, `notify`, `stderr`, `invalid`) | `kind:invalid` |
-| `status:` | call outcome (`ok`, `error`, `cancelled`, `pending`, `bad`, `warn`, `mismatch`) | `status:error` |
+| `status:` | call outcome (`ok`, `error`, `cancel`, `late`, `cancelled`, `pending`, `bad`, `warn`, `mismatch`, or an HTTP status like `401`) | `status:error` |
 
 Stack tokens to get specific.
 
 ```text
 tool:search status:pending        # in-flight calls to one search tool
+status:cancel                     # calls the client gave up on (status:cancelled is a cancelled task)
+status:late                       # results that arrived after the cancellation
 method:tools/call status:error    # tool calls that failed
 dir:s2c kind:req                  # server-initiated requests (servers before 2026-07-28)
 ```
@@ -360,17 +362,19 @@ leave the capture incomplete, tool-definition drift, or use of deprecated
 protocol features.
 
 ```bash
-mcpsnoop check [--format text|junit] [--fail-on error,invalid,warn,mismatch,pending,drift,deprecated,incomplete] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit|sarif] [--fail-on error,invalid,warn,mismatch,pending,late-result,drift,deprecated,incomplete] [session-id|log.jsonl|-]
 ```
 
 The three default signals (error, invalid, warn) fail the check. Add `pending`
-to gate on calls that never got a response, `mismatch` to gate specifically on a
+to gate on calls that never got a response, `late-result` to gate on responses
+that arrived after cancellation, `mismatch` to gate specifically on a
 routing header (Mcp-Method or Mcp-Name) disagreeing with the body, `drift` to gate
 on tool definitions changing after approval, `deprecated` to gate on features
 the spec has deprecated, or `incomplete` to gate on captures with dropped frames.
 Pass a comma-separated subset to select only the
 conditions relevant to a job. Omit the session to check the newest capture, or use
-`-` to read JSONL from stdin.
+`-` to read JSONL from stdin. Late results are reported as `late_results` without
+affecting the default error, invalid, or warning signals.
 The dropped-frame count travels with the artifacts too, so a capture that
 understates itself says so wherever it is opened: `missing_frames` in the JSON
 export, `log.comment` in HAR, and the `mcpsnoop.session.missing_frames` resource
@@ -393,6 +397,24 @@ definition remain observational only. Existing key- and value-based redaction
 also applies to captured parameter-header values before they reach a sink.
 Use `--format junit` to write one JUnit `<testcase>` per signal and session;
 failures follow the same `--fail-on` selection as the text output.
+Use `--format sarif` to write a SARIF 2.1.0 log instead. Where junit reports one
+aggregate per signal, SARIF reports one result per finding, carrying the session,
+the frame `Seq` and the frame's own warning or drift text, and pointing at the
+line of the log the frame was decoded from. A signal named in `--fail-on` is
+reported at level `error` and one outside it at level `note`, so the report and
+the gate never disagree. Code scanning rejects a file whose run holds more than
+25,000 results and displays only the top 5,000 of what it accepts, so the report
+is capped at 5,000: the findings the gate failed on first, then a
+`mcpsnoop/report-truncated` result saying how many were left out. The text and
+junit formats stay complete.
+
+A result points at the log with a path relative to the working directory, which
+code scanning then resolves against the repository root. The alert renders with
+its surrounding lines only when that path is a file in the analysed commit, so a
+capture the workflow generated into `artifacts/` opens an alert carrying the
+message, the rule and the line number but no source view. Committing a capture
+you want rendered in full is the only way to get one. A log read from the state
+directory or from stdin gets no path at all.
 
 ```bash
 mcpsnoop check build-agent
@@ -425,6 +447,34 @@ mcpsnoop check --expect-tool search --forbid-tool delete --max-duration 2s run.j
   with:
     name: mcpsnoop-junit
     path: test-results/mcpsnoop.xml
+```
+
+To put the findings in the Security tab instead, hand the SARIF log to
+`upload-sarif`. The job needs `security-events: write`, or the upload answers
+403. `check` exits non-zero on a finding, so the upload step needs `if: always()`
+to run at all on the runs that have something to report; `continue-on-error`
+hands the verdict to the code scanning check, which fails on an `error`-level
+alert and can be made a required check. Drop it if you would rather the check
+step itself be what turns the job red.
+
+```yaml
+permissions:
+  # required for all workflows
+  security-events: write
+  # only required for workflows in private repositories
+  actions: read
+  contents: read
+
+steps:
+- name: Check captured MCP session
+  continue-on-error: true
+  run: mcpsnoop check --format sarif artifacts/session.jsonl > mcpsnoop.sarif
+- name: Upload mcpsnoop SARIF report
+  if: always()
+  uses: github/codeql-action/upload-sarif@v4
+  with:
+    sarif_file: mcpsnoop.sarif
+    category: mcpsnoop
 ```
 
 ### Detect tool definition drift

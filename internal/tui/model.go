@@ -1040,6 +1040,9 @@ func statusRank(e store.EventView) int {
 	if e.Call != nil && e.Call.Failed() {
 		return 4
 	}
+	if e.Call != nil && e.Call.State == store.Cancelled {
+		return 3
+	}
 	if e.Warning != "" || e.Truncated || e.Deprecated != "" || e.CacheStaleRefetch != "" {
 		return 3
 	}
@@ -1124,6 +1127,7 @@ func eventSubstr(e store.EventView, q string) bool {
 		strings.Contains(strings.ToLower(e.ID), q) ||
 		strings.Contains(strings.ToLower(e.Text), q) ||
 		strings.Contains(strings.ToLower(e.Warning), q) ||
+		strings.Contains(strings.ToLower(e.Observation), q) ||
 		strings.Contains(strings.ToLower(string(e.Raw)), q) {
 		return true
 	}
@@ -1199,12 +1203,20 @@ func (m *Model) matchStatus(e store.EventView, v string) bool {
 	}
 	switch v {
 	case "err", "error", "fail", "failed":
-		// The "something went wrong" axis, not the Failed state: a cancelled call is
-		// Failed() but not an error, so it belongs under status:cancelled, not here.
+		// The "something went wrong" axis rather than the Failed state. A call the
+		// client gave up on is Failed() without being an error, so it belongs under
+		// status:cancel. A late result that carried an error does land here, since
+		// the axis follows what the answer contained.
 		return e.Call.Errored
 	case "cancelled", "canceled":
-		// The row already labels a cancelled task "cancelled"; find it the same way.
+		// A cancelled task, which is a different thing from a cancelled call and one
+		// letter apart from it. The row labels this one "cancelled" and the call
+		// "cancel", so each token finds what its own row says.
 		return e.Call.TaskStatus == "cancelled"
+	case "cancel", "call_cancelled", "call-cancelled":
+		return e.Call.State == store.Cancelled && !e.Call.LateResult
+	case "late", "late_result", "late-result":
+		return e.Call.State == store.Cancelled && e.Call.LateResult
 	case "pending", "pend", "inflight":
 		return e.Call.State == store.Pending
 	case "ok", "success":

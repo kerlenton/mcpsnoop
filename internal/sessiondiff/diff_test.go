@@ -183,3 +183,27 @@ func driftOf(kind store.ToolDriftKind, name string) store.ToolDrift {
 	d.Add(kind, name)
 	return d
 }
+
+// TestStatusRankCoversCancellationAndLateResults. A run that goes from ok to a
+// call the client gave up on, or to a result that arrived after it did, is a
+// regression. Ranking the two new statuses with ok made diff print the change and
+// still exit 0, so the line a human reads and the code a CI job reads disagreed.
+func TestStatusRankCoversCancellationAndLateResults(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		want   int
+	}{
+		{"ok", 0},
+		{"pending", 1},
+		{"call_cancelled", 1},
+		{"late_result", 1},
+		{"error", 2},
+	} {
+		if got := statusRank(tc.status); got != tc.want {
+			t.Errorf("statusRank(%q) = %d, want %d", tc.status, got, tc.want)
+		}
+	}
+	if statusRank("call_cancelled") <= statusRank("ok") {
+		t.Fatal("a cancelled call must rank worse than ok, or the exit code stays 0")
+	}
+}

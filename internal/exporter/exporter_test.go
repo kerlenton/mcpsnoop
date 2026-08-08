@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,6 +195,84 @@ func TestBuildKeepsNullIDCallsDistinct(t *testing.T) {
 		}
 		if out.Calls[i].ToolName != want {
 			t.Fatalf("call %d tool = %q, want %q", i, out.Calls[i].ToolName, want)
+		}
+	}
+}
+
+func TestBuildExportsCallCancellationAndLateResult(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cancelled-call.jsonl")
+	t0 := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	cancelledAt := t0.Add(250 * time.Millisecond)
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow"}}`),
+	})
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 2, TS: cancelledAt,
+		Direction: proxy.ClientToServer,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7,"reason":"moved on"}}`),
+	})
+
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Session.Pending != 0 || cancelled.Session.LateResults != 0 || len(cancelled.Calls) != 1 {
+		t.Fatalf("cancelled summary/calls = %+v %+v", cancelled.Session, cancelled.Calls)
+	}
+	call := cancelled.Calls[0]
+	if call.State != "cancelled" || call.Status != "call_cancelled" {
+		t.Fatalf("cancelled state/status = %q/%q", call.State, call.Status)
+	}
+	if call.CancelledAt == nil || *call.CancelledAt != cancelledAt || call.CancelReason != "moved on" {
+		t.Fatalf("cancelled metadata = %v %q", call.CancelledAt, call.CancelReason)
+	}
+	if call.EndedAt != nil || call.DurationMS != nil || call.LateResult || len(call.Result) != 0 {
+		t.Fatalf("unanswered cancellation exported as %+v", call)
+	}
+
+	st.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 3, TS: t0.Add(time.Second),
+		Direction: proxy.ServerToClient,
+		Raw:       json.RawMessage(`{"jsonrpc":"2.0","id":7,"result":{"content":[]}}`),
+	})
+	late, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call = late.Calls[0]
+	if late.Session.LateResults != 1 || call.Status != "late_result" || !call.LateResult {
+		t.Fatalf("late result summary/call = %+v %+v", late.Session, call)
+	}
+	if call.EndedAt == nil || call.DurationMS == nil || *call.DurationMS != 1000 {
+		t.Fatalf("late result timing = ended %v duration %v", call.EndedAt, call.DurationMS)
+	}
+	if len(late.Events) != 3 || late.Events[2].Observation != "result arrived 750ms after cancellation" {
+		t.Fatalf("late result event = %+v", late.Events)
+	}
+
+	var text bytes.Buffer
+	if err := Write(&text, late, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"late results: 1", "status=late_result duration_ms=1000", "observation=result arrived 750ms after cancellation"} {
+		if !strings.Contains(text.String(), want) {
+			t.Fatalf("text export missing %q\n%s", want, text.String())
+		}
+	}
+
+	var otlp bytes.Buffer
+	if err := Write(&otlp, late, Options{Format: FormatOTLP}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"mcpsnoop.session.late_results", "mcpsnoop.call.cancelled_at", "mcpsnoop.call.cancel_reason", "mcpsnoop.call.late_result", "STATUS_CODE_UNSET"} {
+		if !strings.Contains(otlp.String(), want) {
+			t.Fatalf("OTLP export missing %q\n%s", want, otlp.String())
 		}
 	}
 }
@@ -1214,5 +1293,129 @@ func TestResolveSessionPathSkipsAnEmptyLog(t *testing.T) {
 	}
 	if got != real {
 		t.Fatalf("resolved %q, want the last real capture %q", got, real)
+	}
+}
+
+// TestLoadFileLinesTracksTrueLineNumbers. Seq is scoped per session and skips
+// frames dropped upstream, so a result pointed at Seq would send a reader to the
+// wrong frame in exactly the captures worth pointing them at: this log has a
+// gap in one session and a second session that restarts numbering at 1.
+func TestLoadFileLinesTracksTrueLineNumbers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "two.jsonl")
+	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	frames := []struct {
+		session string
+		seq     uint64
+	}{
+		{"alpha", 1},
+		{"alpha", 2},
+		{"alpha", 5}, // Seq 3 and 4 were dropped upstream.
+		{"beta", 1},
+		{"beta", 2},
+	}
+	for i, frame := range frames {
+		writeEnv(t, path, proxy.Envelope{
+			SessionID: frame.session, ServerLabel: "demo", Seq: frame.seq,
+			TS: t0.Add(time.Duration(i) * time.Millisecond), Direction: proxy.ClientToServer,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		})
+	}
+
+	st, first, lines, err := LoadFileLines(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st == nil || first != "alpha" {
+		t.Fatalf("first session = %q, want alpha", first)
+	}
+	for i, frame := range frames {
+		want := i + 1
+		got, ok := lines.Line(frame.session, frame.seq)
+		if !ok {
+			t.Fatalf("no line recorded for %s seq %d", frame.session, frame.seq)
+		}
+		if got != want {
+			t.Fatalf("%s seq %d is on line %d, want %d", frame.session, frame.seq, got, want)
+		}
+	}
+	// The point of the index: after the gap, and in the second session, the line
+	// and the Seq are different numbers.
+	if line, _ := lines.Line("alpha", 5); line == 5 {
+		t.Fatal("alpha seq 5 must not be reported on line 5")
+	}
+	if line, _ := lines.Line("beta", 1); line == 1 {
+		t.Fatal("beta seq 1 must not be reported on line 1")
+	}
+	if _, ok := lines.Line("alpha", 3); ok {
+		t.Fatal("a frame that never reached the log must have no line")
+	}
+	// A stream loaded without the index answers the same way as a missing frame,
+	// so a caller cannot mistake "not tracked" for line zero.
+	if _, ok := FrameLines(nil).Line("alpha", 1); ok {
+		t.Fatal("an absent index must report no line")
+	}
+}
+
+// TestLoadFileLinesCountsBlankLines. json.Decoder buffers past the value it
+// returns, so a newline count kept alongside Decode would run ahead of it, and
+// whitespace between envelopes would shift every line after it.
+func TestLoadFileLinesCountsBlankLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "padded.jsonl")
+	envelope := func(seq uint64) string {
+		b, err := json.Marshal(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "demo", Seq: seq,
+			TS: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC), Direction: proxy.ClientToServer,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	// Envelopes on lines 1, 2, 4 and 5, with line 3 blank.
+	body := envelope(1) + "\n" + envelope(2) + "\n\n" + envelope(3) + "\n" + envelope(4) + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, lines, err := LoadFileLines(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for seq, want := range map[uint64]int{1: 1, 2: 2, 3: 4, 4: 5} {
+		got, ok := lines.Line("s1", seq)
+		if !ok || got != want {
+			t.Fatalf("seq %d is on line %d (ok=%v), want %d", seq, got, ok, want)
+		}
+	}
+}
+
+// TestNewlineCounterDropsOffsetsItHasWalkedPast. json.Decoder reads ahead of the
+// value it hands back, so the buffer is essentially never empty when lineAt runs
+// and a "reuse it once drained" rule never fires. That kept one int64 per line of
+// the capture alive for the whole load, on the format that never asked for a line
+// index at all.
+func TestNewlineCounterDropsOffsetsItHasWalkedPast(t *testing.T) {
+	const lines = 20000
+	body := strings.Repeat("x\n", lines)
+	// A reader that hands over the whole stream at once, which is the worst case:
+	// every newline is recorded before the first lineAt call walks past any.
+	counter := &newlineCounter{r: strings.NewReader(body)}
+	buf := make([]byte, len(body))
+	if _, err := io.ReadFull(counter, buf); err != nil {
+		t.Fatal(err)
+	}
+
+	for line := 1; line <= lines; line++ {
+		// Two bytes per line, so a value on line n ends just past offset 2n-1, one
+		// short of that line's own newline. Stopping there rather than walking past
+		// it is the point: it is the state a forward pass is always in, and the state
+		// the old "reuse it once drained" rule never recognised.
+		if got := counter.lineAt(int64(2*line - 1)); got != line {
+			t.Fatalf("lineAt(%d) = %d, want %d", 2*line-1, got, line)
+		}
+	}
+	if got := len(counter.offsets); got > 1 {
+		t.Fatalf("offsets = %d after walking %d lines, want only what is still ahead", got, lines)
 	}
 }
