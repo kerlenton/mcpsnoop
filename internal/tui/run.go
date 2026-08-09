@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,6 +15,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
 	"github.com/kerlenton/mcpsnoop/internal/toolbaseline"
+	"github.com/kerlenton/mcpsnoop/internal/youcom"
 )
 
 // Run starts the hub and the live TUI. It blocks until the user quits or ctx is
@@ -27,9 +29,21 @@ func Run(ctx context.Context, socketPath, sessionsDir string) error {
 // RunWithHistoryLimit starts the live TUI with a bounded history replay.
 // A historyLimit of 0 loads every session log.
 func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, historyLimit int) error {
+	return RunWithOptions(ctx, socketPath, sessionsDir, historyLimit, "")
+}
+
+// RunWithOptions starts the live TUI with configurable options including You.com search.
+func RunWithOptions(ctx context.Context, socketPath, sessionsDir string, historyLimit int, youcomAPIKey string) error {
 	st := store.New()
 	baselines := toolbaseline.New(paths.ToolBaselinesDir())
-	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx))
+	
+	// Create You.com client if API key is provided (from flag or env var)
+	if youcomAPIKey == "" {
+		youcomAPIKey = os.Getenv("YOUCOM_API_KEY")
+	}
+	searchClient := youcom.NewClient(youcomAPIKey)
+	
+	p := tea.NewProgram(NewWithSearchClient(st, searchClient), tea.WithAltScreen(), tea.WithContext(ctx))
 
 	hubCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

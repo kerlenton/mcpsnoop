@@ -113,6 +113,21 @@ more than one of each.
 
 Those are all the keys it supports.
 
+### Web Search Integration
+
+mcpsnoop includes optional You.com web search integration for researching MCP errors, tool specifications, and debugging issues directly from the TUI.
+
+**Setup**: Set your You.com API key via environment variable, flag, or config file:
+```bash
+export YOUCOM_API_KEY="your-api-key"
+# or
+mcpsnoop --youcom-api-key="your-api-key" -- your-server
+# or add to .mcpsnoop.toml:
+youcom-api-key = "your-api-key"
+```
+
+**Usage**: Press `w` in the TUI or use `:search <query>` / `:web <query>` commands. Search results appear in an overlay. Useful for looking up error codes, MCP specifications, or tool documentation while debugging.
+
 The file is only looked up in the current working directory, not in parent
 directories.
 

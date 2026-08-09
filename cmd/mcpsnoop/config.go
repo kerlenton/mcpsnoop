@@ -19,6 +19,7 @@ type config struct {
 	RedactKeys    redactKeysFlag
 	RedactValues  redactValuesFlag
 	RedactPaths   redactPathsFlag
+	YouComAPIKey  string
 }
 
 func loadConfig() (config, bool, error) {
@@ -135,6 +136,9 @@ func parseConfig(r io.Reader) (config, error) {
 				return config{}, err
 			}
 
+		case "youcom-api-key":
+			cfg.YouComAPIKey = value
+
 		default:
 			return config{}, fmt.Errorf("unknown config key %q", key)
 		}
@@ -156,6 +160,7 @@ func applyConfig(
 	redactKeys *redactKeysFlag,
 	redactValues *redactValuesFlag,
 	redactPaths *redactPathsFlag,
+	youcomAPIKey *string,
 ) {
 	if !ok {
 		return
@@ -187,5 +192,9 @@ func applyConfig(
 
 	if !fs.Changed("redact-path") {
 		*redactPaths = cfg.RedactPaths
+	}
+
+	if !fs.Changed("youcom-api-key") {
+		*youcomAPIKey = cfg.YouComAPIKey
 	}
 }

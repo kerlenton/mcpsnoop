@@ -252,6 +252,7 @@ func newRootCmd() *cobra.Command {
 		redactPaths            redactPathsFlag
 		otlpHeaders            otlpHeadersFlag
 		historyLimit           int
+		youcomAPIKey           string
 	)
 	cmd := &cobra.Command{
 		Use:   "mcpsnoop [flags] -- <server command> [args...]",
@@ -271,14 +272,14 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 				if historyLimit < 0 {
 					return errors.New("--history-limit must be non-negative")
 				}
-				return codeOf(runHubFn(historyLimit))
+				return codeOf(runHubFn(historyLimit, youcomAPIKey))
 			}
 			cfg, ok, err := loadConfig()
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "mcpsnoop:", err)
 				return exitCode(1)
 			}
-			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths)
+			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths, &youcomAPIKey)
 			// After applyConfig, so a label from a shared .mcpsnoop.toml is held
 			// to the same rule as the flag.
 			if err := paths.CheckLabel(label); err != nil {
@@ -303,6 +304,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 	flags.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")
 	flags.Var(&redactValues, "redact-value", "regular expression to scrub inside observed string values, stderr, and non-JSON text, repeatable")
 	flags.Var(&redactPaths, "redact-path", "JSONPath selecting values to scrub in saved trace payloads, repeatable")
+	flags.StringVar(&youcomAPIKey, "youcom-api-key", "", "You.com API key for web search integration (also reads YOUCOM_API_KEY env var)")
 	flags.IntVar(&historyLimit, "history-limit", hub.DefaultBackfillLimit, "maximum session logs to load in the TUI, 0 loads all")
 	// Stop parsing at the first positional so the wrapped command keeps its flags.
 	flags.SetInterspersed(false)
@@ -810,11 +812,11 @@ func newHTTPCmd() *cobra.Command {
 }
 
 // runHub runs the live TUI, collecting traffic from all shims and past sessions.
-func runHub(historyLimit int) int {
+func runHub(historyLimit int, youcomAPIKey string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := tui.RunWithHistoryLimit(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit); err != nil {
+	if err := tui.RunWithOptions(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit, youcomAPIKey); err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)
 		return 1
 	}
