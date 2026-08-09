@@ -246,7 +246,7 @@ func TestRootNoArgsRunsHubNotShim(t *testing.T) {
 	gotLimit := -1
 	gotMetrics := "unset"
 	origHub := runHubFn
-	runHubFn = func(limit int, metrics string) int {
+	runHubFn = func(limit int, metrics, _ string) int {
 		hub = true
 		gotLimit = limit
 		gotMetrics = metrics
@@ -278,7 +278,7 @@ func TestRootNoArgsRunsHubNotShim(t *testing.T) {
 func TestRootHistoryLimitConfiguresHub(t *testing.T) {
 	gotLimit := -1
 	origHub := runHubFn
-	runHubFn = func(limit int, _ string) int {
+	runHubFn = func(limit int, _, _ string) int {
 		gotLimit = limit
 		return 0
 	}
@@ -295,7 +295,7 @@ func TestRootHistoryLimitConfiguresHub(t *testing.T) {
 func TestRootMetricsListenIsHubOnlyAndOptIn(t *testing.T) {
 	var got string
 	orig := runHubFn
-	runHubFn = func(_ int, listen string) int {
+	runHubFn = func(_ int, listen, _ string) int {
 		got = listen
 		return 0
 	}
