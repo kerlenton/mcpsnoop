@@ -384,56 +384,37 @@ protocol features.
 mcpsnoop check [--format text|junit|sarif] [--fail-on error,invalid,warn,mismatch,pending,late-result,drift,deprecated,incomplete,schema] [session-id|log.jsonl|-]
 ```
 
-The three default signals (error, invalid, warn) fail the check. Add `pending`
-to gate on calls that never got a response, `late-result` to gate on responses
-that arrived after cancellation, `mismatch` to gate specifically on a
-routing header (Mcp-Method or Mcp-Name) disagreeing with the body, `drift` to gate
-on tool definitions changing after approval, `deprecated` to gate on features
-the spec has deprecated, or `incomplete` to gate on captures with dropped frames.
-Pass a comma-separated subset to select only the
-conditions relevant to a job. Omit the session to check the newest capture, or use
-`-` to read JSONL from stdin. Late results are reported as `late_results` without
-affecting the default error, invalid, or warning signals.
+`error`, `invalid` and `warn` fail the check on their own. The rest are opt-in.
+Pass a comma-separated subset to gate on only what a job cares about, omit the
+session to check the newest capture, or use `-` to read JSONL from stdin.
+
+| Signal | Fails on |
+|---|---|
+| `error` | a call answered with a JSON-RPC error, a result marked `isError`, or a task that ended in a failure |
+| `invalid` | a frame on the protocol channel that is not valid JSON-RPC, usually a server logging to stdout |
+| `warn` | a frame breaking an expectation the MCP or JSON-RPC specification sets |
+| `mismatch` | a routing header disagreeing with the body, riding a batch, or missing where the revision requires it |
+| `pending` | a request still open when the capture ended, so the caller was left waiting |
+| `late-result` | a response that arrived after its request was cancelled |
+| `drift` | an advertised tool definition changing after the baseline was approved |
+| `deprecated` | a feature the specification has deprecated |
+| `incomplete` | frames dropped upstream, which makes every other count a floor rather than a total |
+| `schema` | an advertised schema using a construct or a dialect that travels badly across clients |
+
+Every signal is counted whether or not it is gating, so a run says what it found
+before you decide what should fail on it.
+
+```
+session build-agent: errors=1 invalid=0 warnings=0 mismatches=0 pending=0 late_results=0 deprecated=0 missing_frames=0 schema_findings=1
+schema findings:
+  oneOf: search
+check failed: error
+```
+
 The dropped-frame count travels with the artifacts too, so a capture that
 understates itself says so wherever it is opened: `missing_frames` in the JSON
 export, `log.comment` in HAR, and the `mcpsnoop.session.missing_frames` resource
 attribute in OTLP.
-A name or resource URI that will not fit in an HTTP field value travels Base64 in
-a `=?base64?…?=` sentinel; it is decoded before the comparison, so a client that
-encodes correctly is never flagged.
-The same signal covers a required routing header that is missing entirely. In
-2026-07-28 that is a validation failure, and a compliant server rejects the
-request with `400` and `-32020`. mcpsnoop raises it only once the session is
-known to speak that revision or later: earlier revisions do not define these
-headers at all, so omitting them there is correct.
-A server's own `-32020` rejection counts as the same signal. On HTTP
-`tools/call` requests, mcpsnoop also shows each `Mcp-Param-{Name}` header and,
-when the matching advertised tool definition is known, compares it with the
-annotated argument path. Nested properties, the Base64 sentinel, booleans, and
-numeric-equivalent safe integers are handled without string-comparison false
-positives. Unknown parameter headers and sessions without a matching tool
-definition remain observational only. Existing key- and value-based redaction
-also applies to captured parameter-header values before they reach a sink.
-Use `--format junit` to write one JUnit `<testcase>` per signal and session;
-failures follow the same `--fail-on` selection as the text output.
-Use `--format sarif` to write a SARIF 2.1.0 log instead. Where junit reports one
-aggregate per signal, SARIF reports one result per finding, carrying the session,
-the frame `Seq` and the frame's own warning or drift text, and pointing at the
-line of the log the frame was decoded from. A signal named in `--fail-on` is
-reported at level `error` and one outside it at level `note`, so the report and
-the gate never disagree. Code scanning rejects a file whose run holds more than
-25,000 results and displays only the top 5,000 of what it accepts, so the report
-is capped at 5,000: the findings the gate failed on first, then a
-`mcpsnoop/report-truncated` result saying how many were left out. The text and
-junit formats stay complete.
-
-A result points at the log with a path relative to the working directory, which
-code scanning then resolves against the repository root. The alert renders with
-its surrounding lines only when that path is a file in the analysed commit, so a
-capture the workflow generated into `artifacts/` opens an alert carrying the
-message, the rule and the line number but no source view. Committing a capture
-you want rendered in full is the only way to get one. A log read from the state
-directory or from stdin gets no path at all.
 
 ```bash
 mcpsnoop check build-agent
@@ -455,6 +436,11 @@ other and with `--fail-on`, and any failure exits non-zero.
 mcpsnoop check --expect-tool search --forbid-tool delete --max-duration 2s run.jsonl
 ```
 
+### Report it where CI already looks
+
+`--format junit` writes one `<testcase>` per signal and session, and its failures
+follow the same `--fail-on` selection as the text output.
+
 ```yaml
 - name: Check captured MCP session
   run: |
@@ -468,7 +454,27 @@ mcpsnoop check --expect-tool search --forbid-tool delete --max-duration 2s run.j
     path: test-results/mcpsnoop.xml
 ```
 
-To put the findings in the Security tab instead, hand the SARIF log to
+`--format sarif` writes a SARIF 2.1.0 log instead. Where junit reports one
+aggregate per signal, SARIF reports one result per finding, carrying the session,
+the frame `Seq` and the frame's own warning or drift text, and pointing at the
+line of the log the frame was decoded from. A signal named in `--fail-on` is
+reported at level `error` and one outside it at level `note`, so the report and
+the gate never disagree.
+
+A result points at the log with a path relative to the working directory, which
+code scanning then resolves against the repository root. The alert renders with
+its surrounding lines only when that path is a file in the analysed commit, so a
+capture the workflow generated into `artifacts/` opens an alert carrying the
+message, the rule and the line number but no source view. Committing a capture
+you want rendered in full is the only way to get one. A log read from the state
+directory or from stdin gets no path at all.
+
+Code scanning rejects a file whose run holds more than 25,000 results and
+displays only the top 5,000 of what it accepts, so the report is capped at 5,000:
+the findings the gate failed on first, then a `mcpsnoop/report-truncated` result
+saying how many were left out. The text and junit formats stay complete.
+
+To put the findings in the Security tab, hand the SARIF log to
 `upload-sarif`. The job needs `security-events: write`, or the upload answers
 403. `check` exits non-zero on a finding, so the upload step needs `if: always()`
 to run at all on the runs that have something to report; `continue-on-error`
@@ -496,6 +502,33 @@ steps:
     category: mcpsnoop
 ```
 
+### Catch a routing header that disagrees with the body
+
+On the streamable-HTTP transport a gateway routes on `Mcp-Method` and `Mcp-Name`
+while the server reads the body, so a header that disagrees with the body means
+the two are looking at two different requests. The `mismatch` signal covers that,
+a header riding a batch it cannot address, and a required header missing
+entirely.
+
+In 2026-07-28 a missing routing header is a validation failure, and a compliant
+server rejects the request with `400` and `-32020`. mcpsnoop raises it only once
+the session is known to speak that revision or later, since earlier revisions do
+not define these headers at all and omitting them there is correct. A server's
+own `-32020` rejection counts as the same signal.
+
+A name or resource URI that will not fit in an HTTP field value travels Base64 in
+a `=?base64?…?=` sentinel, which is decoded before the comparison, so a client
+that encodes correctly is never flagged.
+
+On HTTP `tools/call` requests mcpsnoop also shows each `Mcp-Param-{Name}` header
+and, when the matching advertised tool definition is known, compares it with the
+annotated argument path. Nested properties, the Base64 sentinel, booleans and
+numeric-equivalent safe integers are handled without string-comparison false
+positives. Unknown parameter headers and sessions without a matching tool
+definition stay observational. Key- and value-based redaction applies to captured
+parameter-header values before they reach a sink, and a value mcpsnoop scrubbed
+itself is never reported as a disagreement.
+
 ### Detect tool definition drift
 
 The first complete `tools/list` observed for a server label becomes its trusted
@@ -513,6 +546,12 @@ spelling out a hint it was already relying on is not reported. A baseline
 recorded before mcpsnoop tracked a field keeps working for the fields it does
 record and says which ones it cannot answer for; re-record with
 `mcpsnoop baseline --accept` once you trust the current definitions.
+
+Changing what redaction records changes what drift compares. A baseline taken
+without `--redact-value` and then checked against a capture taken with one
+reports the scrubbed fields as changed, which is correct, since the recorded
+definition really did change. Re-record with `--accept` after changing redaction
+settings.
 
 Use a stable, unique `--label` for each server whose command name or target host
 would otherwise collide. Baselines are stored under the normal mcpsnoop state
@@ -743,18 +782,31 @@ your client config.
 Captured frames can include prompts, tool arguments, credentials, and tool
 results. If payloads can carry secrets, opt in to redaction to scrub the
 observed trace copies while the proxied bytes still pass through unchanged.
+
 Key-based redaction replaces whole values under matching JSON object keys, and
 the same key set is applied best effort to the wrapped server's command-line
 arguments, so `--api-key=sk-x` and `--token sk-x` are scrubbed under
 `--redact-secrets`. An argument that carries a secret without a recognizable flag
 name cannot be detected.
+
 Path-based redaction replaces only values selected by a JSONPath expression,
 which is useful when a common key name is sensitive in one location but safe in
 another. Repeat `--redact-path` to scrub more than one location.
+
 Value-based redaction applies regular expressions to observed string values,
-stderr text, and non-JSON text frames. All redaction modes are best effort.
-Regexes can miss secrets, overmatch harmless text, or fail to see transformed
-or encoded values.
+stderr text, and non-JSON text frames.
+
+All three are best effort. Regexes can miss secrets, overmatch harmless text, or
+fail to see transformed or encoded values.
+
+Redaction never turns into an accusation. Every check that compares one observed
+thing with another, a routing header against the body, a `Mcp-Param` value
+against the argument it mirrors, a tool's schema against what the revision
+requires of one, knows when mcpsnoop was the side that rewrote the bytes and
+stays silent rather than reporting a server for the user's own privacy setting.
+Tool-definition drift is the exception, and deliberately so, since turning
+redaction on changes what is recorded and therefore what a baseline holds. See
+[Detect tool definition drift](#detect-tool-definition-drift).
 
 ```bash
 # built-in preset of common secret keys
