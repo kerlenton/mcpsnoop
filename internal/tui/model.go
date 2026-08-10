@@ -2,6 +2,7 @@ package tui
 
 import (
 	"cmp"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -135,8 +136,10 @@ type Model struct {
 	paused bool
 
 	overlay        overlayMode
-	replayReq      store.CallView // last request sent to replay, so r can re-run it from the result
-	replaying      bool           // an async replay is in flight; a footer spinner shows until the result lands
+	replayReq      store.CallView  // last user-supplied request sent to replay, so r can re-run it from the result
+	replayCaptured json.RawMessage // immutable params from the observed request behind the current replay loop
+	replayEdited   bool            // the user-supplied params differ semantically from replayCaptured
+	replaying      bool            // an async replay is in flight; a footer spinner shows until the result lands
 	vp             viewport.Model
 	overlayRaw     string // overlay body before styling (re-rendered on resize)
 	overlayDisplay string // styled body shown in the viewport (highlight, numbers)
@@ -287,6 +290,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setFlash(fmt.Sprintf("loaded newest %d of %d sessions; older traces stay on disk", msg.loaded, msg.total))
 		return m, nil
 
+	case replayEditDoneMsg:
+		if msg.err != nil {
+			m.setFlash("edit replay aborted: " + msg.err.Error())
+			return m, nil
+		}
+		edited := !replayParamsEquivalent(msg.captured, msg.call.Params)
+		return m, m.runReplay(msg.call, msg.captured, edited)
+
 	case replayDoneMsg:
 		if !m.replaying {
 			return m, nil // the replay was abandoned by navigating away
@@ -354,8 +365,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			if cmd := m.startReplay(); cmd != nil {
 				return m, cmd
 			}
+		case m.overlay == overlayInspector && key.Matches(msg, m.keys.EditReplay):
+			if cmd := m.startEditReplay(); cmd != nil {
+				return m, cmd
+			}
 		case m.overlay == overlayReplay && key.Matches(msg, m.keys.Replay):
 			if cmd := m.replayAgain(); cmd != nil {
+				return m, cmd
+			}
+		case m.overlay == overlayReplay && key.Matches(msg, m.keys.EditReplay):
+			if cmd := m.startEditReplay(); cmd != nil {
 				return m, cmd
 			}
 		case key.Matches(msg, m.keys.Copy):
@@ -420,6 +439,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	case key.Matches(msg, m.keys.Replay):
 		if cmd := m.startReplay(); cmd != nil {
+			return m, cmd
+		}
+	case key.Matches(msg, m.keys.EditReplay):
+		if cmd := m.startEditReplay(); cmd != nil {
 			return m, cmd
 		}
 
@@ -744,8 +767,8 @@ func (m Model) focusedFrame() (store.EventView, bool) {
 }
 
 // canReplay reports whether the focused frame is a request this session can
-// actually replay (its server command was captured), so r is only offered, and
-// acted on, when it will work.
+// actually replay (its server command was captured), so the replay keys are
+// only offered, and acted on, when they will work.
 func (m Model) canReplay() bool {
 	ev, ok := m.focusedFrame()
 	if !ok || ev.Call == nil || ev.Kind != store.EventRequest {
@@ -755,9 +778,9 @@ func (m Model) canReplay() bool {
 }
 
 // sessionReplayable reports whether the streamed session recorded the server
-// command a replay needs. It gates r at the session level, stable with no
-// per-frame flicker, so replay is never offered for a session that can never run
-// it (for example a log opened without its meta frame).
+// command a replay needs. It gates r/R at the session level, stable with no
+// per-frame flicker, so replay is never offered for a session that can never
+// run it (for example a log opened without its meta frame).
 func (m Model) sessionReplayable() bool {
 	_, _, ok := m.store.Command(m.streamSessionID)
 	return ok
@@ -772,7 +795,7 @@ func (m *Model) startReplay() tea.Cmd {
 		m.setFlash("replay needs a request frame")
 		return nil
 	}
-	return m.runReplay(*ev.Call)
+	return m.runReplay(*ev.Call, ev.Call.Params, false)
 }
 
 // replayAgain re-runs the last replayed request, so r works straight from the
@@ -781,10 +804,45 @@ func (m *Model) replayAgain() tea.Cmd {
 	if m.replayReq.Method == "" {
 		return nil
 	}
-	return m.runReplay(m.replayReq)
+	return m.runReplay(m.replayReq, m.replayCaptured, m.replayEdited)
 }
 
-func (m *Model) runReplay(call store.CallView) tea.Cmd {
+// startEditReplay opens the focused request, or the current replay candidate,
+// in the user's editor. The callback validates the file before runReplay ever
+// reaches the existing recorded-command confirmation gate.
+func (m *Model) startEditReplay() tea.Cmd {
+	if m.replaying {
+		return nil
+	}
+
+	var call store.CallView
+	var captured json.RawMessage
+	if m.overlay == overlayReplay && m.replayReq.Method != "" {
+		call = m.replayReq
+		captured = m.replayCaptured
+	} else {
+		ev, ok := m.focusedFrame()
+		if !ok || ev.Call == nil || ev.Kind != store.EventRequest {
+			m.setFlash("edit replay needs a request frame")
+			return nil
+		}
+		call = *ev.Call
+		captured = ev.Call.Params
+	}
+
+	if !m.sessionReplayable() {
+		m.setFlash("no recorded server command to replay")
+		return nil
+	}
+	cmd, err := editReplayCmd(call, captured)
+	if err != nil {
+		m.setFlash("edit replay aborted: " + err.Error())
+		return nil
+	}
+	return cmd
+}
+
+func (m *Model) runReplay(call store.CallView, captured json.RawMessage, edited bool) tea.Cmd {
 	if m.replaying {
 		return nil // a replay is already in flight; ignore until it lands or is abandoned
 	}
@@ -800,6 +858,9 @@ func (m *Model) runReplay(call store.CallView) tea.Cmd {
 	start := func(m *Model) tea.Cmd {
 		m.replayConfirmed = m.streamSessionID
 		m.replayReq = call
+		m.replayReq.Params = append(json.RawMessage(nil), call.Params...)
+		m.replayCaptured = append(json.RawMessage(nil), captured...)
+		m.replayEdited = edited
 		m.replaying = true
 		return replayCmd(command, cwd, call.Method, call.Params)
 	}

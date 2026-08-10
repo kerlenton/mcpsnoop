@@ -184,7 +184,7 @@ func (m Model) footerHints() string {
 	if m.view == viewStream {
 		hs = []hint{{"enter", "inspect"}}
 		if m.sessionReplayable() {
-			hs = append(hs, hint{"r", "replay"})
+			hs = append(hs, hint{"r", "replay"}, hint{"R", "edit + replay"})
 		}
 		hs = append(hs, hint{"c", "caps"}, hint{"s", "summary"}, hint{"/", "filter"}, hint{"p", "pause"}, hint{"?", "help"})
 	}
@@ -989,6 +989,7 @@ func (m Model) renderHelp() string {
 	}}
 	frameActions := helpGroup{"FRAME ACTIONS", [][2]string{
 		{"r", "replay the selected tool call"},
+		{"R", "edit params and replay the selected call"},
 		{"c", "show negotiated capabilities"},
 		{"s", "show per-tool latency and error summary"},
 		{"p", "pause or resume the stream"},
@@ -1343,14 +1344,14 @@ func (m Model) overlayFooter(w int) string {
 		hs = append(hs, hint{"/", "search"}, hint{"n/N", "match"}, hint{"y", "copy"})
 		// r and x are only offered when they can act on the inspected frame.
 		if m.canReplay() {
-			hs = append(hs, hint{"r", "replay"})
+			hs = append(hs, hint{"r", "replay"}, hint{"R", "edit + replay"})
 		}
 		if _, ok := m.pairIndex(m.inspect); ok {
 			hs = append(hs, hint{"x", "pair"})
 		}
 		hs = append(hs, hint{"esc", "close"})
 	case m.overlay == overlayReplay && m.replayReq.Method != "":
-		hs = append(hs, hint{"r", "replay again"}, hint{"y", "copy"}, hint{"esc", "close"})
+		hs = append(hs, hint{"r", "replay again"}, hint{"R", "edit + replay"}, hint{"y", "copy"}, hint{"esc", "close"})
 	default:
 		hs = append(hs, hint{"y", "copy"}, hint{"esc", "close"})
 	}

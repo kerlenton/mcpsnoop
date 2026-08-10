@@ -58,7 +58,7 @@ well. When you're done, `mcpsnoop unwrap everything` puts it back.
    > run its long-running operation.
 
 4. Drill into a frame with `enter`, filter with `/`, inspect capabilities with
-   `c`, and replay a call with `r`.
+   `c`, replay a call with `r`, or edit its params and replay with `R`.
 
 Frames stream in as the client works. The quick calls come back OK, and the long
 one sends progress notifications and shows a visibly higher latency.

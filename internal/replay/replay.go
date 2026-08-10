@@ -25,6 +25,7 @@ type Result struct {
 	Response  json.RawMessage // raw response frame
 	RPCResult json.RawMessage
 	Err       *proxy.RPCError
+	ToolErr   bool // tools/call result.isError == true
 	Duration  time.Duration
 }
 
@@ -133,8 +134,16 @@ func Replay(ctx context.Context, command []string, cwd, method string, params js
 		Response:  resp,
 		RPCResult: msg.Result,
 		Err:       msg.Error,
+		ToolErr:   method == "tools/call" && isToolError(msg.Result),
 		Duration:  dur,
 	}, nil
+}
+
+func isToolError(result json.RawMessage) bool {
+	var r struct {
+		IsError bool `json:"isError"`
+	}
+	return json.Unmarshal(result, &r) == nil && r.IsError
 }
 
 // withClientMeta adds the self-describing _meta a stateless server expects,

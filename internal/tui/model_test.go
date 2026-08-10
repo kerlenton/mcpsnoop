@@ -933,6 +933,31 @@ func TestReplayFromInspector(t *testing.T) {
 	}
 }
 
+func TestEditReplayFromInspector(t *testing.T) {
+	st := store.New()
+	st.Ingest(metaEnv("s1", []string{"true"}))
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspector on the response
+	m = typeRunes(t, m, "x")                        // paired request
+
+	// Keep any editor fixture in the test's private directory even though this
+	// fail-before test only needs to prove that R launches an editor command.
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Setenv("VISUAL", "")
+	t.Setenv("EDITOR", "true")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	got := next.(Model)
+	if cmd == nil {
+		t.Fatal("R on a replayable request should launch the edit-and-replay editor")
+	}
+	if got.replaying {
+		t.Fatal("editing must finish and validate before a replay can start")
+	}
+}
+
 func TestInspectorFooterConditionalKeys(t *testing.T) {
 	st := store.New()
 	meta, _ := json.Marshal(proxy.SessionMeta{Command: []string{"true"}, CWD: "/tmp"})
@@ -1002,6 +1027,142 @@ func TestReplayAgainFromResult(t *testing.T) {
 	m = typeRunes(t, m, "r")
 	if !m.replaying || m.replayReq.Method != before {
 		t.Fatalf("r in the replay overlay should re-run the same replay, replaying=%v method=%q", m.replaying, m.replayReq.Method)
+	}
+}
+
+func TestEditedReplayKeepsConfirmationAndThreeParamLayers(t *testing.T) {
+	st := store.New()
+	st.Ingest(metaEnv("s1", []string{"safe-server", "--stdio"}))
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream
+
+	var captured store.CallView
+	for _, ev := range m.full {
+		if ev.Kind == store.EventRequest && ev.Call != nil && ev.Call.Method == "tools/call" {
+			captured = *ev.Call
+			break
+		}
+	}
+	if captured.Method == "" {
+		t.Fatal("test request not found")
+	}
+	edited := captured
+	edited.Params = json.RawMessage(`{"x":"edited"}`)
+	beforeTimeline := len(st.Timeline("s1"))
+
+	next, cmd := m.Update(replayEditDoneMsg{call: edited, captured: captured.Params})
+	m = next.(Model)
+	if cmd != nil || m.confirm == "" {
+		t.Fatal("a valid edit must enter the existing command confirmation before replay")
+	}
+	if m.replaying || m.replayReq.Method != "" {
+		t.Fatal("editor completion must not mutate replay state before confirmation")
+	}
+
+	m = typeRunes(t, m, "y")
+	if !m.replaying {
+		t.Fatal("confirmed edited replay did not start")
+	}
+	if !m.replayEdited || string(m.replayCaptured) != string(captured.Params) || string(m.replayReq.Params) != string(edited.Params) {
+		t.Fatalf("replay param layers were not retained: captured=%s candidate=%s edited=%v", m.replayCaptured, m.replayReq.Params, m.replayEdited)
+	}
+	if got := len(st.Timeline("s1")); got != beforeTimeline {
+		t.Fatalf("starting an edited replay changed the observed store: got %d want %d", got, beforeTimeline)
+	}
+
+	actual := json.RawMessage(`{"x":"edited","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}`)
+	m = drive(t, m, replayDoneMsg{res: replay.Result{
+		Method:   "echo",
+		Params:   actual,
+		Response: json.RawMessage(`{"jsonrpc":"2.0","id":2,"result":{"isError":true}}`),
+		ToolErr:  true,
+	}})
+	out := ansi.Strip(m.overlayRaw)
+	for _, want := range []string{"REPLAY · EDITED · echo", "ERROR tool reported an error", "captured params", "params sent", "2026-07-28"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("edited replay overlay missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "ok  (") {
+		t.Fatalf("a tool-level error must not render as ok:\n%s", out)
+	}
+	if got := len(st.Timeline("s1")); got != beforeTimeline {
+		t.Fatalf("an edited replay result entered the observed store: got %d want %d", got, beforeTimeline)
+	}
+
+	// Lowercase r repeats the candidate, not the captured bytes or the system
+	// metadata added to the prior wire request.
+	m = typeRunes(t, m, "r")
+	if !m.replaying || string(m.replayReq.Params) != string(edited.Params) {
+		t.Fatalf("r did not repeat the edited candidate: %s", m.replayReq.Params)
+	}
+}
+
+func TestReplayEditFailureLeavesCurrentLoopUntouched(t *testing.T) {
+	m := New(store.New())
+	m.replayReq = store.CallView{Method: "tools/call", Params: json.RawMessage(`{"old":true}`)}
+	m.replayCaptured = json.RawMessage(`{"captured":true}`)
+	m.replayEdited = true
+
+	next, cmd := m.Update(replayEditDoneMsg{err: os.ErrInvalid})
+	got := next.(Model)
+	if cmd != nil || got.replaying {
+		t.Fatal("an invalid edit must not start a replay")
+	}
+	if got.replayReq.Method != m.replayReq.Method || string(got.replayReq.Params) != string(m.replayReq.Params) || string(got.replayCaptured) != string(m.replayCaptured) || got.replayEdited != m.replayEdited {
+		t.Fatal("an invalid edit partially changed the current replay loop")
+	}
+	if !strings.Contains(got.flash, "edit replay aborted") {
+		t.Fatalf("invalid edit flash = %q", got.flash)
+	}
+}
+
+func TestReplayContentSeparatesProtocolMetadataFromUserEdits(t *testing.T) {
+	m := New(store.New())
+	m.replayCaptured = json.RawMessage(`{"name":"echo"}`)
+	m.replayEdited = false
+	out := ansi.Strip(m.replayContent(replayDoneMsg{res: replay.Result{
+		Method:   "tools/call",
+		Params:   json.RawMessage(`{"name":"echo","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}`),
+		Response: json.RawMessage(`{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`),
+	}}))
+	if strings.Contains(out, "EDITED") || strings.Contains(out, "captured params") {
+		t.Fatalf("protocol-required metadata must not masquerade as a user edit:\n%s", out)
+	}
+	for _, want := range []string{"REPLAY · tools/call", "request params", "2026-07-28"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("actual stateless wire params missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestEditReplayKeyFromStreamAndReplayOverlay(t *testing.T) {
+	st := store.New()
+	st.Ingest(metaEnv("s1", []string{"true"}))
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Setenv("VISUAL", "")
+	t.Setenv("EDITOR", "true")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("R in the stream should launch the editor for the selected request")
+	}
+
+	m.overlay = overlayReplay
+	m.replayReq = store.CallView{Method: "tools/call", Params: json.RawMessage(`{"name":"echo","arguments":{"text":"edited"}}`)}
+	m.replayCaptured = json.RawMessage(`{"name":"echo","arguments":{"text":"captured"}}`)
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("R in the replay overlay should reopen the editor on the current candidate")
+	}
+	if string(m.replayReq.Params) != `{"name":"echo","arguments":{"text":"edited"}}` {
+		t.Fatal("opening the editor must not mutate the current candidate")
 	}
 }
 
@@ -1522,6 +1683,13 @@ func TestSortSessions(t *testing.T) {
 	m = typeRunes(t, m, "N")
 	if m.sessions[0].Label != "gamma" {
 		t.Fatalf("shift+N twice should be desc, got %s first", m.sessions[0].Label)
+	}
+	// R remains the request-count sort in the sessions view; edit-and-replay is
+	// only reachable after drilling into a request frame.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	m = next.(Model)
+	if cmd != nil || m.sessionSort.col != "req" {
+		t.Fatalf("R in sessions should sort requests, cmd=%v sort=%q", cmd != nil, m.sessionSort.col)
 	}
 }
 
