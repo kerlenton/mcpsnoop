@@ -139,6 +139,10 @@ func Replay(ctx context.Context, command []string, cwd, method string, params js
 	}, nil
 }
 
+// isToolError mirrors the store's own definition of a tool-level error, kept
+// here because the two packages are peers and neither imports the other. Change
+// one and check the other, or a replayed call and the captured call it came from
+// will disagree about the same bytes.
 func isToolError(result json.RawMessage) bool {
 	var r struct {
 		IsError bool `json:"isError"`

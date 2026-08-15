@@ -140,6 +140,11 @@ type Model struct {
 	replayCaptured json.RawMessage // immutable params from the observed request behind the current replay loop
 	replayEdited   bool            // the user-supplied params differ semantically from replayCaptured
 	replaying      bool            // an async replay is in flight; a footer spinner shows until the result lands
+	// replayToken numbers each run. replaying alone only says that some replay is
+	// in flight, so an abandoned run's result was rendered against whatever had
+	// started since, putting one request's captured params over another's answer
+	// and dropping the answer the user was waiting for.
+	replayToken    uint64
 	vp             viewport.Model
 	overlayRaw     string // overlay body before styling (re-rendered on resize)
 	overlayDisplay string // styled body shown in the viewport (highlight, numbers)
@@ -299,8 +304,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.runReplay(msg.call, msg.captured, edited)
 
 	case replayDoneMsg:
-		if !m.replaying {
-			return m, nil // the replay was abandoned by navigating away
+		if !m.replaying || msg.token != m.replayToken {
+			return m, nil // abandoned by navigating away, or belongs to an earlier run
 		}
 		m.replaying = false
 		m.openOverlay(overlayReplay, m.replayContent(msg))
@@ -862,12 +867,20 @@ func (m *Model) runReplay(call store.CallView, captured json.RawMessage, edited 
 		m.replayCaptured = append(json.RawMessage(nil), captured...)
 		m.replayEdited = edited
 		m.replaying = true
-		return replayCmd(command, cwd, call.Method, call.Params)
+		m.replayToken++
+		return replayCmd(m.replayToken, command, cwd, call.Method, call.Params)
 	}
 	if m.replayConfirmed == m.streamSessionID {
 		return start(m)
 	}
-	m.ask("replay runs: "+strings.Join(command, " ")+"  y/n", start)
+	// The prompt names the edit, so answering n is unambiguously declining to send
+	// the params the user just wrote rather than declining some replay they have
+	// lost track of. The candidate is dropped either way.
+	what := "replay runs: "
+	if edited {
+		what = "replay your edited params through: "
+	}
+	m.ask(what+strings.Join(command, " ")+"  y/n", start)
 	return nil
 }
 

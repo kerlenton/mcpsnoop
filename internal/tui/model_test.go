@@ -1011,7 +1011,7 @@ func TestReplayAgainFromResult(t *testing.T) {
 	}
 
 	// The result lands and opens the replay overlay.
-	m = drive(t, m, replayDoneMsg{res: replay.Result{Method: "get_sum", Response: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{}}`)}})
+	m = drive(t, m, replayDoneMsg{token: m.replayToken, res: replay.Result{Method: "get_sum", Response: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{}}`)}})
 	if m.overlay != overlayReplay || m.replaying {
 		t.Fatalf("the result should open the replay overlay, overlay=%d replaying=%v", m.overlay, m.replaying)
 	}
@@ -1072,7 +1072,7 @@ func TestEditedReplayKeepsConfirmationAndThreeParamLayers(t *testing.T) {
 	}
 
 	actual := json.RawMessage(`{"x":"edited","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}`)
-	m = drive(t, m, replayDoneMsg{res: replay.Result{
+	m = drive(t, m, replayDoneMsg{token: m.replayToken, res: replay.Result{
 		Method:   "echo",
 		Params:   actual,
 		Response: json.RawMessage(`{"jsonrpc":"2.0","id":2,"result":{"isError":true}}`),
@@ -1187,7 +1187,7 @@ func TestReplayAbandonedOnNavigation(t *testing.T) {
 	if m.replaying {
 		t.Fatal("closing the overlay should abandon the in-flight replay")
 	}
-	m = drive(t, m, replayDoneMsg{res: replay.Result{Method: "x", Response: json.RawMessage("{}")}})
+	m = drive(t, m, replayDoneMsg{token: m.replayToken, res: replay.Result{Method: "x", Response: json.RawMessage("{}")}})
 	if m.overlay == overlayReplay {
 		t.Fatal("an abandoned replay result should not open an overlay")
 	}
@@ -2077,5 +2077,56 @@ func TestCancelAndLateRowsAreSelectableByWhatTheySay(t *testing.T) {
 				t.Fatal("the cancellation frame is missing from the timeline")
 			}
 		})
+	}
+}
+
+// TestAnAbandonedReplayResultIsNotAdoptedByTheNextOne. replaying is a bare bool,
+// so it only said that some replay was in flight. Walking away from one replay
+// clears it, the spawned server keeps running, and when that first result finally
+// landed it was rendered against whatever run had started since: one request's
+// captured params over another request's answer, with the second run's own result
+// then dropped because the same line clears the flag.
+func TestAnAbandonedReplayResultIsNotAdoptedByTheNextOne(t *testing.T) {
+	st := store.New()
+	meta, _ := json.Marshal(proxy.SessionMeta{Command: []string{"true"}, CWD: "/tmp"})
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 0, TS: time.Now(), Direction: proxy.DirectionMeta, Raw: meta})
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = typeRunes(t, m, "x")
+
+	// First replay, then walk away from it the way opening any overlay does.
+	m = typeRunes(t, m, "r")
+	m = typeRunes(t, m, "y")
+	first := m.replayToken
+	if !m.replaying {
+		t.Fatal("the first replay did not start")
+	}
+	m.dismissTransient()
+
+	// Second replay, of the same session, which is what the user is now watching.
+	m = typeRunes(t, m, "r")
+	second := m.replayToken
+	if first == second {
+		t.Fatal("the two runs share a token, so nothing can tell them apart")
+	}
+
+	// The abandoned run answers late.
+	m = drive(t, m, replayDoneMsg{token: first, res: replay.Result{Method: "stale", Response: json.RawMessage(`{"stale":true}`)}})
+	if m.overlay == overlayReplay {
+		t.Fatal("a result from an abandoned replay was rendered over the current one")
+	}
+	if !m.replaying {
+		t.Fatal("the abandoned result cleared the flag the live run needs")
+	}
+
+	// The run the user is actually waiting for still lands.
+	m = drive(t, m, replayDoneMsg{token: second, res: replay.Result{Method: "live", Response: json.RawMessage(`{"live":true}`)}})
+	if m.overlay != overlayReplay {
+		t.Fatal("the live result never reached the screen")
+	}
+	if !strings.Contains(ansi.Strip(m.overlayRaw), "live") {
+		t.Fatalf("the overlay shows the wrong run:\n%s", ansi.Strip(m.overlayRaw))
 	}
 }
