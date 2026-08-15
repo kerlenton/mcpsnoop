@@ -53,6 +53,8 @@ func handle(line []byte) {
 		if req.Params.Name == "echo" {
 			time.Sleep(120 * time.Millisecond)
 			out["result"] = map[string]any{"content": []map[string]string{{"type": "text", "text": "echo: " + req.Params.Arguments.Text}}}
+		} else if req.Params.Name == "tool-error" {
+			out["result"] = map[string]any{"content": []map[string]string{{"type": "text", "text": "bad argument"}}, "isError": true}
 		} else {
 			out["error"] = map[string]any{"code": -32601, "message": "unknown tool: " + req.Params.Name}
 		}
@@ -190,6 +192,20 @@ func TestReplayToolError(t *testing.T) {
 	}
 }
 
+func TestReplayToolResultError(t *testing.T) {
+	res, err := Replay(context.Background(), []string{demoBin}, "",
+		"tools/call", json.RawMessage(`{"name":"tool-error"}`), 10*time.Second)
+	if err != nil {
+		t.Fatalf("Replay transport error: %v", err)
+	}
+	if res.Err != nil {
+		t.Fatalf("tool-level error must not become a JSON-RPC error: %+v", res.Err)
+	}
+	if !res.ToolErr {
+		t.Fatalf("result.isError was not classified: %s", res.RPCResult)
+	}
+}
+
 func TestReplayEmptyCommand(t *testing.T) {
 	if _, err := Replay(context.Background(), nil, "", "tools/list", nil, time.Second); err == nil {
 		t.Fatal("expected error for empty command")
@@ -222,7 +238,7 @@ func TestReadResponseRejectsMalformedResponse(t *testing.T) {
 // the initialize error and carry on rather than giving up or hanging.
 func TestReplayAgainstStatelessServer(t *testing.T) {
 	res, err := Replay(context.Background(), []string{statelessBin}, "",
-		"tools/call", json.RawMessage(`{"name":"echo","arguments":{"text":"hi"}}`), 10*time.Second)
+		"tools/call", json.RawMessage(`{"name":"echo","arguments":{"text":"hi"},"_meta":{"progressToken":"p-7"}}`), 10*time.Second)
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
@@ -233,6 +249,12 @@ func TestReplayAgainstStatelessServer(t *testing.T) {
 	// proves the request described itself.
 	if !strings.Contains(string(res.RPCResult), "stateless echo "+statelessProtocolVersion) {
 		t.Fatalf("result missing the self-describing metadata: %s", res.RPCResult)
+	}
+	if !strings.Contains(string(res.Params), statelessProtocolVersion) {
+		t.Fatalf("Result.Params must be the actual wire params with injected metadata: %s", res.Params)
+	}
+	if !strings.Contains(string(res.Params), `"progressToken":"p-7"`) {
+		t.Fatalf("injected metadata must preserve captured _meta values: %s", res.Params)
 	}
 }
 

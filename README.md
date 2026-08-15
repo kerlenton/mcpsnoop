@@ -219,7 +219,7 @@ server is written in.
 |---|---|---|---|---|
 | `enter` | inspect / drill in | | `/` | filter |
 | `esc` | back | | `:` | command |
-| `j` / `k` | move | | `r` | replay a call |
+| `j` / `k` | move | | `r` / `R` | replay / edit and replay |
 | `g` / `G` | top / bottom | | `c` | capabilities |
 | `ctrl-f` / `ctrl-b` | page | | `s` | tool summary |
 | `p` | pause | | `y` | copy |
