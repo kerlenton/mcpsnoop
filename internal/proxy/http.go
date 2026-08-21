@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -101,13 +100,22 @@ const wwwAuthenticateHeader = "WWW-Authenticate"
 
 // newHTTPEmitter returns an emit function bound to a session and sink.
 func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
-	var seq atomic.Uint64
+	// The lock is held across the emit, not just the increment, the same way
+	// RunStdio holds one. An atomic counter makes every Seq distinct but says
+	// nothing about the order they reach the sink in, and two concurrent requests
+	// arriving as 6 then 5 make the store's gap detector infer a dropped frame:
+	// it advances lastSeq to 6, counts five missing, and then ignores 5 entirely
+	// because it is no longer greater. A capture that lost nothing then fails
+	// check --fail-on incomplete.
+	var (
+		seqMu sync.Mutex
+		seq   uint64
+	)
 	return func(dir Direction, body []byte, r route) {
 		raw, text := splitObserved(body)
 		env := Envelope{
 			SessionID:          cfg.SessionID,
 			ServerLabel:        cfg.Label,
-			Seq:                seq.Add(1),
 			TS:                 time.Now(),
 			Direction:          dir,
 			Transport:          TransportHTTP,
@@ -126,6 +134,10 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 		if raw != nil {
 			env.Raw = append([]byte(nil), raw...)
 		}
+		seqMu.Lock()
+		defer seqMu.Unlock()
+		seq++
+		env.Seq = seq
 		sink.Emit(env)
 	}
 }
@@ -247,6 +259,16 @@ func appendForwardedFor(r *httputil.ProxyRequest) {
 	r.Out.Header.Set("X-Forwarded-For", hop)
 }
 
+// joinChallenges keeps every WWW-Authenticate line a response carried. Get
+// returns only the first, so a server offering Bearer alongside DPoP lost half
+// of what it said, on the one response header this proxy keeps verbatim because
+// a 401 without it is a dead end. RFC 9110 makes several field lines equivalent
+// to one comma-joined line, so a reader parses the join exactly as it would have
+// parsed the lines.
+func joinChallenges(values []string) string {
+	return strings.Join(values, ", ")
+}
+
 // httpProxyHandler builds the reverse-proxy handler that taps request and
 // response bodies. Exposed (unexported) for testing with httptest.
 func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http.Handler {
@@ -283,7 +305,7 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			// response, so the transport layer is visible even when the body is not.
 			rt := route{
 				status:    resp.StatusCode,
-				challenge: resp.Header.Get(wwwAuthenticateHeader),
+				challenge: joinChallenges(resp.Header.Values(wwwAuthenticateHeader)),
 				// Read a few lines below to pick the SSE branch, and until now
 				// discarded afterwards, so nothing could check the rule it decides.
 				headers: &TransportHeaders{ContentType: resp.Header.Get("Content-Type")},

@@ -551,7 +551,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			sess.closeProgressToken(c.progressToken)
 		}
 		if state, ok := parseInputRequired(msg.Result); ok {
-			for _, note := range inputRequiredWarnings(state, c) {
+			for _, note := range inputRequiredWarnings(state, c, e.Redacted) {
 				ev.warning = appendWarning(ev.warning, note)
 			}
 			for _, note := range undeclaredInputRequestWarnings(state, c) {
