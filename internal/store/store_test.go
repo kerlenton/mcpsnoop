@@ -2729,3 +2729,108 @@ func TestBothBoundsHoldTogether(t *testing.T) {
 		t.Fatalf("summary = %+v, want all 300 calls", sum.Tools)
 	}
 }
+
+// storeBudgetHolds checks the accounting against the frames that are actually
+// there. The two counters are store-wide while the work that changes them is
+// per session, so every path that moves a frame has to settle both, and the way
+// this goes wrong is silent: the store believes it is fuller than it is and
+// starts releasing bodies it did not need to.
+func storeBudgetHolds(t *testing.T, s *Store, where string) {
+	t.Helper()
+	bytes, frames := 0, 0
+	for _, sess := range s.sessions {
+		sessBytes := 0
+		for _, ev := range sess.events {
+			sessBytes += bodyWeight(ev)
+		}
+		if sess.bodyBytes != sessBytes {
+			t.Fatalf("%s: session %s accounts %d bytes, its frames weigh %d", where, sess.id, sess.bodyBytes, sessBytes)
+		}
+		bytes += sessBytes
+		frames += len(sess.events)
+	}
+	if s.payloadBytes != bytes {
+		t.Fatalf("%s: store accounts %d bytes, the frames weigh %d, %d phantom", where, s.payloadBytes, bytes, s.payloadBytes-bytes)
+	}
+	if s.frames != frames {
+		t.Fatalf("%s: store counts %d frames, holds %d", where, s.frames, frames)
+	}
+}
+
+// TestBoundedStoreGivesTheBudgetBack. Both counters are store-wide, so any path
+// that removes a frame without settling them leaves budget nothing can ever
+// release. The two that did were deleting a session, which the TUI does on
+// ctrl+d, and the frame cap dropping a frame the byte budget had not reached
+// yet. Neither had a test: the existing ones either delete from an unbounded
+// store or set a byte budget so tight that the release always runs first.
+func TestBoundedStoreGivesTheBudgetBack(t *testing.T) {
+	// A roomy byte budget with a frame cap that bites, which is the shape the
+	// live TUI actually runs (64 MiB against 200,000 frames) and the shape no
+	// other test covers.
+	s := NewBounded(1<<30, 12)
+	t0 := time.Now()
+	frame := func(session string, seq uint64, size int) proxy.Envelope {
+		return proxy.Envelope{
+			SessionID: session, ServerLabel: "srv", Seq: seq,
+			TS:        t0.Add(time.Duration(seq) * time.Millisecond),
+			Direction: proxy.ClientToServer,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/progress","params":{"t":"` +
+				strings.Repeat("x", size) + `"}}`),
+		}
+	}
+
+	for i := range 40 {
+		s.Ingest(frame("a", uint64(i+1), 200))
+		storeBudgetHolds(t, s, "ingest into one session")
+	}
+	// The cap is doing the work here, not the byte budget, or the case this test
+	// exists for is not the case being run.
+	if got := len(s.Timeline("a")); got != 12 {
+		t.Fatalf("timeline holds %d frames, want the cap of 12", got)
+	}
+	if s.payloadBytes == 0 {
+		t.Fatal("every body was released, so the byte budget bit and the frame cap did not")
+	}
+
+	// A second session, so the cap starts moving frames between sessions.
+	for i := range 20 {
+		s.Ingest(frame("b", uint64(i+41), 300))
+		storeBudgetHolds(t, s, "ingest into a second session")
+	}
+
+	// Deleting a session has to hand back what it was holding.
+	s.Delete("a")
+	storeBudgetHolds(t, s, "after deleting a session")
+	s.Delete("b")
+	storeBudgetHolds(t, s, "after deleting the last session")
+	if s.payloadBytes != 0 || s.frames != 0 {
+		t.Fatalf("an empty store still accounts %d bytes and %d frames", s.payloadBytes, s.frames)
+	}
+
+	// And the store still works afterwards. This is the symptom that made it
+	// worth finding: with the budget still spent on a deleted session, every
+	// frame ingested next was released the moment it arrived and the inspector
+	// showed no payload at all for the rest of the process.
+	for i := range 5 {
+		s.Ingest(frame("c", uint64(i+100), 200))
+	}
+	storeBudgetHolds(t, s, "after reusing the store")
+	for _, ev := range s.Timeline("c") {
+		if ev.BodyReleased {
+			t.Fatal("a fresh frame was released immediately, so the budget never came back")
+		}
+	}
+}
+
+// TestDeleteOnAnUnboundedStoreTouchesNoBudget. check, export, diff and open all
+// build an unbounded store, and giving back budget it never took would make the
+// counters negative.
+func TestDeleteOnAnUnboundedStoreTouchesNoBudget(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/list", `{}`))
+	s.Delete("s1")
+	if s.payloadBytes != 0 || s.frames != 0 {
+		t.Fatalf("an unbounded store moved its budget counters to %d/%d", s.payloadBytes, s.frames)
+	}
+}
