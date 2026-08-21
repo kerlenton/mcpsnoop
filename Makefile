@@ -2,6 +2,12 @@ GO ?= go
 BIN := mcpsnoop
 PKG := ./...
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Pinned so `make check` and CI run the same analyser. They did not: the Makefile
+# reused whatever staticcheck was already on PATH while CI installed @latest, so
+# a deprecation a newer release had learned about passed locally and failed in
+# CI. Bump this deliberately rather than discovering it on an unrelated pull
+# request.
+STATICCHECK_VERSION ?= v0.8.0
 
 .PHONY: all build test vet staticcheck fmt fmt-check lint check clean
 
@@ -17,9 +23,10 @@ vet:
 	$(GO) vet $(PKG)
 
 # staticcheck catches non-idiomatic code (e.g. interface{} over any, dead code).
+# Run through `go run` at the pinned version rather than whatever binary is on
+# PATH, so the result does not depend on when a contributor last installed it.
 staticcheck:
-	@command -v staticcheck >/dev/null 2>&1 || $(GO) install honnef.co/go/tools/cmd/staticcheck@latest
-	staticcheck $(PKG)
+	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) $(PKG)
 
 fmt:
 	gofmt -s -w .

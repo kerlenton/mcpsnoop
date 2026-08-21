@@ -687,3 +687,84 @@ func TestHTTPDoesNotInventAFailureOnClientCancellation(t *testing.T) {
 		t.Fatalf("a client hanging up is not a target failure, got status %d", env.Status)
 	}
 }
+
+// TestProxyForwardsTheRequestUnchanged pins what the target actually receives.
+// mcpsnoop sits in the real data path and CONTRIBUTING calls that transparency
+// invariant, so this exists to make any change to the forwarding path, including
+// a mechanical one like migrating off a deprecated hook, prove it altered
+// nothing. Only Accept-Encoding is deliberately rewritten, because an observer
+// cannot read a compressed body.
+func TestProxyForwardsTheRequestUnchanged(t *testing.T) {
+	var got *http.Request
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Clone(r.Context())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	defer target.Close()
+	u, err := url.Parse(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var conns []string
+	front := httptest.NewServer(httpProxyHandler(u, func(_ Direction, _ []byte, rt route) {
+		if rt.conn != "" {
+			conns = append(conns, rt.conn)
+		}
+	}))
+	defer front.Close()
+
+	req, err := http.NewRequest(http.MethodPost, front.URL+"/mcp?a=1&raw=%zz&b=2",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Method", "ping")
+	req.Header.Set("Origin", "http://localhost:1234")
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if got == nil {
+		t.Fatal("the target was never reached")
+	}
+	if got.Host != u.Host {
+		t.Fatalf("Host = %q, want the target's %q", got.Host, u.Host)
+	}
+	// The routing headers and everything else the client wrote arrive verbatim.
+	for header, want := range map[string]string{
+		"Accept":          "application/json, text/event-stream",
+		"Mcp-Method":      "ping",
+		"Origin":          "http://localhost:1234",
+		"Accept-Encoding": "identity",
+	} {
+		if got := got.Header.Get(header); got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+	// This hop is appended to whatever chain the client sent rather than replacing
+	// it, and no X-Forwarded-Host or X-Forwarded-Proto is invented.
+	if xff := got.Header.Get("X-Forwarded-For"); !strings.HasPrefix(xff, "203.0.113.9, ") {
+		t.Errorf("X-Forwarded-For = %q, want the client's chain with this hop appended", xff)
+	}
+	for _, invented := range []string{"X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"} {
+		if v := got.Header.Get(invented); v != "" {
+			t.Errorf("%s = %q, a header the target never used to see", invented, v)
+		}
+	}
+	// A query the net/url parser rejects still reaches the target, since dropping
+	// part of a request is exactly what a transparent proxy must not do.
+	if got.URL.RawQuery != "a=1&raw=%zz&b=2" {
+		t.Errorf("RawQuery = %q, want it forwarded byte for byte", got.URL.RawQuery)
+	}
+	// The observed frames carry the client's address, which is what keeps two
+	// clients that both start at JSON-RPC id 1 in separate id spaces.
+	if len(conns) == 0 || conns[0] == "" {
+		t.Fatalf("no frame carried a connection identity: %v", conns)
+	}
+}
