@@ -164,7 +164,14 @@ type SessionHeader struct {
 	// observed and are still in the log on disk, so the capture is complete and
 	// only this view of it is not.
 	DroppedFromMemory int
-	LateResults       int
+	// RetiredExchanges counts multi round-trip operations dropped at the parking
+	// cap while still open. MRTR tells servers not to assume a client will ever
+	// retry, so abandoned exchanges accumulate with no frame to settle them, and
+	// the cap is what stops the list growing for the life of the session. A
+	// non-zero count means a retry arriving for one of those would no longer link,
+	// so the operation would read as two calls with two durations.
+	RetiredExchanges int
+	LateResults      int
 }
 
 // ToolDefinition is the contract a server advertised for one MCP tool.
@@ -497,6 +504,7 @@ func (s *Store) Sessions() []SessionHeader {
 			HasToolBaselineError: sess.toolDrift.BaselineError != "",
 			MissingFrames:        sess.missing,
 			DroppedFromMemory:    sess.dropped,
+			RetiredExchanges:     sess.retiredExchanges,
 			LateResults:          sess.lateResults,
 		})
 	}

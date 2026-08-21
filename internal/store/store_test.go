@@ -3138,3 +3138,47 @@ func TestParkedOperationsDoNotAccumulate(t *testing.T) {
 		}
 	})
 }
+
+// TestTheParkingCapSaysWhatItRetired keeps the bound from being silent. Retiring
+// a settled operation loses nothing, but one dropped while still open can no
+// longer be linked to, so a retry that does arrive for it reads as its own call
+// and the operation is counted and timed as two. That is what correlating MRTR
+// exists to prevent, so a session it happened in has to be able to say so.
+func TestTheParkingCapSaysWhatItRetired(t *testing.T) {
+	t.Run("a clean session retires nothing", func(t *testing.T) {
+		s, _ := mrtrProbe(t, 1)
+		if got := s.Sessions()[0].RetiredExchanges; got != 0 {
+			t.Fatalf("RetiredExchanges = %d, want 0; one abandoned exchange is far below the cap", got)
+		}
+	})
+
+	t.Run("the cap reports the open ones it dropped", func(t *testing.T) {
+		abandoned := 3 * awaitingKept
+		s, sess := mrtrProbe(t, abandoned)
+		got := s.Sessions()[0].RetiredExchanges
+		if got == 0 {
+			t.Fatal("the cap dropped open operations and said nothing")
+		}
+		// Everything parked and then dropped is accounted for: what was abandoned,
+		// less what is still held.
+		if want := abandoned - len(sess.awaiting); got != want {
+			t.Fatalf("RetiredExchanges = %d, want %d abandoned less the %d still parked", got, want, len(sess.awaiting))
+		}
+	})
+
+	t.Run("retiring a settled operation is not reported as a loss", func(t *testing.T) {
+		t0 := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+		s := New()
+		s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"a","arguments":{}}`))
+		s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
+			`"result":{"resultType":"input_required","requestState":"blob","inputRequests":{"k1":{"method":"elicitation/create","params":{}}}}`))
+		s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: t0.Add(2 * time.Millisecond),
+			Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1,"reason":"user declined"}}`)})
+		s.Ingest(req(4, t0.Add(3*time.Millisecond), proxy.ClientToServer, "2", "tools/call", `{"name":"b","arguments":{}}`))
+		s.Ingest(resp(5, t0.Add(4*time.Millisecond), proxy.ServerToClient, "2",
+			`"result":{"resultType":"input_required","requestState":"blob2","inputRequests":{"k1":{"method":"elicitation/create","params":{}}}}`))
+		if got := s.Sessions()[0].RetiredExchanges; got != 0 {
+			t.Fatalf("RetiredExchanges = %d, want 0; a cancelled operation waits for nothing and losing it costs nothing", got)
+		}
+	})
+}

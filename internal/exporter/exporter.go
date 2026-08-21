@@ -118,6 +118,10 @@ type SessionSummary struct {
 	// MissingFrames counts envelopes dropped upstream, inferred from Seq gaps.
 	// A non-zero value means the capture is incomplete.
 	MissingFrames uint64 `json:"missing_frames"`
+	// RetiredExchanges counts multi round-trip operations dropped at the parking
+	// cap while still open. A non-zero value means a retry for one of them could
+	// no longer be linked, so an operation may be reported here as two calls.
+	RetiredExchanges int `json:"retired_exchanges,omitempty"`
 }
 
 type CapabilitiesExport struct {
@@ -434,19 +438,20 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 	out := SessionExport{
 		GeneratedAt: time.Now().UTC(),
 		Session: SessionSummary{
-			ID:            header.ID,
-			Label:         header.Label,
-			Transport:     header.Transport,
-			Endpoint:      header.Endpoint,
-			First:         header.First,
-			Last:          header.Last,
-			Requests:      header.Requests,
-			Responses:     header.Responses,
-			Notifications: header.Notifications,
-			Errors:        header.Errors,
-			Pending:       header.Pending,
-			LateResults:   header.LateResults,
-			MissingFrames: header.MissingFrames,
+			ID:               header.ID,
+			Label:            header.Label,
+			Transport:        header.Transport,
+			Endpoint:         header.Endpoint,
+			First:            header.First,
+			Last:             header.Last,
+			Requests:         header.Requests,
+			Responses:        header.Responses,
+			Notifications:    header.Notifications,
+			Errors:           header.Errors,
+			Pending:          header.Pending,
+			LateResults:      header.LateResults,
+			MissingFrames:    header.MissingFrames,
+			RetiredExchanges: header.RetiredExchanges,
 		},
 		Calls:  outCalls,
 		Events: outEvents,

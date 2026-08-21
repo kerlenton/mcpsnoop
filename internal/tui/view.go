@@ -223,6 +223,14 @@ func (m Model) footerCounters() string {
 	if dropped := m.currentDroppedFrames(); dropped > 0 {
 		parts = append(parts, m.styles.faint.Render(fmt.Sprintf("%d older on disk", dropped)))
 	}
+	// Multi round-trip operations the parking cap retired while they were still
+	// open. Warn rather than faint, because unlike the line above this one makes
+	// the numbers beside it wrong: a retry arriving for a retired operation reads
+	// as its own call, so the session shows two calls and two durations where
+	// there was one.
+	if retired := m.currentRetiredExchanges(); retired > 0 {
+		parts = append(parts, m.styles.warn.Render(fmt.Sprintf("%d unlinked", retired)))
+	}
 	c := m.streamSignals
 	for _, sig := range []struct {
 		n     int
@@ -247,6 +255,17 @@ func (m Model) currentDroppedFrames() int {
 	for _, s := range m.allSessions {
 		if s.ID == m.streamSessionID {
 			return s.DroppedFromMemory
+		}
+	}
+	return 0
+}
+
+// currentRetiredExchanges returns how many multi round-trip operations the store
+// dropped at its parking cap while they were still waiting for a retry.
+func (m Model) currentRetiredExchanges() int {
+	for _, s := range m.allSessions {
+		if s.ID == m.streamSessionID {
+			return s.RetiredExchanges
 		}
 	}
 	return 0

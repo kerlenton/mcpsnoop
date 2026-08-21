@@ -810,6 +810,15 @@ One case is out of reach. When a server answers with a `requestState` and no
 is nothing left to tie it to the original request and it reads as an unrelated
 call rather than a violation.
 
+An abandoned exchange does not disturb the next one, and is not kept forever
+either. Sixty-four open exchanges is far more than any client has at once, so a
+session holding more is holding ones nobody will finish, and the oldest are
+retired because the spec tells servers to give that state a short expiry and
+reject it afterwards. Retiring is counted rather than silent: the stream footer
+shows `N unlinked` and the export carries `session.retired_exchanges`, because a
+retry that does arrive for a retired operation reads as its own call, and a
+reader comparing counts deserves to be told.
+
 An abandoned exchange does not disturb the next one. MRTR tells servers they
 must not assume a client will ever retry, so a user declining an elicitation
 leaves an operation that no later frame will ever settle. mcpsnoop looks first

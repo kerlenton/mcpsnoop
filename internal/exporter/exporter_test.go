@@ -1530,3 +1530,59 @@ func TestExportSplitsTheTwoKindsOfToolError(t *testing.T) {
 		}
 	}
 }
+
+// TestExportReportsRetiredExchanges keeps the parking cap from being silent in a
+// document somebody reads without the TUI. A capture where the cap fired may
+// report one operation as two calls, and the reader needs that stated.
+func TestExportReportsRetiredExchanges(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	st := store.New()
+	var seq uint64
+	// Enough abandoned exchanges that the store's parking cap has to drop some.
+	for i := range 200 {
+		seq++
+		id := fmt.Sprintf("%d", i)
+		st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: seq, TS: t0.Add(time.Duration(seq) * time.Millisecond),
+			Direction: proxy.ClientToServer, Raw: json.RawMessage(fmt.Sprintf(`{"jsonrpc":"2.0","id":%q,"method":"tools/call","params":{"name":"ask"}}`, id))})
+		seq++
+		st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: seq, TS: t0.Add(time.Duration(seq) * time.Millisecond),
+			Direction: proxy.ServerToClient, Raw: json.RawMessage(fmt.Sprintf(
+				`{"jsonrpc":"2.0","id":%q,"result":{"resultType":"input_required","requestState":"s-%d","inputRequests":{"k1":{"method":"elicitation/create","params":{}}}}}`, id, i))})
+	}
+
+	data, err := Build(st, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data.Session.RetiredExchanges == 0 {
+		t.Fatal("200 abandoned exchanges and the export reports none retired")
+	}
+
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatJSON}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"retired_exchanges"`) {
+		t.Fatalf("the export does not name the retired exchanges:\n%s", buf.String()[:2000])
+	}
+}
+
+// TestACleanExportOmitsRetiredExchanges pins the omitempty. A zero on every
+// ordinary capture would train a reader to ignore the field.
+func TestACleanExportOmitsRetiredExchanges(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	st := store.New()
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)})
+	data, err := Build(st, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatJSON}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), `"retired_exchanges"`) {
+		t.Fatalf("a clean export carries the field:\n%s", buf.String())
+	}
+}

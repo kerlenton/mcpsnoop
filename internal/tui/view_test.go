@@ -225,3 +225,39 @@ func TestSummarySortsABrokenServerAboveAToolReportingFailure(t *testing.T) {
 		t.Fatalf("the summary never explains the second colour:\n%s", out)
 	}
 }
+
+// TestFooterNamesRetiredExchanges keeps the parking cap visible where the counts
+// it affects are shown. Unlike frames the memory budget released, a retired
+// operation makes the numbers beside it wrong, so it carries the warn colour.
+func TestFooterNamesRetiredExchanges(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	st := store.New()
+	var seq uint64
+	for i := range 200 {
+		seq++
+		id := fmt.Sprintf("%d", i)
+		st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: seq, TS: t0.Add(time.Duration(seq) * time.Millisecond),
+			Direction: proxy.ClientToServer, Raw: json.RawMessage(fmt.Sprintf(`{"jsonrpc":"2.0","id":%q,"method":"tools/call","params":{"name":"ask"}}`, id))})
+		seq++
+		st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: seq, TS: t0.Add(time.Duration(seq) * time.Millisecond),
+			Direction: proxy.ServerToClient, Raw: json.RawMessage(fmt.Sprintf(
+				`{"jsonrpc":"2.0","id":%q,"result":{"resultType":"input_required","requestState":"s-%d","inputRequests":{"k1":{"method":"elicitation/create","params":{}}}}}`, id, i))})
+	}
+
+	m := New(st)
+	m.streamSessionID = "s1"
+	m.allSessions = st.Sessions()
+	m.view = viewStream
+	if got := m.currentRetiredExchanges(); got == 0 {
+		t.Fatal("the model reports no retired exchanges for a session that hit the cap")
+	}
+	if footer := m.footerCounters(); !strings.Contains(footer, "unlinked") {
+		t.Fatalf("the footer does not name the retired exchanges: %q", footer)
+	}
+
+	clean := New(store.New())
+	clean.view = viewStream
+	if footer := clean.footerCounters(); strings.Contains(footer, "unlinked") {
+		t.Fatalf("a clean session shows the marker anyway: %q", footer)
+	}
+}

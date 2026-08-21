@@ -304,9 +304,13 @@ type session struct {
 	toolStats toolStats
 	tasks     map[string]*call
 	// awaiting holds operations that answered with an InputRequiredResult and are
-	// waiting for the client to retry. It stays tiny, only in-flight ones live here.
-	awaiting []*call
-	events   []*event
+	// waiting for the client to retry, and retiredExchanges counts the ones the
+	// parking cap dropped. A dropped operation can no longer be linked to, so a
+	// retry that does arrive for it reads as its own call, and a reader comparing
+	// counts deserves to be told rather than left to wonder.
+	awaiting         []*call
+	retiredExchanges int
+	events           []*event
 
 	requests, responses, notifications, errors, pending, lateResults int
 
@@ -1792,6 +1796,12 @@ func (sess *session) pruneAwaiting() {
 	if excess := kept - awaitingKept; excess > 0 {
 		copy(sess.awaiting, sess.awaiting[excess:kept])
 		kept -= excess
+		// Counted, never silent. Retiring a settled operation above loses nothing,
+		// but these were still open, so a retry arriving for one of them will read
+		// as its own call and the operation will be counted and timed as two. That
+		// is the very thing correlating MRTR exists to prevent, so a session it
+		// happened in has to be able to say so.
+		sess.retiredExchanges += excess
 	}
 	// The tail still points at the retired calls, so clear it rather than only
 	// reslicing, or the backing array keeps every one of them alive.
