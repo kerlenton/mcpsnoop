@@ -64,15 +64,17 @@ func TestResponseContentTypeIsCheckedAgainstTheTwoAllowedTypes(t *testing.T) {
 		headers *proxy.TransportHeaders
 		want    string
 	}{
-		"json":                {&proxy.TransportHeaders{ContentType: "application/json"}, ""},
-		"json with a charset": {&proxy.TransportHeaders{ContentType: "application/json; charset=utf-8"}, ""},
-		"an event stream":     {&proxy.TransportHeaders{ContentType: "text/event-stream"}, ""},
-		"plain text":          {&proxy.TransportHeaders{ContentType: "text/plain"}, "is text/plain"},
-		// Not "anything under application", which the transport does not say.
-		"another application type":                 {&proxy.TransportHeaders{ContentType: "application/xml"}, "is application/xml"},
-		"html, the shape a proxy error page takes": {&proxy.TransportHeaders{ContentType: "text/html"}, "is text/html"},
-		"none at all":                    {&proxy.TransportHeaders{}, "carried no Content-Type"},
-		"a log from before this existed": {nil, ""},
+		"json":            {&proxy.TransportHeaders{ContentType: "application/json"}, ""},
+		"json + charset":  {&proxy.TransportHeaders{ContentType: "application/json; charset=utf-8"}, ""},
+		"an event stream": {&proxy.TransportHeaders{ContentType: "text/event-stream"}, ""},
+		"plain text":      {&proxy.TransportHeaders{ContentType: "text/plain"}, "is text/plain"},
+		// application/xml, not "anything under application", which the transport
+		// does not say. text/html is the shape a proxy error page takes.
+		"another app type": {&proxy.TransportHeaders{ContentType: "application/xml"}, "is application/xml"},
+		"html":             {&proxy.TransportHeaders{ContentType: "text/html"}, "is text/html"},
+		"none at all":      {&proxy.TransportHeaders{}, "carried no Content-Type"},
+		// nil is a log written before mcpsnoop recorded these headers.
+		"an older log": {nil, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := responseContentTypeWarning(proxy.ServerToClient, tc.headers)
