@@ -550,6 +550,38 @@ definition stay observational. Key- and value-based redaction applies to capture
 parameter-header values before they reach a sink, and a value mcpsnoop scrubbed
 itself is never reported as a disagreement.
 
+### Check the transport headers the spec makes mandatory
+
+The routing headers above were the only ones a frame carried, so the rest of the
+Streamable HTTP transport's mandatory headers reached nothing that could check
+them. `Content-Type` was the sharpest case: the response side already read it to
+tell an SSE stream from a JSON body, then threw it away.
+
+An HTTP frame now carries the headers the transport states rules about, and two
+of those rules are checkable.
+
+| Rule | Reported as |
+|---|---|
+| the client **MUST** send an `Accept` listing both `application/json` and `text/event-stream` | `warn` on the request |
+| a server answering a JSON-RPC request **MUST** return `Content-Type: application/json` or `text/event-stream` | `warn` on the response |
+
+Both sentences read the same in 2025-11-25 and 2026-07-28, so unlike the drift
+and extension checks these need no revision gate. `Origin` is recorded too, since
+servers **MUST** validate it and **MUST** answer `403` when it is invalid, but
+mcpsnoop cannot know your allowed origins so it shows the value rather than
+judging it.
+
+Wildcards count. A client sending `*/*` has offered both types and is never
+reported, and a `charset` parameter on a `Content-Type` is ignored. A log
+captured before mcpsnoop recorded these headers stays silent rather than
+reporting every frame in it for a header nobody wrote down, and stdio never has
+them at all.
+
+`Authorization` is deliberately not captured. Turning a challenge into token
+facts is its own problem and putting a bearer token on disk is not the answer to
+it. `Mcp-Session-Id` and `Last-Event-ID` are not captured either: 2026-07-28
+removed both and tells a server to ignore them, so there is no rule left to check.
+
 ### Detect tool definition drift
 
 The first complete `tools/list` observed for a server label becomes its trusted

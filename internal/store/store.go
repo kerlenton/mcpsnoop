@@ -521,6 +521,9 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.ConnID, e.TS, msg, e.Redacted)
 		ev.call = c
+		if note := responseContentTypeWarning(e.Direction, e.TransportHeaders); note != "" {
+			ev.warning = appendWarning(ev.warning, note)
+		}
 		// A task handle is the server reaching for the extension. It is judged
 		// against what the client declared, since the client is the side that has
 		// to understand the handle it is being given.
@@ -638,6 +641,9 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			if note := sess.unnegotiatedTasksWarning(e.Direction, requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)); note != "" {
 				ev.warning = appendWarning(ev.warning, strconv.Quote(msg.Method)+" "+note)
 			}
+		}
+		if note := acceptWarning(e.Direction, e.TransportHeaders); note != "" {
+			ev.warning = appendWarning(ev.warning, note)
 		}
 		var reused bool
 		if root, stateIssue := sess.matchRetry(msg); root != nil {

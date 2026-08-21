@@ -88,6 +88,10 @@ type route struct {
 	truncated bool   // the observed copy was cut at the frame-size cap
 	status    int    // HTTP status of the response carrying this frame
 	challenge string // WWW-Authenticate on that response
+	// headers are the spec-mandated transport headers of this frame. A pointer so
+	// a frame mcpsnoop captured with none is distinguishable from a log written
+	// before it recorded them at all.
+	headers *TransportHeaders
 }
 
 // wwwAuthenticateHeader carries the challenge on a 401. It is kept verbatim
@@ -117,6 +121,7 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 			Truncated:          r.truncated,
 			Status:             r.status,
 			AuthChallenge:      r.challenge,
+			TransportHeaders:   r.headers,
 		}
 		if raw != nil {
 			env.Raw = append([]byte(nil), raw...)
@@ -276,7 +281,13 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 		ModifyResponse: func(resp *http.Response) error {
 			// The status and the challenge ride every frame observed on this
 			// response, so the transport layer is visible even when the body is not.
-			rt := route{status: resp.StatusCode, challenge: resp.Header.Get(wwwAuthenticateHeader)}
+			rt := route{
+				status:    resp.StatusCode,
+				challenge: resp.Header.Get(wwwAuthenticateHeader),
+				// Read a few lines below to pick the SSE branch, and until now
+				// discarded afterwards, so nothing could check the rule it decides.
+				headers: &TransportHeaders{ContentType: resp.Header.Get("Content-Type")},
+			}
 			if resp.Request != nil {
 				rt.conn = resp.Request.RemoteAddr
 			}
@@ -337,8 +348,13 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 				method:          r.Header.Get(mcpMethodHeader),
 				name:            r.Header.Get(mcpNameHeader),
 				protocolVersion: r.Header.Get(mcpProtocolVersionHeader),
-				params:          mcpParamHeaders(r.Header),
-				conn:            r.RemoteAddr,
+				headers: &TransportHeaders{
+					Accept:      r.Header.Get("Accept"),
+					ContentType: r.Header.Get("Content-Type"),
+					Origin:      r.Header.Get("Origin"),
+				},
+				params: mcpParamHeaders(r.Header),
+				conn:   r.RemoteAddr,
 			}
 			// Same streaming tap for the request body, so a large upload is forwarded
 			// without being held in memory whole.

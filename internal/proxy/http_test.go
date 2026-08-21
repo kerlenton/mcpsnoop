@@ -768,3 +768,78 @@ func TestProxyForwardsTheRequestUnchanged(t *testing.T) {
 		t.Fatalf("no frame carried a connection identity: %v", conns)
 	}
 }
+
+// TestProxyCapturesTheSpecMandatedHeaders. check already gates on routing
+// headers, but the rest of the transport's mandatory headers reached no frame,
+// so no signal could be written against them. Content-Type was the sharpest
+// case: the response side already read it to pick the SSE branch and then threw
+// it away.
+func TestProxyCapturesTheSpecMandatedHeaders(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	defer target.Close()
+	u, err := url.Parse(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got []Envelope
+	front := httptest.NewServer(httpProxyHandler(u, func(dir Direction, body []byte, rt route) {
+		got = append(got, Envelope{Direction: dir, TransportHeaders: rt.headers})
+	}))
+	defer front.Close()
+
+	req, err := http.NewRequest(http.MethodPost, front.URL+"/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://localhost:1234")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	var request, response *TransportHeaders
+	for _, e := range got {
+		if e.Direction == ClientToServer {
+			request = e.TransportHeaders
+		} else {
+			response = e.TransportHeaders
+		}
+	}
+	if request == nil {
+		t.Fatal("the client frame carried no transport headers")
+	}
+	for field, want := range map[string]string{
+		"Accept":      "application/json, text/event-stream",
+		"ContentType": "application/json",
+		"Origin":      "http://localhost:1234",
+	} {
+		var got string
+		switch field {
+		case "Accept":
+			got = request.Accept
+		case "ContentType":
+			got = request.ContentType
+		case "Origin":
+			got = request.Origin
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q", field, got, want)
+		}
+	}
+	if response == nil || response.ContentType != "application/json" {
+		t.Fatalf("the response frame did not carry its Content-Type: %+v", response)
+	}
+	// A pointer, not a value, so a log written before this existed stays
+	// distinguishable from a request that genuinely carried none.
+	if got := (&Envelope{}).TransportHeaders; got != nil {
+		t.Fatalf("an envelope with nothing captured is not nil: %+v", got)
+	}
+}
