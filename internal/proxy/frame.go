@@ -104,6 +104,35 @@ type Envelope struct {
 	// response header worth keeping verbatim: a 401 without it is a dead end,
 	// and with it names the scheme and the resource metadata to go to next.
 	AuthChallenge string `json:"auth_challenge,omitempty"`
+	// TransportHeaders carries the Streamable HTTP headers the transport
+	// specification makes normative, which are the ones a conformance check can
+	// be written against. Nil on stdio, and nil on a log captured before mcpsnoop
+	// recorded them, which is what keeps reading an old log from reporting every
+	// frame in it for a header nobody ever wrote down.
+	TransportHeaders *TransportHeaders `json:"transport_headers,omitempty"`
+}
+
+// TransportHeaders are the spec-mandated Streamable HTTP headers of one frame.
+// A closed list drawn from normative clauses, not a general header dump: someone
+// who wants every header wants mitmproxy, and this exists so `check` can gate on
+// rules the transport actually states.
+//
+// Authorization is deliberately absent. Decoding a challenge into token facts is
+// its own problem and putting a bearer token on disk is not the answer to it.
+// Mcp-Session-Id and Last-Event-ID are absent too: 2026-07-28 removed both, and
+// tells a server to ignore them, so there is no rule left to check.
+type TransportHeaders struct {
+	// Accept is the client's Accept header. The client MUST list both
+	// application/json and text/event-stream on a POST.
+	Accept string `json:"accept,omitempty"`
+	// ContentType is the frame's own Content-Type, the request's on a client
+	// frame and the response's on a server one. A server answering a JSON-RPC
+	// request MUST return one of the same two types.
+	ContentType string `json:"content_type,omitempty"`
+	// Origin is the request's Origin. Servers MUST validate it and MUST answer
+	// 403 when it is invalid, which mcpsnoop cannot judge without knowing the
+	// allowed set, so this is recorded for the reader rather than checked.
+	Origin string `json:"origin,omitempty"`
 }
 
 // RPCError is the JSON-RPC error object.
