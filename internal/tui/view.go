@@ -216,6 +216,13 @@ func (m Model) footerCounters() string {
 	if missing := m.currentMissingFrames(); missing > 0 {
 		parts = append(parts, m.styles.respErr.Render(fmt.Sprintf("%d missing", missing)))
 	}
+	// Frames the memory budget dropped are a different thing from missing ones.
+	// They were observed and are still in the log, so this is dim rather than red,
+	// but the top of the stream is not the start of the session and saying nothing
+	// would let a reader believe it was.
+	if dropped := m.currentDroppedFrames(); dropped > 0 {
+		parts = append(parts, m.styles.faint.Render(fmt.Sprintf("%d older on disk", dropped)))
+	}
 	c := m.streamSignals
 	for _, sig := range []struct {
 		n     int
@@ -232,6 +239,17 @@ func (m Model) footerCounters() string {
 		}
 	}
 	return strings.Join(parts, sep)
+}
+
+// currentDroppedFrames returns how many of this session's frames the live store
+// released to stay inside its memory budget. They are still in the log.
+func (m Model) currentDroppedFrames() int {
+	for _, s := range m.allSessions {
+		if s.ID == m.streamSessionID {
+			return s.DroppedFromMemory
+		}
+	}
+	return 0
 }
 
 // currentMissingFrames returns the dropped-frame count for the session being
@@ -1104,6 +1122,13 @@ func (m Model) inspectorBody() string {
 	}
 	if len(e.Raw) > 0 {
 		b.WriteString(prettyJSON(e.Raw))
+	}
+	// A frame whose body the live store released still has a row, a verdict and a
+	// place in the timeline, and saying nothing here would read as a server that
+	// sent an empty frame. The log on disk is untouched.
+	if e.BodyReleased {
+		b.WriteString(m.styles.dim.Render(
+			"body released to stay inside the live memory budget; open the session log to read it"))
 	}
 	return b.String()
 }

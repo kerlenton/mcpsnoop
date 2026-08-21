@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -226,24 +227,51 @@ func observeBody(emit func(Direction, []byte, route), dir Direction, observed []
 	emitFrames(emit, dir, observed, rt)
 }
 
+// appendForwardedFor reproduces what a Director-based ReverseProxy did on its
+// own: add this hop to the client's X-Forwarded-For chain rather than replace
+// it. Rewrite strips the inbound value before it is called, so without this the
+// target would stop seeing where a request came from.
+func appendForwardedFor(r *httputil.ProxyRequest) {
+	hop, _, err := net.SplitHostPort(r.In.RemoteAddr)
+	if err != nil {
+		return // no address to add, which is not a reason to invent one
+	}
+	if prior := r.In.Header.Values("X-Forwarded-For"); len(prior) > 0 {
+		hop = strings.Join(prior, ", ") + ", " + hop
+	}
+	r.Out.Header.Set("X-Forwarded-For", hop)
+}
+
 // httpProxyHandler builds the reverse-proxy handler that taps request and
 // response bodies. Exposed (unexported) for testing with httptest.
 func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http.Handler {
 	rp := &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			req.URL.Scheme = target.Scheme
-			req.URL.Host = target.Host
-			req.Host = target.Host
+		// Rewrite rather than the deprecated Director, and deliberately not
+		// SetXForwarded. This proxy sits in the real data path, so a migration off
+		// a deprecated hook has to leave the target seeing exactly what it saw
+		// before. Rewrite's own defaults do not: it strips the client's
+		// X-Forwarded-* headers, and SetXForwarded would replace the forwarding
+		// chain with this one hop and invent an X-Forwarded-Host and
+		// X-Forwarded-Proto the target never used to receive.
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.Out.URL.Scheme = target.Scheme
+			r.Out.URL.Host = target.Host
+			r.Out.Host = target.Host
 			if target.Path != "" && target.Path != "/" {
-				req.URL.Path = target.Path
+				r.Out.URL.Path = target.Path
 			}
+			// Rewrite drops query parameters net/url cannot parse. Dropping part of
+			// a request is the one thing a transparent proxy must not do, so the
+			// query the client wrote is put back verbatim.
+			r.Out.URL.RawQuery = r.In.URL.RawQuery
 			// mcpsnoop has to read the response body to observe it, so it must not
 			// arrive compressed. Force identity rather than let the client's gzip
 			// preference reach the target and turn every observed frame into noise.
 			// identity is always acceptable to the client.
-			req.Header.Set("Accept-Encoding", "identity")
+			r.Out.Header.Set("Accept-Encoding", "identity")
+			appendForwardedFor(r)
 			// The routing headers are not hop-by-hop, so the reverse proxy forwards
-			// them to the target verbatim; the Director leaves them untouched.
+			// them to the target verbatim; nothing here touches them.
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			// The status and the challenge ride every frame observed on this

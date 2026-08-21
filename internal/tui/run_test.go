@@ -96,3 +96,16 @@ func TestRunReportsAnAlreadyRunningHub(t *testing.T) {
 		t.Fatalf("the error should name the socket, got %v", err)
 	}
 }
+
+// TestLiveStoreIsBounded. The hub feeds this store for as long as mcpsnoop is
+// left open, so it is the one store that has to forget. The batch commands build
+// an unbounded one on purpose, since a bound there would make check under-report
+// on a large capture.
+func TestLiveStoreIsBounded(t *testing.T) {
+	if limit := liveStore().BodyLimit(); limit <= 0 {
+		t.Fatalf("the live TUI store keeps every body, limit = %d", limit)
+	}
+	if got := store.New().BodyLimit(); got != 0 {
+		t.Fatalf("the batch store is bounded at %d, so check would under-report", got)
+	}
+}
