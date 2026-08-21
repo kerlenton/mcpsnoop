@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -843,3 +844,118 @@ func TestProxyCapturesTheSpecMandatedHeaders(t *testing.T) {
 		t.Fatalf("an envelope with nothing captured is not nil: %+v", got)
 	}
 }
+
+// TestProxyKeepsEveryAuthChallenge. AuthChallenge is the one response header
+// this proxy keeps verbatim, because a 401 without it is a dead end. Reading it
+// with Header.Get kept only the first line, so a server offering DPoP beside
+// Bearer had half its answer dropped before anything could read it.
+func TestProxyKeepsEveryAuthChallenge(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("WWW-Authenticate", `Bearer realm="mcp", resource_metadata="https://x/.well-known/oauth-protected-resource"`)
+		w.Header().Add("WWW-Authenticate", `DPoP algs="ES256"`)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"unauthorized"}}`)
+	}))
+	defer target.Close()
+	u, err := url.Parse(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var challenge string
+	front := httptest.NewServer(httpProxyHandler(u, func(dir Direction, _ []byte, rt route) {
+		if dir == ServerToClient && rt.challenge != "" {
+			challenge = rt.challenge
+		}
+	}))
+	defer front.Close()
+
+	req, err := http.NewRequest(http.MethodPost, front.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	for _, want := range []string{"Bearer", "resource_metadata", "DPoP", "ES256"} {
+		if !strings.Contains(challenge, want) {
+			t.Errorf("the captured challenge lost %q: %q", want, challenge)
+		}
+	}
+}
+
+// TestHTTPFramesReachTheSinkInSequenceOrder. An atomic counter makes every Seq
+// distinct but says nothing about the order frames reach the sink in. Two
+// concurrent requests arriving as 6 then 5 make the store's gap detector infer a
+// dropped frame, and a capture that lost nothing then fails check --fail-on
+// incomplete. RunStdio has held a lock across the emit for this reason since it
+// hit the same thing.
+func TestHTTPFramesReachTheSinkInSequenceOrder(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	defer target.Close()
+	u, err := url.Parse(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var seen []uint64
+	// The sink is deliberately slow. Holding the lock across the emit serializes
+	// these by construction, while releasing it after the increment lets every
+	// waiting goroutine pile into the sink at once, so the reorder is reliable
+	// rather than a race the test has to be lucky to catch.
+	emit := newHTTPEmitter(HTTPConfig{SessionID: "s1", Label: "l"}, &orderSink{fn: func(e Envelope) {
+		time.Sleep(time.Millisecond)
+		mu.Lock()
+		seen = append(seen, e.Seq)
+		mu.Unlock()
+	}})
+	front := httptest.NewServer(httpProxyHandler(u, emit))
+	defer front.Close()
+
+	var wg sync.WaitGroup
+	for i := range 60 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodPost, front.URL+"/mcp",
+				strings.NewReader(`{"jsonrpc":"2.0","id":`+strconv.Itoa(i)+`,"method":"ping"}`))
+			if err != nil {
+				return
+			}
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				resp.Body.Close()
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The store's own gap arithmetic, run over the order the sink actually saw.
+	var last, missing uint64
+	for _, s := range seen {
+		if s > last {
+			if expected := last + 1; s > expected {
+				missing += s - expected
+			}
+			last = s
+		}
+	}
+	if missing > 0 {
+		t.Fatalf("a capture that lost nothing reports %d missing frames out of %d, arrival order %v",
+			missing, len(seen), seen)
+	}
+}
+
+type orderSink struct{ fn func(Envelope) }
+
+func (o *orderSink) Emit(e Envelope) { o.fn(e) }
+func (o *orderSink) Close() error    { return nil }

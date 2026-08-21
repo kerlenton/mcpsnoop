@@ -63,8 +63,10 @@ func wrongDirectionWarning(dir proxy.Direction, msg proxy.RPCMessage, stateless 
 
 // inputRequiredWarnings reports what an InputRequiredResult breaks. c is the
 // request it answers, nil when mcpsnoop never saw that half, in which case the
-// method rule cannot be decided and stays silent.
-func inputRequiredWarnings(state inputRequired, c *call) []string {
+// method rule cannot be decided and stays silent. redacted says the frame passed
+// through mcpsnoop's own redaction, which is what makes the placeholder below
+// trustworthy as a placeholder rather than a name a server chose.
+func inputRequiredWarnings(state inputRequired, c *call, redacted bool) []string {
 	var warnings []string
 	if c != nil {
 		if _, allowed := mrtrCapableMethods[c.method]; !allowed {
@@ -79,6 +81,12 @@ func inputRequiredWarnings(state inputRequired, c *call) []string {
 			"and 2026-07-28 requires at least one")
 	}
 	for _, method := range state.methods {
+		// A method name mcpsnoop's own redaction rewrote is unreadable, not wrong.
+		// Reporting it accuses a conforming server of the user's privacy setting on
+		// a signal that fails a default check run.
+		if partlyRedacted(redacted, method) {
+			continue
+		}
 		if _, ok := inputRequestMethods[method]; !ok {
 			warnings = append(warnings, "inputRequests names "+strconv.Quote(method)+
 				", and 2026-07-28 allows only elicitation/create, sampling/createMessage and roots/list")

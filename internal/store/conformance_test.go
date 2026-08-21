@@ -380,3 +380,43 @@ func TestSubscriptionStreamRules(t *testing.T) {
 		}
 	})
 }
+
+// TestInputRequestsAreUnverifiableAfterRedaction. The method names inside an
+// InputRequiredResult are ordinary string values, so --redact-path and
+// --redact-value reach them. Reading the placeholder as a method the spec does
+// not allow reports a conforming server for the user's own privacy setting, on a
+// signal that fails a default check run.
+func TestInputRequestsAreUnverifiableAfterRedaction(t *testing.T) {
+	answer := func(method string, redacted bool) string {
+		s := New()
+		t0 := time.Now()
+		s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"slow"}`))
+		e := resp(2, t0, proxy.ServerToClient, "1",
+			`"result":{"resultType":"input_required","inputRequests":{"q1":{"method":"`+method+`","params":{}}}}`)
+		e.Redacted = redacted
+		return s.Ingest(e).Warning
+	}
+
+	if got := answer("[REDACTED]", true); got != "" {
+		t.Fatalf("a scrubbed method was reported as a violation: %q", got)
+	}
+	if got := answer("prefix/[REDACTED]", true); got != "" {
+		t.Fatalf("a partly scrubbed method was reported as a violation: %q", got)
+	}
+	// Only mcpsnoop's own rewriting earns that silence. The placeholder is a
+	// string a server may legally send, so a check that stops at those bytes alone
+	// is a check the traffic can switch off.
+	if got := answer("[REDACTED]", false); got == "" {
+		t.Fatal("an unredacted capture spelling the placeholder must still be judged")
+	}
+	// And a real violation is still reported.
+	if got := answer("tools/call", false); got == "" {
+		t.Fatal("a method the spec does not allow in inputRequests went unreported")
+	}
+	// A conforming one stays silent either way.
+	for _, redacted := range []bool{false, true} {
+		if got := answer("elicitation/create", redacted); got != "" {
+			t.Fatalf("a conforming inputRequests was reported (redacted=%v): %q", redacted, got)
+		}
+	}
+}
