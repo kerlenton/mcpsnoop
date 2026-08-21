@@ -415,6 +415,14 @@ func (s *Store) Delete(sessionID string) {
 	if _, ok := s.sessions[sessionID]; !ok {
 		return
 	}
+	// The budget is store-wide, so a session leaving has to give back what it
+	// was holding. Without this, deleting a large session left its bytes on the
+	// budget for the life of the process and every frame ingested afterwards was
+	// released immediately, which is the inspector showing no payload at all.
+	if sess := s.sessions[sessionID]; sess != nil && s.bounded {
+		s.payloadBytes -= sess.bodyBytes
+		s.frames -= len(sess.events)
+	}
 	delete(s.sessions, sessionID)
 	for i, id := range s.order {
 		if id == sessionID {
@@ -949,7 +957,7 @@ func (s *Store) appendEvent(sess *session, ev *event) {
 		if oldest == nil {
 			break
 		}
-		oldest.dropOldestFrame()
+		s.payloadBytes -= oldest.dropOldestFrame()
 		s.frames--
 	}
 }
@@ -974,10 +982,15 @@ func (s *Store) oldestSession() *session {
 // folding whatever it says about a tool call into the running statistics. The
 // call itself goes with it when nothing else refers to it, since a settled call
 // that no frame points at is only holding memory.
-func (sess *session) dropOldestFrame() {
+// It returns the body weight that went with the frame, which the caller takes
+// off the store total. A frame the byte budget had already reached weighs
+// nothing here; one the frame cap reached first still carries its body, and
+// leaving that on the budget made the store believe it was fuller than it was.
+func (sess *session) dropOldestFrame() int {
 	ev := sess.events[0]
 	sess.toolStats.fold(ev)
-	sess.bodyBytes -= bodyWeight(ev)
+	dropped := bodyWeight(ev)
+	sess.bodyBytes -= dropped
 	sess.events[0] = nil // do not pin the frame through the slice's own array
 	sess.events = sess.events[1:]
 	sess.dropped++
@@ -991,6 +1004,7 @@ func (sess *session) dropOldestFrame() {
 			}
 		}
 	}
+	return dropped
 }
 
 // oldestRetained returns the session whose next unreleased frame is the oldest
