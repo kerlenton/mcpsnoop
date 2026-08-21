@@ -521,6 +521,14 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.ConnID, e.TS, msg, e.Redacted)
 		ev.call = c
+		// A task handle is the server reaching for the extension. It is judged
+		// against what the client declared, since the client is the side that has
+		// to understand the handle it is being given.
+		if state, ok := parseTaskState(msg.Result); ok && state.ResultType == "task" {
+			if note := sess.unnegotiatedTasksWarning(e.Direction, ev.mcpProtocolVersion); note != "" {
+				ev.warning = appendWarning(ev.warning, "a task handle "+note)
+			}
+		}
 		if matched && c != nil && c.lateResult {
 			// One-for-one with sess.lateResults++: completeCall returns matched for the
 			// frame that incremented it and false for any further response to the same
@@ -626,6 +634,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.method = msg.Method
 		ev.id = string(msg.ID)
 		ev.warning = validationWarning(msg)
+		if isTaskMethod(msg.Method) {
+			if note := sess.unnegotiatedTasksWarning(e.Direction, requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)); note != "" {
+				ev.warning = appendWarning(ev.warning, strconv.Quote(msg.Method)+" "+note)
+			}
+		}
 		var reused bool
 		if root, stateIssue := sess.matchRetry(msg); root != nil {
 			// A continuation, not a new call. Mapping the retry id onto the same
@@ -708,6 +721,9 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			}
 		}
 		if msg.Method == "notifications/tasks" {
+			if note := sess.unnegotiatedTasksWarning(e.Direction, ev.mcpProtocolVersion); note != "" {
+				ev.warning = appendWarning(ev.warning, "notifications/tasks "+note)
+			}
 			if state, ok := parseTaskState(msg.Params); ok {
 				ev.taskID = state.TaskID
 				if parent, failed := sess.applyParsedTaskState(state, e.TS); parent != nil {

@@ -596,6 +596,31 @@ mcpsnoop check --fail-on drift --baseline .mcpsnoop/baselines session.jsonl
 
 `drift` is opt-in for `check`; the default `error,invalid,warn` gate is unchanged.
 
+### Catch a feature neither side negotiated
+
+SEP-2133 moved optional features out of the core protocol and into extensions,
+advertised in the `extensions` map of each side's capabilities. Tasks is one of
+them, so on 2026-07-28 a `tasks/get`, a `notifications/tasks` or a `tools/call`
+answered with a task handle only means anything when the other side said it
+speaks Tasks.
+
+When it did not, the spec is explicit: the supporting party **MUST** either fall
+back to core behaviour or reject the request. Doing it anyway is why a feature
+appears to be wired up and then quietly does nothing, and what a reader gets
+instead is a `-32601` or a `-32021` several frames later, or a task that never
+progresses. mcpsnoop warns on the frame that reached for the extension and names
+which side never advertised it.
+
+```
+tool "slow" answered with a task handle uses the io.modelcontextprotocol/tasks
+extension, which the client never advertised
+```
+
+It is a `warn`, so a default `check` run fails on it. It stays quiet whenever the
+capture cannot show what was negotiated, which is a capture that starts after the
+handshake or one whose capabilities your own redaction scrubbed, and on revisions
+before 2026-07-28, where `tasks/*` are core protocol and using them is correct.
+
 ### Flag deprecated protocol features
 
 The 2026-07-28 revision deprecates Roots, Sampling, and Logging. They keep working
