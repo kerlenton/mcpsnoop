@@ -123,6 +123,11 @@ type EventView struct {
 	// LateResults. Call.LateResult says the call ever got one, which stays true
 	// for the rest of the capture and is visible from the request frame too.
 	LateResult bool
+	// BodyReleased is true when a bounded store dropped this frame's observed
+	// body to stay inside its memory budget. Everything else about the frame is
+	// still here, so it keeps its row and its verdict; only Raw and Text are gone
+	// and the log on disk still holds them.
+	BodyReleased bool
 	// MRTRRoot is the id of the request this one continues, set when a multi
 	// round-trip retry was recognised (SEP-2322). Empty on an ordinary request.
 	MRTRRoot string
@@ -146,7 +151,12 @@ type SessionHeader struct {
 	HasToolDrift         bool
 	HasToolBaselineError bool
 	MissingFrames        uint64 // envelopes dropped upstream, inferred from Seq gaps
-	LateResults          int
+	// DroppedFromMemory counts frames a bounded live store removed from the
+	// timeline to stay inside its budget. Unlike MissingFrames these were
+	// observed and are still in the log on disk, so the capture is complete and
+	// only this view of it is not.
+	DroppedFromMemory int
+	LateResults       int
 }
 
 // ToolDefinition is the contract a server advertised for one MCP tool.
@@ -403,6 +413,7 @@ func (e *event) view(_ *session) EventView {
 		MRTRStateIssue:     e.mrtrStateIssue,
 		Errored:            e.errored,
 		LateResult:         e.lateResult,
+		BodyReleased:       e.bodyReleased,
 	}
 	if e.call != nil {
 		cv := e.call.view()
@@ -460,6 +471,7 @@ func (s *Store) Sessions() []SessionHeader {
 			HasToolDrift:         sess.toolDrift.Count() > 0,
 			HasToolBaselineError: sess.toolDrift.BaselineError != "",
 			MissingFrames:        sess.missing,
+			DroppedFromMemory:    sess.dropped,
 			LateResults:          sess.lateResults,
 		})
 	}
@@ -763,54 +775,13 @@ func (s *Store) ToolSummary(sessionID string) (SessionToolSummary, bool) {
 		return SessionToolSummary{}, false
 	}
 
-	type aggregate struct {
-		stats     ToolStats
-		durations []time.Duration
-	}
-	byName := make(map[string]*aggregate)
-	var slowest []SlowToolCall
-	callIndex := 0
+	// Seeded from whatever a bounded store already released, so the statistics
+	// describe every tool call the session made rather than only the calls whose
+	// frames are still held.
+	byName, slowest, callIndex := sess.toolStats.clone()
 	for _, ev := range sess.events {
-		// Skipping a continuation matters twice over: it would count one logical
-		// operation as several calls, and feed the same duration into the
-		// percentiles once per round trip.
-		if ev.kind != EventRequest || ev.call == nil || ev.mrtrRoot != "" {
-			continue
-		}
-		c := ev.call
-		index := callIndex
-		callIndex++
-		if !c.isTool {
-			continue
-		}
-		agg := byName[c.toolName]
-		if agg == nil {
-			agg = &aggregate{stats: ToolStats{Name: c.toolName}}
-			byName[c.toolName] = agg
-		}
-		agg.stats.Calls++
-		if c.state == Pending {
-			agg.stats.Pending++
-			continue
-		}
-		if c.state == Superseded || (c.state == Cancelled && !c.lateResult) {
-			continue
-		}
-		if c.errored {
-			agg.stats.Errors++
-		}
-		if n := len(c.result); n > 0 {
-			agg.stats.ResultBytes += int64(n)
-			agg.stats.MaxResultBytes = max(agg.stats.MaxResultBytes, n)
-		}
-		duration := c.end.Sub(c.start)
-		agg.durations = append(agg.durations, duration)
-		slowest = append(slowest, SlowToolCall{
-			CallIndex: index, ID: c.id, ToolName: c.toolName,
-			Duration: duration, Failed: c.errored, Start: c.start,
-		})
+		foldToolCall(byName, &slowest, &callIndex, ev)
 	}
-
 	tools := make([]ToolStats, 0, len(byName))
 	for _, agg := range byName {
 		slices.Sort(agg.durations)
@@ -830,6 +801,100 @@ func (s *Store) ToolSummary(sessionID string) (SessionToolSummary, bool) {
 		slowest = slowest[:5]
 	}
 	return SessionToolSummary{Tools: tools, Slowest: slowest}, true
+}
+
+// toolAggregate is one tool's running statistics. durations are kept whole
+// rather than summarised, because the percentiles are exact and eight bytes a
+// call is nothing beside the frame it came from.
+type toolAggregate struct {
+	stats     ToolStats
+	durations []time.Duration
+}
+
+// toolStats accumulates the calls a bounded store has already dropped the frames
+// for. An unbounded store never writes to it, so its summary is built exactly as
+// it always was.
+type toolStats struct {
+	byName    map[string]*toolAggregate
+	slowest   []SlowToolCall
+	callIndex int
+}
+
+func (t toolStats) clone() (map[string]*toolAggregate, []SlowToolCall, int) {
+	byName := make(map[string]*toolAggregate, len(t.byName))
+	for name, agg := range t.byName {
+		byName[name] = &toolAggregate{stats: agg.stats, durations: slices.Clone(agg.durations)}
+	}
+	return byName, slices.Clone(t.slowest), t.callIndex
+}
+
+// fold adds one call to the accumulator, through the same arithmetic the summary
+// uses, so a released call counts exactly as it would have while it was held.
+func (t *toolStats) fold(ev *event) {
+	if t.byName == nil {
+		t.byName = make(map[string]*toolAggregate)
+	}
+	foldToolCall(t.byName, &t.slowest, &t.callIndex, ev)
+	if len(t.slowest) > slowestKept {
+		slices.SortStableFunc(t.slowest, func(a, b SlowToolCall) int {
+			if c := cmp.Compare(b.Duration, a.Duration); c != 0 {
+				return c
+			}
+			return a.Start.Compare(b.Start)
+		})
+		t.slowest = t.slowest[:slowestKept]
+	}
+}
+
+// slowestKept is how many slow calls survive in the accumulator. The summary
+// shows five, and keeping only those five would be wrong the moment a sixth
+// released call was slower than one already dropped, so a margin is held.
+const slowestKept = 64
+
+// foldToolCall is the one place a call turns into statistics. ToolSummary walks
+// the frames it still holds through it and a bounded store walks the frames it
+// is about to drop through it, so the two can never drift.
+func foldToolCall(byName map[string]*toolAggregate, slowest *[]SlowToolCall, callIndex *int, ev *event) {
+	// Skipping a continuation matters twice over: it would count one logical
+	// operation as several calls, and feed the same duration into the percentiles
+	// once per round trip.
+	if ev.kind != EventRequest || ev.call == nil || ev.mrtrRoot != "" {
+		return
+	}
+	c := ev.call
+	index := *callIndex
+	*callIndex++
+	if !c.isTool {
+		return
+	}
+	agg := byName[c.toolName]
+	if agg == nil {
+		agg = &toolAggregate{stats: ToolStats{Name: c.toolName}}
+		byName[c.toolName] = agg
+	}
+	agg.stats.Calls++
+	if c.state == Pending {
+		agg.stats.Pending++
+		return
+	}
+	if c.state == Superseded || (c.state == Cancelled && !c.lateResult) {
+		return
+	}
+	if c.errored {
+		agg.stats.Errors++
+	}
+	// max, not len, so a result whose bytes a bounded store released still counts
+	// what it cost. This figure is the whole point of the cost panel.
+	if n := max(len(c.result), c.releasedResultBytes); n > 0 {
+		agg.stats.ResultBytes += int64(n)
+		agg.stats.MaxResultBytes = max(agg.stats.MaxResultBytes, n)
+	}
+	duration := c.end.Sub(c.start)
+	agg.durations = append(agg.durations, duration)
+	*slowest = append(*slowest, SlowToolCall{
+		CallIndex: index, ID: c.id, ToolName: c.toolName,
+		Duration: duration, Failed: c.errored, Start: c.start,
+	})
 }
 
 func nearestRank(sorted []time.Duration, percentile float64) time.Duration {

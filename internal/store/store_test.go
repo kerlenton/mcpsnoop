@@ -3,6 +3,8 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2461,5 +2463,269 @@ func TestPercentilesSkipCallsThatNeverAnswered(t *testing.T) {
 		if slow.Duration < 0 {
 			t.Fatalf("slowest calls carry a negative duration: %+v", slow)
 		}
+	}
+}
+
+// TestBoundedStoreReleasesOldBodiesAndKeepsEveryCount. A hub left watching a
+// chatty server grew until it was killed, because nothing bounded what the store
+// kept and every event held the full observed frame. The bound is on bytes, not
+// on history: every frame keeps its row and its verdict, and only the bodies of
+// the oldest ones go.
+func TestBoundedStoreReleasesOldBodiesAndKeepsEveryCount(t *testing.T) {
+	const pairs = 200
+	const limit = 8 << 10
+
+	t0 := time.Now() // shared, so the two headers differ only if a count does
+	build := func(s *Store) *Store {
+		big := strings.Repeat("x", 512)
+		for i := range pairs {
+			id := strconv.Itoa(i + 1)
+			s.Ingest(req(uint64(2*i+1), t0, proxy.ClientToServer, id, "tools/call",
+				`{"name":"echo","arguments":{"text":"`+big+`"}}`))
+			s.Ingest(resp(uint64(2*i+2), t0, proxy.ServerToClient, id,
+				`"result":{"content":[{"type":"text","text":"`+big+`"}]}`))
+		}
+		return s
+	}
+	held := func(s *Store) int {
+		n := 0
+		for _, sess := range s.sessions {
+			for _, ev := range sess.events {
+				n += len(ev.raw) + len(ev.text)
+			}
+			for _, c := range sess.calls {
+				n += len(c.params) + len(c.result)
+			}
+		}
+		return n
+	}
+
+	full, bounded := build(New()), build(NewBounded(limit, 0))
+
+	if held(bounded) > limit {
+		t.Fatalf("bounded store holds %d bytes of bodies, over its %d budget", held(bounded), limit)
+	}
+	if held(full) <= limit {
+		t.Fatalf("the fixture does not exceed the budget, so it proves nothing: %d bytes", held(full))
+	}
+
+	// Nothing a reader counts may move. The frames, the calls, the session
+	// counters and the context-cost figures all have to match the unbounded store
+	// exactly, or a bound has quietly turned into an under-report.
+	a, b := full.Timeline("s1"), bounded.Timeline("s1")
+	if len(a) != len(b) {
+		t.Fatalf("frames = %d bounded against %d unbounded", len(b), len(a))
+	}
+	if len(full.Calls("s1")) != len(bounded.Calls("s1")) {
+		t.Fatalf("calls = %d bounded against %d unbounded", len(bounded.Calls("s1")), len(full.Calls("s1")))
+	}
+	if got, want := bounded.Sessions()[0], full.Sessions()[0]; got != want {
+		t.Fatalf("session header differs:\n%+v\n%+v", got, want)
+	}
+	fullSum, _ := full.ToolSummary("s1")
+	boundSum, _ := bounded.ToolSummary("s1")
+	if !reflect.DeepEqual(fullSum.Tools, boundSum.Tools) {
+		t.Fatalf("tool statistics differ once bodies were released:\n%+v\n%+v", boundSum.Tools, fullSum.Tools)
+	}
+
+	// The oldest frames say their body is gone rather than reading as a server
+	// that sent nothing, and the newest still carry theirs.
+	released := 0
+	for _, e := range b {
+		if e.BodyReleased {
+			released++
+			if len(e.Raw) != 0 || e.Text != "" {
+				t.Fatal("a frame marked released still holds its body")
+			}
+		}
+	}
+	if released == 0 {
+		t.Fatal("nothing was released, so the budget was never enforced")
+	}
+	if b[len(b)-1].BodyReleased {
+		t.Fatal("the newest frame lost its body, so eviction is not oldest-first")
+	}
+}
+
+// TestUnboundedStoreIsWhatCheckAndExportBuild. check reads a finite log once and
+// gates on what it finds, so a bound there would make it under-report on a large
+// capture, which is the one thing a gate must never do.
+func TestUnboundedStoreIsWhatCheckAndExportBuild(t *testing.T) {
+	s := New()
+	t0 := time.Now()
+	big := strings.Repeat("y", 4096)
+	for i := range 50 {
+		id := strconv.Itoa(i + 1)
+		s.Ingest(req(uint64(2*i+1), t0, proxy.ClientToServer, id, "tools/call", `{"name":"echo","arguments":{"t":"`+big+`"}}`))
+		s.Ingest(resp(uint64(2*i+2), t0, proxy.ServerToClient, id, `"result":{"content":[{"type":"text","text":"`+big+`"}]}`))
+	}
+	for _, e := range s.Timeline("s1") {
+		if e.BodyReleased {
+			t.Fatal("an unbounded store released a body")
+		}
+		if len(e.Raw) == 0 {
+			t.Fatal("an unbounded store dropped a frame's bytes")
+		}
+	}
+}
+
+// TestBoundedStoreAccountingStaysConsistent. The release walks a cursor per
+// session while one running total decides when to stop, so the two have to agree
+// or the loop either stops early and the budget is a lie, or runs off the end of
+// a timeline. A budget of one byte forces every frame through the path.
+func TestBoundedStoreAccountingStaysConsistent(t *testing.T) {
+	s := NewBounded(1, 0)
+	t0 := time.Now()
+	body := strings.Repeat("z", 256)
+
+	// Two sessions interleaved, since release is oldest-first across the store
+	// rather than within one session, and a hub carries many at once.
+	for i := range 40 {
+		id := strconv.Itoa(i + 1)
+		for _, sid := range []string{"s1", "s2"} {
+			r := req(uint64(2*i+1), t0.Add(time.Duration(i)*time.Millisecond), proxy.ClientToServer, id, "tools/call",
+				`{"name":"echo","arguments":{"t":"`+body+`"}}`)
+			r.SessionID = sid
+			s.Ingest(r)
+			p := resp(uint64(2*i+2), t0.Add(time.Duration(i)*time.Millisecond), proxy.ServerToClient, id,
+				`"result":{"content":[{"type":"text","text":"`+body+`"}]}`)
+			p.SessionID = sid
+			s.Ingest(p)
+		}
+	}
+
+	// Everything but the newest frame is releasable, so the total must come down
+	// to what that one frame weighs and no further.
+	if s.payloadBytes < 0 {
+		t.Fatalf("the running total went negative at %d, so a frame was released twice", s.payloadBytes)
+	}
+	var held int
+	for _, sess := range s.sessions {
+		if sess.evictCursor > len(sess.events) {
+			t.Fatalf("cursor %d is past the %d frames it indexes", sess.evictCursor, len(sess.events))
+		}
+		for _, ev := range sess.events {
+			held += bodyWeight(ev)
+		}
+		if sess.bodyBytes < 0 {
+			t.Fatalf("session total went negative at %d", sess.bodyBytes)
+		}
+	}
+	if held != s.payloadBytes {
+		t.Fatalf("the store says %d bytes are held, the frames hold %d", s.payloadBytes, held)
+	}
+	for _, sid := range []string{"s1", "s2"} {
+		if got := len(s.Timeline(sid)); got != 80 {
+			t.Fatalf("%s has %d frames, want every one of them kept", sid, got)
+		}
+	}
+}
+
+// TestBoundedStoreDropsOldFramesAndKeepsTheToolStatistics. Releasing bodies
+// bounds the bytes but not the count, and a frame whose body is gone still costs
+// its own struct, so a chatty stream of small notifications grew without ever
+// reaching the byte budget. The oldest frames go entirely past a frame limit,
+// and what they said about a tool call is folded into the running statistics
+// first, or the tool summary would quietly describe only recent calls.
+func TestBoundedStoreDropsOldFramesAndKeepsTheToolStatistics(t *testing.T) {
+	const pairs = 300
+	const keepFrames = 100
+
+	t0 := time.Now() // shared, so the two summaries differ only if a figure does
+	build := func(s *Store) *Store {
+		for i := range pairs {
+			id := strconv.Itoa(i + 1)
+			ts := t0.Add(time.Duration(i) * time.Millisecond)
+			s.Ingest(req(uint64(2*i+1), ts, proxy.ClientToServer, id, "tools/call", `{"name":"echo","arguments":{"i":`+id+`}}`))
+			s.Ingest(resp(uint64(2*i+2), ts.Add(time.Millisecond), proxy.ServerToClient, id, `"result":{"content":[{"type":"text","text":"ok"}]}`))
+		}
+		return s
+	}
+
+	full := build(New())
+	bounded := build(NewBounded(0, keepFrames))
+
+	if got := len(bounded.Timeline("s1")); got != keepFrames {
+		t.Fatalf("timeline holds %d frames, want the %d cap", got, keepFrames)
+	}
+	if got := len(full.Timeline("s1")); got != 2*pairs {
+		t.Fatalf("the unbounded store dropped frames: %d", got)
+	}
+
+	// The statistics are the whole point. Every call the session made has to be in
+	// them, whether or not its frames are still held.
+	fullSum, _ := full.ToolSummary("s1")
+	boundSum, _ := bounded.ToolSummary("s1")
+	if !reflect.DeepEqual(fullSum.Tools, boundSum.Tools) {
+		t.Fatalf("tool statistics shrank with the timeline:\n bounded %+v\n full    %+v", boundSum.Tools, fullSum.Tools)
+	}
+	if len(boundSum.Tools) == 0 || boundSum.Tools[0].Calls != pairs {
+		t.Fatalf("the summary counts %+v, want all %d calls", boundSum.Tools, pairs)
+	}
+	if !reflect.DeepEqual(fullSum.Slowest, boundSum.Slowest) {
+		t.Fatalf("the slowest calls differ:\n bounded %+v\n full    %+v", boundSum.Slowest, fullSum.Slowest)
+	}
+
+	// The session counters come from the ingest path, not from the timeline, so
+	// dropping frames must not move them either.
+	if got, want := bounded.Sessions()[0].Requests, full.Sessions()[0].Requests; got != want {
+		t.Fatalf("requests = %d bounded against %d unbounded", got, want)
+	}
+
+	// A settled call nothing points at any more is not left in the map.
+	sess := bounded.sessions["s1"]
+	if len(sess.calls) > keepFrames {
+		t.Fatalf("%d calls retained for %d frames, so the map grows unbounded too", len(sess.calls), keepFrames)
+	}
+}
+
+// TestBothBoundsHoldTogether. The two bounds move the same timeline from both
+// ends, the body release walking a cursor forward and the frame cap removing
+// entries from the front, so the cursor has to be rebased as the slice shifts or
+// it points at a frame that has already moved. This drives both at once and
+// checks the accounting still describes the frames that are actually there.
+func TestBothBoundsHoldTogether(t *testing.T) {
+	s := NewBounded(4<<10, 60)
+	t0 := time.Now()
+	body := strings.Repeat("q", 400)
+
+	for i := range 300 {
+		id := strconv.Itoa(i + 1)
+		ts := t0.Add(time.Duration(i) * time.Millisecond)
+		s.Ingest(req(uint64(2*i+1), ts, proxy.ClientToServer, id, "tools/call",
+			`{"name":"echo","arguments":{"t":"`+body+`"}}`))
+		s.Ingest(resp(uint64(2*i+2), ts.Add(time.Millisecond), proxy.ServerToClient, id,
+			`"result":{"content":[{"type":"text","text":"`+body+`"}]}`))
+
+		sess := s.sessions["s1"]
+		if sess.evictCursor > len(sess.events) {
+			t.Fatalf("after %d pairs the cursor is %d against %d frames", i, sess.evictCursor, len(sess.events))
+		}
+		held := 0
+		for _, ev := range sess.events {
+			held += bodyWeight(ev)
+		}
+		if held != s.payloadBytes {
+			t.Fatalf("after %d pairs the store says %d bytes, the frames hold %d", i, s.payloadBytes, held)
+		}
+		// Everything before the cursor has already given up its body, or the cursor
+		// is not describing what it claims to.
+		for j := range sess.evictCursor {
+			if len(sess.events[j].raw) != 0 {
+				t.Fatalf("frame %d is behind the cursor and still holds its body", j)
+			}
+		}
+	}
+
+	if got := len(s.Timeline("s1")); got != 60 {
+		t.Fatalf("timeline holds %d frames, want the 60 cap", got)
+	}
+	if s.payloadBytes > 4<<10 {
+		t.Fatalf("bodies weigh %d, over the 4 KiB budget", s.payloadBytes)
+	}
+	// Every call still reaches the summary, whichever bound removed its frames.
+	sum, _ := s.ToolSummary("s1")
+	if len(sum.Tools) != 1 || sum.Tools[0].Calls != 300 {
+		t.Fatalf("summary = %+v, want all 300 calls", sum.Tools)
 	}
 }

@@ -24,10 +24,20 @@ func Run(ctx context.Context, socketPath, sessionsDir string) error {
 	return RunWithHistoryLimit(ctx, socketPath, sessionsDir, hub.DefaultBackfillLimit)
 }
 
+// liveStore is the store the live TUI runs on. It is bounded, unlike the one
+// check, export, diff and open build, because a hub is left running while a
+// batch command reads a finite log once and has to see all of it.
+//
+// Split out from Run so the choice is a value a test can read rather than a
+// literal inside a call no test can reach.
+func liveStore() *store.Store {
+	return store.NewBounded(store.DefaultLiveBodyLimit, store.DefaultLiveFrameLimit)
+}
+
 // RunWithHistoryLimit starts the live TUI with a bounded history replay.
 // A historyLimit of 0 loads every session log.
 func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, historyLimit int) error {
-	st := store.New()
+	st := liveStore()
 	baselines := toolbaseline.New(paths.ToolBaselinesDir())
 	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx))
 

@@ -157,9 +157,13 @@ type call struct {
 	// covers a cancelled task, work the user stopped on purpose that delivered no
 	// result but is not an error. One place (completeCall, applyParsedTaskState)
 	// decides this so every consumer reads the same answer.
-	errored    bool
-	taskID     string
-	taskStatus string
+	errored bool
+	// releasedResultBytes is how big the result was when a bounded store dropped
+	// it, so the context-cost figures the tool summary reports stay exact rather
+	// than reading zero once the bytes are gone.
+	releasedResultBytes int
+	taskID              string
+	taskStatus          string
 	// opName is the tool, prompt or resource this call names, kept so a retry can
 	// be matched back to it without re-parsing the original params.
 	opName string
@@ -219,6 +223,10 @@ type event struct {
 	// a task failure is counted on its terminal frame rather than on the call's
 	// first response, so call.errored alone cannot stand in for this.
 	errored bool
+	// bodyReleased is set when a bounded store dropped this frame's observed body
+	// to stay inside its budget. The frame keeps everything else, so it is still a
+	// row in the stream with its own verdict, and only its bytes are gone.
+	bodyReleased bool
 	// lateResult marks the frame this session counted a late result on, the same
 	// way errored marks a counted error. call.lateResult stays true for the rest
 	// of the capture and is visible from the request frame too, so it cannot
@@ -279,7 +287,16 @@ type session struct {
 	command []string
 	cwd     string
 	calls   map[callKey]*call
-	tasks   map[string]*call
+	// evictCursor is how far a bounded store's release has reached in this
+	// session's timeline, and bodyBytes is what the frames from there on weigh.
+	evictCursor int
+	bodyBytes   int
+	// dropped counts the frames a bounded store has removed from this timeline
+	// entirely, and toolStats holds the statistics of the calls they carried, so
+	// the summary still describes every call the session made.
+	dropped   int
+	toolStats toolStats
+	tasks     map[string]*call
 	// awaiting holds operations that answered with an InputRequiredResult and are
 	// waiting for the client to retry. It stays tiny, only in-flight ones live here.
 	awaiting []*call
@@ -316,14 +333,79 @@ type Store struct {
 	mu       sync.RWMutex
 	sessions map[string]*session
 	order    []string // session ids in first-seen order
+	// payloadLimit caps the observed bodies a live store keeps in memory, zero
+	// for no cap, and payloadBytes is what those bodies currently weigh.
+	//
+	// The frames themselves are the queue. Each session carries a cursor into its
+	// own timeline marking how far the release has reached, so a capture that
+	// never approaches the budget pays nothing for the mechanism.
+	payloadLimit int
+	payloadBytes int
+	// frameLimit caps how many frames a live store keeps at all, and frames is
+	// how many it currently holds. A frame with its body released still costs its
+	// own struct, so the bytes budget alone does not bound a chatty session of
+	// small frames.
+	frameLimit int
+	frames     int
+	// bounded separates a live store from the batch one. Either limit may be left
+	// unset on its own, so the flag rather than a zero limit is what says whether
+	// this store forgets at all.
+	bounded bool
 }
 
-// New returns an empty store.
+// New returns an empty store that keeps every observed body.
+//
+// This is the batch store, the one check, export, diff and open build. They read
+// a finite log once and every byte of it has to be there, since a bounded store
+// would make check under-report on a large capture, which is the one thing a
+// gate must never do.
 func New() *Store {
 	return &Store{
 		sessions: make(map[string]*session),
 	}
 }
+
+// DefaultLiveBodyLimit is how many bytes of observed bodies the live TUI keeps.
+//
+// It is a memory bound, not a history bound: every frame stays in the timeline
+// whatever this is set to, and only the bodies of the oldest ones are dropped.
+// 64 MiB is a few tens of thousands of ordinary frames, far more than anyone
+// scrolls back through, while a day-long capture of a chatty server used to
+// reach that in minutes and keep going.
+const DefaultLiveBodyLimit = 64 << 20
+
+// DefaultLiveFrameLimit is how many frames the live TUI keeps at all.
+//
+// Bodies are the bulk of a large-payload capture and this is the other half: a
+// frame whose body is gone still costs its own struct, so a chatty stream of
+// small notifications grew without ever reaching the byte budget. 200,000 is a
+// long scrollback and about 80 MiB of frames, and the log on disk still holds
+// everything past it.
+const DefaultLiveFrameLimit = 200_000
+
+// NewBounded returns a store that keeps at most limit bytes of observed bodies,
+// releasing the oldest first. A limit of zero behaves like New.
+//
+// Only the live TUI builds one. A hub left watching a chatty server grows until
+// it is killed, because nothing bounded what the store kept, and every frame is
+// already durable on disk. What is released is the body alone: the frame stays
+// in the timeline with its sequence, direction, method, status and warning, so
+// every count, every row and the whole tool summary stay exact and only the
+// inspector for an old frame has less to show. mcpsnoop open on the log is
+// still the way to see all of it.
+func NewBounded(bodyBytes, frames int) *Store {
+	s := New()
+	s.bounded = true
+	s.payloadLimit = bodyBytes
+	s.frameLimit = frames
+	return s
+}
+
+// BodyLimit reports the byte budget this store keeps observed bodies within,
+// zero when it keeps every one. It exists so the choice between the bounded live
+// store and the unbounded batch store is readable from outside the package,
+// which is the difference between check being exact and check under-reporting.
+func (s *Store) BodyLimit() int { return s.payloadLimit }
 
 // Delete drops a session from the store. A still-live shim will recreate it on
 // its next frame. Callers that want it gone for good should also delete its log.
@@ -374,7 +456,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 
 	if e.Direction == proxy.ServerStderr {
 		ev.kind = EventStderr
-		sess.events = append(sess.events, ev)
+		s.appendEvent(sess, ev)
 		return ev.view(sess)
 	}
 
@@ -393,7 +475,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			// traffic was correct in both directions.
 			sess.truncatedRequests++
 		}
-		sess.events = append(sess.events, ev)
+		s.appendEvent(sess, ev)
 		return ev.view(sess)
 	}
 
@@ -407,7 +489,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			sess.errors++
 			ev.errored = true
 		}
-		sess.events = append(sess.events, ev)
+		s.appendEvent(sess, ev)
 		return ev.view(sess)
 	}
 
@@ -809,8 +891,152 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.mismatch = true
 	}
 
-	sess.events = append(sess.events, ev)
+	s.appendEvent(sess, ev)
 	return ev.view(sess)
+}
+
+// appendEvent records a frame and, on a bounded store, releases the oldest
+// bodies until the budget is met. Caller holds the write lock.
+//
+// Every branch of Ingest goes through here rather than appending directly, so a
+// branch added later cannot quietly opt out of the bound.
+func (s *Store) appendEvent(sess *session, ev *event) {
+	sess.events = append(sess.events, ev)
+	if !s.bounded {
+		return
+	}
+	n := bodyWeight(ev)
+	sess.bodyBytes += n
+	s.payloadBytes += n
+	s.frames++
+	for s.payloadLimit > 0 && s.payloadBytes > s.payloadLimit {
+		oldest := s.oldestRetained()
+		if oldest == nil {
+			break // nothing left to release, which the budget cannot fix
+		}
+		released := oldest.releaseOldestBody()
+		oldest.bodyBytes -= released
+		s.payloadBytes -= released
+	}
+	// Releasing bodies bounds the bytes but not the count, and a frame with no
+	// body still costs its own struct. A day of small notifications reached
+	// hundreds of megabytes of those alone, so the oldest frames go entirely once
+	// there are too many of them.
+	for s.frameLimit > 0 && s.frames > s.frameLimit {
+		oldest := s.oldestSession()
+		if oldest == nil {
+			break
+		}
+		oldest.dropOldestFrame()
+		s.frames--
+	}
+}
+
+// oldestSession returns the session holding the oldest frame in the store, so
+// frames go in arrival order across every session a hub carries.
+func (s *Store) oldestSession() *session {
+	var pick *session
+	for _, id := range s.order {
+		sess := s.sessions[id]
+		if sess == nil || len(sess.events) == 0 {
+			continue
+		}
+		if pick == nil || sess.events[0].ts.Before(pick.events[0].ts) {
+			pick = sess
+		}
+	}
+	return pick
+}
+
+// dropOldestFrame removes this session's oldest frame from the timeline, after
+// folding whatever it says about a tool call into the running statistics. The
+// call itself goes with it when nothing else refers to it, since a settled call
+// that no frame points at is only holding memory.
+func (sess *session) dropOldestFrame() {
+	ev := sess.events[0]
+	sess.toolStats.fold(ev)
+	sess.bodyBytes -= bodyWeight(ev)
+	sess.events[0] = nil // do not pin the frame through the slice's own array
+	sess.events = sess.events[1:]
+	sess.dropped++
+	if sess.evictCursor > 0 {
+		sess.evictCursor--
+	}
+	if ev.call != nil && ev.call.state != Pending && ev.call.state != Streaming {
+		for key, c := range sess.calls {
+			if c == ev.call {
+				delete(sess.calls, key)
+			}
+		}
+	}
+}
+
+// oldestRetained returns the session whose next unreleased frame is the oldest
+// in the store, so release is oldest-first across every session a hub carries
+// rather than per session. A hub holds a handful of sessions, so the scan is
+// cheaper than keeping a second index of every frame in the store.
+func (s *Store) oldestRetained() *session {
+	var pick *session
+	for _, id := range s.order {
+		sess := s.sessions[id]
+		if sess == nil || sess.evictCursor >= len(sess.events) {
+			continue
+		}
+		if pick == nil || sess.events[sess.evictCursor].ts.Before(pick.events[pick.evictCursor].ts) {
+			pick = sess
+		}
+	}
+	return pick
+}
+
+// releaseOldestBody drops the body of this session's oldest frame that still has
+// one and returns the bytes freed. Frames that never carried a body are stepped
+// over, so the cursor only ever moves forward.
+func (sess *session) releaseOldestBody() int {
+	for sess.evictCursor < len(sess.events) {
+		ev := sess.events[sess.evictCursor]
+		sess.evictCursor++
+		if n := bodyWeight(ev); n > 0 {
+			releaseBody(ev)
+			return n
+		}
+	}
+	return 0
+}
+
+// bodyWeight is what a frame's observed bytes cost, the frame's own copy plus
+// the call's. json.Unmarshal copies rather than aliasing, so a request holds its
+// params twice over and releasing one half frees nothing.
+func bodyWeight(ev *event) int {
+	n := len(ev.raw) + len(ev.text)
+	if ev.call == nil {
+		return n
+	}
+	switch ev.kind {
+	case EventRequest:
+		n += len(ev.call.params)
+	case EventResponse:
+		n += len(ev.call.result)
+	}
+	return n
+}
+
+// releaseBody drops a frame's observed body and the call's copy of the same
+// bytes. The result size is remembered first, because the tool summary measures
+// what a server costs in context from it and that figure must not shrink just
+// because the bytes are no longer held.
+func releaseBody(ev *event) {
+	ev.raw, ev.text, ev.bodyReleased = nil, "", true
+	if ev.call == nil {
+		return
+	}
+	switch ev.kind {
+	case EventRequest:
+		ev.call.params = nil
+	case EventResponse:
+		ev.call.releasedResultBytes = len(ev.call.result)
+		ev.call.result = nil
+	}
 }
 
 // sessionFor returns (creating if needed) the session for an envelope and bumps

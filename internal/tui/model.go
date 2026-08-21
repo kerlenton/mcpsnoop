@@ -779,6 +779,11 @@ func (m Model) canReplay() bool {
 	if !ok || ev.Call == nil || ev.Kind != store.EventRequest {
 		return false
 	}
+	// A frame whose body the live store released has no params left to send.
+	// Replaying it would quietly send a different request from the one on screen.
+	if ev.BodyReleased {
+		return false
+	}
 	return m.sessionReplayable()
 }
 
@@ -798,6 +803,10 @@ func (m *Model) startReplay() tea.Cmd {
 	}
 	if ev.Call == nil || ev.Kind != store.EventRequest {
 		m.setFlash("replay needs a request frame")
+		return nil
+	}
+	if ev.BodyReleased {
+		m.setFlash("this frame's body was released to stay inside the live memory budget; reopen the session log to replay it")
 		return nil
 	}
 	return m.runReplay(*ev.Call, ev.Call.Params, false)
@@ -829,6 +838,10 @@ func (m *Model) startEditReplay() tea.Cmd {
 		ev, ok := m.focusedFrame()
 		if !ok || ev.Call == nil || ev.Kind != store.EventRequest {
 			m.setFlash("edit replay needs a request frame")
+			return nil
+		}
+		if ev.BodyReleased {
+			m.setFlash("this frame's body was released to stay inside the live memory budget; reopen the session log to edit it")
 			return nil
 		}
 		call = *ev.Call
@@ -1365,6 +1378,37 @@ func (m *Model) copyCurrent() {
 }
 
 // exportCurrent writes the selected/open session to a portable file.
+// exportData builds the export for a session. The live store releases the bodies
+// of old frames to stay inside its memory budget, so building from it would
+// write an artifact whose oldest frames have no payload and say nothing about
+// it. The log on disk is complete, so a bounded store exports from that instead
+// and only falls back to memory when no log can be read, which is the one case
+// where the store really is all there is.
+func (m *Model) exportData(id string) (exporter.SessionExport, error) {
+	if m.store.BodyLimit() > 0 {
+		if path, err := exporter.ResolveSessionPath(id); err == nil {
+			if st, sid, err := exporter.LoadFile(path); err == nil {
+				return exporter.Build(st, sid)
+			}
+		}
+		if m.anyBodyReleased(id) {
+			return exporter.SessionExport{}, fmt.Errorf("this session's oldest frames are no longer held in memory and its log could not be read, so an export would be missing them")
+		}
+	}
+	return exporter.Build(m.store, id)
+}
+
+// anyBodyReleased reports whether the budget has actually dropped anything for
+// this session yet. Under the budget there is nothing to warn about.
+func (m Model) anyBodyReleased(id string) bool {
+	for _, e := range m.store.Timeline(id) {
+		if e.BodyReleased {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Model) exportCurrent(formatArg, outPath string) {
 	id := m.currentSessionID()
 	if id == "" {
@@ -1379,7 +1423,7 @@ func (m *Model) exportCurrent(formatArg, outPath string) {
 			return
 		}
 	}
-	data, err := exporter.Build(m.store, id)
+	data, err := m.exportData(id)
 	if err != nil {
 		m.setFlash("export failed: " + err.Error())
 		return

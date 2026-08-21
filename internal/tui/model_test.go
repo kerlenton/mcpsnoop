@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2128,5 +2129,139 @@ func TestAnAbandonedReplayResultIsNotAdoptedByTheNextOne(t *testing.T) {
 	}
 	if !strings.Contains(ansi.Strip(m.overlayRaw), "live") {
 		t.Fatalf("the overlay shows the wrong run:\n%s", ansi.Strip(m.overlayRaw))
+	}
+}
+
+// TestReplayRefusesAFrameWhoseBodyWasReleased. The live store drops the bodies
+// of old frames to stay inside its memory budget, and a request with no params
+// left would replay as {}, quietly sending a different request from the one the
+// row on screen describes.
+func TestReplayRefusesAFrameWhoseBodyWasReleased(t *testing.T) {
+	st := store.New()
+	meta, _ := json.Marshal(proxy.SessionMeta{Command: []string{"true"}, CWD: "/tmp"})
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 0, TS: time.Now(), Direction: proxy.DirectionMeta, Raw: meta})
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = typeRunes(t, m, "x") // onto the request
+
+	if !m.canReplay() {
+		t.Fatal("the fixture must be replayable before the body goes, or this proves nothing")
+	}
+	for i := range m.full {
+		m.full[i].BodyReleased = true
+	}
+	if m.canReplay() {
+		t.Fatal("replay is still offered for a frame with no params left to send")
+	}
+
+	m = typeRunes(t, m, "r")
+	if m.replaying {
+		t.Fatal("r replayed a frame whose params are gone")
+	}
+	if !strings.Contains(m.flash, "released") {
+		t.Fatalf("r must say why it refused, flash = %q", m.flash)
+	}
+	m = typeRunes(t, m, "R")
+	if !strings.Contains(m.flash, "released") {
+		t.Fatalf("R must say why it refused, flash = %q", m.flash)
+	}
+}
+
+// TestExportFromABoundedStoreReadsTheLog. The live store releases the bodies of
+// old frames, so building an export from it writes an artifact whose oldest
+// frames have no payload and says nothing about it. The log on disk is complete,
+// so that is what a bounded store exports.
+func TestExportFromABoundedStoreReadsTheLog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MCPSNOOP_HOME", home)
+	sessions := filepath.Join(home, "sessions")
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// One frame carrying a payload, written to the log the way the hub writes it,
+	// and fed to a store so tight that its body is released immediately.
+	const secret = "PAYLOAD-ONLY-IN-THE-LOG"
+	env := proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: time.Now(), Direction: proxy.ClientToServer,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"t":"` + secret + `"}}}`),
+	}
+	line, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessions, "s1.jsonl"), append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := store.NewBounded(1, 0)
+	st.Ingest(env)
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 2, TS: time.Now(),
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{}}`)})
+	m := ready(t, st)
+	if !m.anyBodyReleased("s1") {
+		t.Fatal("the fixture must release a body, or this proves nothing")
+	}
+
+	data, err := m.exportData("s1")
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), secret) {
+		t.Fatal("the export was built from the bounded store, so the released payload is missing from it")
+	}
+}
+
+// TestExportRefusesRatherThanWriteATruncatedArtifact. When the bodies are gone
+// and the log cannot be read there is nothing complete to export, and writing
+// the remains under the usual success message would be the quiet lie.
+func TestExportRefusesRatherThanWriteATruncatedArtifact(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir()) // no log for this session
+	st := store.NewBounded(1, 0)
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"t":"aaaaaaaaaa"}}}`)})
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 2, TS: time.Now(),
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{}}`)})
+
+	m := ready(t, st)
+	if _, err := m.exportData("s1"); err == nil {
+		t.Fatal("an export missing its oldest frames was written without a word")
+	}
+}
+
+// TestStreamSaysWhenOlderFramesAreOnlyOnDisk. The memory budget removes the
+// oldest frames from the timeline, so the top of the stream stops being the
+// start of the session. Saying nothing would let a reader believe they were
+// looking at the whole thing.
+func TestStreamSaysWhenOlderFramesAreOnlyOnDisk(t *testing.T) {
+	st := store.NewBounded(0, 4)
+	now := time.Now()
+	for i := range 20 {
+		st.Ingest(proxy.Envelope{
+			SessionID: "s1", ServerLabel: "demo", Seq: uint64(i + 1),
+			TS: now.Add(time.Duration(i) * time.Millisecond), Direction: proxy.ClientToServer,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":` + strconv.Itoa(i) + `}}`),
+		})
+	}
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+
+	if got := m.currentDroppedFrames(); got != 16 {
+		t.Fatalf("dropped = %d, want the 16 frames past the cap", got)
+	}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "16 older on disk") {
+		t.Fatalf("the stream does not say frames were dropped:\n%s", view)
+	}
+	// It is not the same thing as a gap in the capture, which means bytes nobody
+	// ever saw, so it must not borrow that word.
+	if strings.Contains(view, "16 missing") {
+		t.Fatalf("dropped frames are being reported as a hole in the capture:\n%s", view)
 	}
 }
