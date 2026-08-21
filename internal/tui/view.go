@@ -1540,7 +1540,17 @@ func (m Model) summaryContent() string {
 		tools = append(tools, store.ToolStats{Name: name})
 	}
 	slices.SortStableFunc(tools, func(a, b store.ToolStats) int {
-		if ae, be := a.Errors > 0, b.Errors > 0; ae != be {
+		// Protocol errors outrank tool errors rather than sharing one bucket with
+		// them. A tool that answers isError is reporting a domain outcome, so a
+		// search that legitimately finds nothing used to sort above a server that
+		// is actually broken.
+		if ae, be := a.ProtocolErrors > 0, b.ProtocolErrors > 0; ae != be {
+			if ae {
+				return -1
+			}
+			return 1
+		}
+		if ae, be := a.ToolErrors > 0, b.ToolErrors > 0; ae != be {
 			if ae {
 				return -1
 			}
@@ -1565,10 +1575,7 @@ func (m Model) summaryContent() string {
 		if tool.Calls == 0 {
 			base = m.styles.faint // an advertised-but-idle tool recedes until it is called
 		}
-		errCell := m.styles.faint.Render("·")
-		if tool.Errors > 0 {
-			errCell = m.styles.respErr.Render(fmt.Sprintf("%d", tool.Errors))
-		}
+		errCell := m.errCell(tool)
 		// LATENCY is the median (p50), a plain number the reader judges for
 		// themselves. A tool whose calls are all still in flight shows a live cyan
 		// spinner rather than a dash.
@@ -1615,6 +1622,15 @@ func (m Model) summaryContent() string {
 	// The worst single result is the per-call cost's tail, which a total hides:
 	// one 4 MiB answer among a hundred small ones reads as an unremarkable
 	// average until it is named.
+	// The ERR column's two colors only teach themselves once, so the line naming
+	// them appears exactly when there is a yellow number to explain. A session
+	// whose only errors are protocol errors reads the red count without help.
+	if proto, reported := errorSplit(summary.Tools); reported > 0 {
+		sections = append(sections, m.styles.dim.Render(cellL("errors", covLabelW))+
+			m.styles.respErr.Render(fmt.Sprintf("%d", proto))+m.styles.neutral.Render(" from the server, ")+
+			m.styles.warn.Render(fmt.Sprintf("%d", reported))+m.styles.neutral.Render(" reported by the tool itself with isError"))
+	}
+
 	if name, worst := heaviestResult(summary.Tools); worst > 0 {
 		sections = append(sections, m.styles.dim.Render(cellL("heaviest", covLabelW))+
 			m.styles.neutral.Render(fmt.Sprintf("%s returned %s in one result", name, formatBytes(int64(worst)))))
@@ -1629,6 +1645,45 @@ func (m Model) summaryContent() string {
 	}
 
 	return header + "\n\n" + strings.Join(sections, "\n\n")
+}
+
+// errCellPart is one styled piece of the ERR column. The column carries two
+// different findings, so the colour is part of the answer rather than decoration
+// and the pieces are decided separately from the string they render into.
+type errCellPart struct {
+	text  string
+	style lipgloss.Style
+}
+
+// errCellParts decides what the ERR column says about one tool. Red is a
+// protocol error, the server side being broken. Warn is result.isError, the tool
+// reporting that the search found nothing or the input failed validation, which
+// is the tool working. A tool with both shows them joined, red first, so the two
+// counts stay legible without a second column in a table that is already 70
+// cells wide before the panel border.
+func (m Model) errCellParts(tool store.ToolStats) []errCellPart {
+	var parts []errCellPart
+	if tool.ProtocolErrors > 0 {
+		parts = append(parts, errCellPart{fmt.Sprintf("%d", tool.ProtocolErrors), m.styles.respErr})
+	}
+	if tool.ProtocolErrors > 0 && tool.ToolErrors > 0 {
+		parts = append(parts, errCellPart{"+", m.styles.faint})
+	}
+	if tool.ToolErrors > 0 {
+		parts = append(parts, errCellPart{fmt.Sprintf("%d", tool.ToolErrors), m.styles.warn})
+	}
+	if len(parts) == 0 {
+		parts = append(parts, errCellPart{"·", m.styles.faint})
+	}
+	return parts
+}
+
+func (m Model) errCell(tool store.ToolStats) string {
+	var b strings.Builder
+	for _, part := range m.errCellParts(tool) {
+		b.WriteString(part.style.Render(part.text))
+	}
+	return b.String()
 }
 
 // schemaHeadlineOrder ranks findings for the single-label SCHEMA column. A
@@ -1798,6 +1853,16 @@ func (m Model) definitionCostLine(cost store.ToolListCost) string {
 }
 
 // heaviestResult names the tool with the largest single observed result.
+// errorSplit totals the two kinds of failure across a session's tools, so the
+// legend under the table can name them without recounting inside the renderer.
+func errorSplit(tools []store.ToolStats) (protocol, reported int) {
+	for _, t := range tools {
+		protocol += t.ProtocolErrors
+		reported += t.ToolErrors
+	}
+	return protocol, reported
+}
+
 func heaviestResult(tools []store.ToolStats) (string, int) {
 	name, worst := "", 0
 	for _, t := range tools {

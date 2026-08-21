@@ -722,6 +722,28 @@ mcpsnoop still changes nothing about the traffic it forwards.
 Nothing is resolved or fetched. An external `$ref` is recognized by its form
 alone, and the schema it points at is never read.
 
+### Tell a broken server from a tool that says no
+
+A tool answering `result.isError` is working. It looked and found nothing, or it
+rejected the input. A server answering a JSON-RPC error is broken. Both were one
+number in the tool summary, which meant a well-behaved tool that reports domain
+failures looked exactly like a broken server, and sorted above one.
+
+The `ERR` column separates them. Red is the server side, which is a JSON-RPC
+error or a task that ended failed without saying why. The warning color is the
+tool's own `isError`. A tool with both shows the counts joined, red first, and a
+line under the table names the two totals whenever there is a warn number to
+explain. The export carries the same split as `protocol_errors` and
+`tool_errors` beside the `errors` total they always add up to.
+
+`check --fail-on error` is unchanged and still fires on either, since a gate
+that ignored one of them would be a gate a server could switch off by returning
+the other.
+
+```bash
+mcpsnoop export -T json | jq '.summary.tools[] | {name, errors, protocol_errors, tool_errors}'
+```
+
 ### See what the server costs you in context
 
 Tool definitions enter the model's context on every conversation, and tool
@@ -787,6 +809,16 @@ One case is out of reach. When a server answers with a `requestState` and no
 `inputRequests`, a tampered retry matches nothing and answers no keys, so there
 is nothing left to tie it to the original request and it reads as an unrelated
 call rather than a violation.
+
+An abandoned exchange does not disturb the next one. MRTR tells servers they
+must not assume a client will ever retry, so a user declining an elicitation
+leaves an operation that no later frame will ever settle. mcpsnoop looks first
+among the operations whose `requestState` presence agrees with the retry's,
+which the spec makes a rule in both directions, so a conforming retry still
+finds the one operation it continues even when an abandoned exchange on the same
+tool is sitting beside it. The check that reports the three violations above
+runs only when nothing agrees, so a genuinely non-conforming retry is still
+named.
 
 ## Watching from another machine
 
@@ -866,6 +898,15 @@ the same key set is applied best effort to the wrapped server's command-line
 arguments, so `--api-key=sk-x` and `--token sk-x` are scrubbed under
 `--redact-secrets`. An argument that carries a secret without a recognizable flag
 name cannot be detected.
+
+The HTTP endpoint is not part of any of that, because it is not a payload you
+chose to send. `--target` is a flag you have to pass to run the proxy at all, so
+its URL would reach the session log whatever your redaction settings are.
+mcpsnoop writes it down with the userinfo, every query value and the fragment
+already removed, always, by construction rather than by pattern. Query keys
+survive, since they are what tells two endpoints of one host apart, and the
+fragment is dropped because it never reached the server to begin with. What is
+recorded identifies the server and is not an address to dial.
 
 Path-based redaction replaces only values selected by a JSONPath expression,
 which is useful when a common key name is sensitive in one location but safe in

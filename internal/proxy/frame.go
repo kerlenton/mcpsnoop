@@ -32,9 +32,23 @@ const (
 
 // SessionMeta describes a proxied session so it can be replayed later (even from
 // a backfilled log). It travels as the first envelope of a session.
+//
+// It grows by adding optional fields and never by changing what an existing one
+// means, because a reader of an old log has to keep working and a reader of a
+// new log has to survive an mcpsnoop that predates the field. Which fields a
+// session has is therefore what says how it was captured, not a version number.
 type SessionMeta struct {
+	// Command and CWD describe a stdio session, and are what a replay runs. Both
+	// are empty on HTTP, where mcpsnoop launched nothing.
 	Command []string `json:"command"`
 	CWD     string   `json:"cwd,omitempty"`
+	// Target is the MCP endpoint of an HTTP session, with userinfo, query values
+	// and the fragment removed by EndpointForLog. Empty on stdio, and empty on an
+	// HTTP log captured before mcpsnoop recorded it, which is the same absence a
+	// reader has to handle either way. It is not dialable and is not meant to be:
+	// it identifies the endpoint for a reader, and a replay that wants to reach it
+	// takes the address from the person running the replay.
+	Target string `json:"target,omitempty"`
 }
 
 // MCPParamHeader is one custom tool-parameter header observed on an HTTP

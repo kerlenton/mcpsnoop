@@ -1419,3 +1419,114 @@ func TestNewlineCounterDropsOffsetsItHasWalkedPast(t *testing.T) {
 		t.Fatalf("offsets = %d after walking %d lines, want only what is still ahead", got, lines)
 	}
 }
+
+// TestExportSaysWhatItCaptured checks that an exported document identifies its
+// own server. Two proxies pointed at two paths of one host share a default label,
+// so without the endpoint the two exports are indistinguishable.
+func TestExportSaysWhatItCaptured(t *testing.T) {
+	base := time.Unix(0, 0).UTC()
+	meta, err := json.Marshal(proxy.SessionMeta{Target: "https://api.example.com/tenant-a/mcp?key=[stripped]"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.New()
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "api.example.com", Seq: 1, TS: base, Direction: proxy.DirectionMeta, Transport: proxy.TransportHTTP, Raw: meta})
+	st.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "api.example.com", Seq: 2, TS: base.Add(time.Millisecond),
+		Direction: proxy.ClientToServer, Transport: proxy.TransportHTTP,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+	})
+
+	data, err := Build(st, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := data.Session.Endpoint, "https://api.example.com/tenant-a/mcp?key=[stripped]"; got != want {
+		t.Fatalf("Session.Endpoint = %q, want %q", got, want)
+	}
+	if got := data.Session.Transport; got != proxy.TransportHTTP {
+		t.Fatalf("Session.Transport = %q, want %q", got, proxy.TransportHTTP)
+	}
+
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatJSON}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"endpoint": "https://api.example.com/tenant-a/mcp?key=[stripped]"`) {
+		t.Fatalf("the JSON export does not name the endpoint:\n%s", buf.String())
+	}
+}
+
+// TestAStdioExportOmitsTheEndpointKey pins the omitempty rather than assuming it.
+// A stdio export that carries an empty endpoint invites a reader to conclude the
+// endpoint was unknown rather than inapplicable.
+func TestAStdioExportOmitsTheEndpointKey(t *testing.T) {
+	base := time.Unix(0, 0).UTC()
+	meta, err := json.Marshal(proxy.SessionMeta{Command: []string{"node", "server.js"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.New()
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: base, Direction: proxy.DirectionMeta, Transport: proxy.TransportStdio, Raw: meta})
+	st.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: base.Add(time.Millisecond),
+		Direction: proxy.ClientToServer, Transport: proxy.TransportStdio,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+	})
+
+	data, err := Build(st, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatJSON}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), `"endpoint"`) {
+		t.Fatalf("a stdio export carries an endpoint key:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"transport": "stdio"`) {
+		t.Fatalf("the export does not name the transport:\n%s", buf.String())
+	}
+}
+
+// TestExportSplitsTheTwoKindsOfToolError keeps a consumer from having to guess
+// which failure a number describes. Both new fields always add up to errors.
+func TestExportSplitsTheTwoKindsOfToolError(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	st := store.New()
+	seq := uint64(0)
+	call := func(tool, response string) {
+		seq++
+		id := fmt.Sprintf("%d", seq)
+		st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: seq, TS: t0.Add(time.Duration(seq) * time.Millisecond),
+			Direction: proxy.ClientToServer, Raw: json.RawMessage(fmt.Sprintf(`{"jsonrpc":"2.0","id":%q,"method":"tools/call","params":{"name":%q}}`, id, tool))})
+		seq++
+		st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: seq, TS: t0.Add(time.Duration(seq) * time.Millisecond),
+			Direction: proxy.ServerToClient, Raw: json.RawMessage(fmt.Sprintf(`{"jsonrpc":"2.0","id":%q,%s}`, id, response))})
+	}
+	call("search", `"result":{"content":[],"isError":true}`)
+	call("search", `"error":{"code":-32603,"message":"boom"}`)
+
+	data, err := Build(st, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Summary.Tools) != 1 {
+		t.Fatalf("tools = %d, want 1", len(data.Summary.Tools))
+	}
+	tool := data.Summary.Tools[0]
+	if tool.Errors != 2 || tool.ProtocolErrors != 1 || tool.ToolErrors != 1 {
+		t.Fatalf("errors = %d (%d protocol, %d tool), want 2 (1, 1)", tool.Errors, tool.ProtocolErrors, tool.ToolErrors)
+	}
+
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatJSON}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"protocol_errors": 1`, `"tool_errors": 1`, `"errors": 2`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("the export is missing %s:\n%s", want, buf.String())
+		}
+	}
+}

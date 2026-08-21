@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 )
 
 // HTTPConfig configures a transparent MCP streamable-HTTP proxy run.
@@ -108,9 +110,21 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 	// because it is no longer greater. A capture that lost nothing then fails
 	// check --fail-on incomplete.
 	var (
-		seqMu sync.Mutex
-		seq   uint64
+		seqMu    sync.Mutex
+		seq      uint64
+		metaSent bool
 	)
+	// The meta frame is built once here and emitted on the first observed frame
+	// rather than at startup, so a proxy nobody has called yet leaves a zero-byte
+	// log. ResolveSessionPath skips those on purpose: a bare check or export means
+	// the last real capture, and a listener started an hour ago and never used is
+	// the newest file in the directory. Emitting eagerly would put one line in it
+	// and walk straight back into the bug that skip exists for.
+	//
+	// jsonwire, because this and RunStdio's copy are the only Envelope.Raw the
+	// proxy builds instead of copying, and a target containing & would otherwise be
+	// the one escaped frame in an otherwise verbatim log.
+	metaRaw, metaErr := jsonwire.Marshal(SessionMeta{Target: EndpointForLog(cfg.Target)})
 	return func(dir Direction, body []byte, r route) {
 		raw, text := splitObserved(body)
 		env := Envelope{
@@ -136,6 +150,25 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 		}
 		seqMu.Lock()
 		defer seqMu.Unlock()
+		// Under the same lock as the frame it precedes, so the meta reaches the sink
+		// first and takes seq 1 with no window for a second goroutine to claim it.
+		// Its timestamp is the frame's own, since the frame read the clock before
+		// taking the lock and a later reading here would order seq 1 after seq 2.
+		if !metaSent {
+			metaSent = true
+			if metaErr == nil {
+				seq++
+				sink.Emit(Envelope{
+					SessionID:   cfg.SessionID,
+					ServerLabel: cfg.Label,
+					Seq:         seq,
+					TS:          env.TS,
+					Direction:   DirectionMeta,
+					Transport:   TransportHTTP,
+					Raw:         metaRaw,
+				})
+			}
+		}
 		seq++
 		env.Seq = seq
 		sink.Emit(env)

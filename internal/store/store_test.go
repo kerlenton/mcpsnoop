@@ -2834,3 +2834,307 @@ func TestDeleteOnAnUnboundedStoreTouchesNoBudget(t *testing.T) {
 		t.Fatalf("an unbounded store moved its budget counters to %d/%d", s.payloadBytes, s.frames)
 	}
 }
+
+// TestSessionCarriesItsTransportAndEndpoint covers the whole path a capture uses
+// to say what it captured. The label cannot say it: the http command defaults it
+// to the target host alone, so two proxies pointed at two paths of one host
+// produce the same one.
+func TestSessionCarriesItsTransportAndEndpoint(t *testing.T) {
+	base := time.Unix(0, 0).UTC()
+	meta, err := json.Marshal(proxy.SessionMeta{Target: "https://api.example.com/tenant-a/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := New()
+	s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "api.example.com", Seq: 1, TS: base, Direction: proxy.DirectionMeta, Transport: proxy.TransportHTTP, Raw: meta})
+	e := req(2, base.Add(time.Millisecond), proxy.ClientToServer, "1", "tools/list", "")
+	e.Transport = proxy.TransportHTTP
+	s.Ingest(e)
+
+	headers := s.Sessions()
+	if len(headers) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(headers))
+	}
+	if got := headers[0].Transport; got != proxy.TransportHTTP {
+		t.Fatalf("Transport = %q, want %q", got, proxy.TransportHTTP)
+	}
+	if got, want := headers[0].Endpoint, "https://api.example.com/tenant-a/mcp"; got != want {
+		t.Fatalf("Endpoint = %q, want %q", got, want)
+	}
+}
+
+// TestAStdioSessionClaimsNoEndpoint keeps the absence meaningful. A reader that
+// sees an endpoint has to be able to conclude the session was captured over HTTP.
+func TestAStdioSessionClaimsNoEndpoint(t *testing.T) {
+	base := time.Unix(0, 0).UTC()
+	meta, err := json.Marshal(proxy.SessionMeta{Command: []string{"node", "server.js"}, CWD: "/srv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := New()
+	s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: base, Direction: proxy.DirectionMeta, Transport: proxy.TransportStdio, Raw: meta})
+
+	headers := s.Sessions()
+	if len(headers) != 1 || headers[0].Endpoint != "" {
+		t.Fatalf("stdio session reported endpoint %q, want none", headers[0].Endpoint)
+	}
+	if headers[0].Transport != proxy.TransportStdio {
+		t.Fatalf("Transport = %q, want %q", headers[0].Transport, proxy.TransportStdio)
+	}
+	if cmd, cwd, ok := s.Command("s1"); !ok || len(cmd) != 2 || cwd != "/srv" {
+		t.Fatalf("Command = %v, %q, %v, want the recorded stdio command", cmd, cwd, ok)
+	}
+}
+
+// TestAPreEndpointHTTPLogStaysReadable is the forward-compatibility rule that
+// SessionMeta grows by. A log written before mcpsnoop recorded the target has no
+// target, and that must read as an absence rather than as a decode failure that
+// loses the command beside it.
+func TestAPreEndpointHTTPLogStaysReadable(t *testing.T) {
+	base := time.Unix(0, 0).UTC()
+	s := New()
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: base,
+		Direction: proxy.DirectionMeta, Transport: proxy.TransportHTTP,
+		Raw: json.RawMessage(`{"command":null,"future_field":{"nested":1}}`),
+	})
+
+	headers := s.Sessions()
+	if len(headers) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(headers))
+	}
+	if headers[0].Endpoint != "" {
+		t.Fatalf("Endpoint = %q, want empty for a log that predates the field", headers[0].Endpoint)
+	}
+	if headers[0].Transport != proxy.TransportHTTP {
+		t.Fatalf("Transport = %q, want the frame's own", headers[0].Transport)
+	}
+}
+
+// TestAFrameWithNoTransportLeavesTheKnownOneAlone is why the transport is taken
+// from the first frame that names one rather than from the latest. Not every
+// envelope carries the field, and an unconditional assignment lets a frame that
+// knows nothing erase what the meta frame already said.
+func TestAFrameWithNoTransportLeavesTheKnownOneAlone(t *testing.T) {
+	base := time.Unix(0, 0).UTC()
+	s := New()
+	s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: base, Direction: proxy.DirectionMeta, Transport: proxy.TransportHTTP, Raw: json.RawMessage(`{}`)})
+	s.Ingest(req(2, base.Add(time.Millisecond), proxy.ClientToServer, "1", "tools/list", "")) // no Transport set
+
+	headers := s.Sessions()
+	if len(headers) != 1 || headers[0].Transport != proxy.TransportHTTP {
+		t.Fatalf("Transport = %q, want it to survive a frame that named none", headers[0].Transport)
+	}
+}
+
+// TestToolSummarySplitsBrokenServerFromReportedFailure covers the reason the two
+// counts exist. A tool answering isError is doing its job, a server answering a
+// JSON-RPC error is broken, and one number for both makes the first look like
+// the second.
+func TestToolSummarySplitsBrokenServerFromReportedFailure(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	// search answers isError twice: it looked, and found nothing.
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"search"}`))
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1", `"result":{"content":[],"isError":true}`))
+	s.Ingest(req(3, t0.Add(2*time.Millisecond), proxy.ClientToServer, "2", "tools/call", `{"name":"search"}`))
+	s.Ingest(resp(4, t0.Add(3*time.Millisecond), proxy.ServerToClient, "2", `"result":{"content":[],"isError":true}`))
+	// write is broken: the server returns a JSON-RPC error.
+	s.Ingest(req(5, t0.Add(4*time.Millisecond), proxy.ClientToServer, "3", "tools/call", `{"name":"write"}`))
+	s.Ingest(resp(6, t0.Add(5*time.Millisecond), proxy.ServerToClient, "3", `"error":{"code":-32603,"message":"boom"}`))
+	// mixed carries one of each.
+	s.Ingest(req(7, t0.Add(6*time.Millisecond), proxy.ClientToServer, "4", "tools/call", `{"name":"mixed"}`))
+	s.Ingest(resp(8, t0.Add(7*time.Millisecond), proxy.ServerToClient, "4", `"result":{"content":[],"isError":true}`))
+	s.Ingest(req(9, t0.Add(8*time.Millisecond), proxy.ClientToServer, "5", "tools/call", `{"name":"mixed"}`))
+	s.Ingest(resp(10, t0.Add(9*time.Millisecond), proxy.ServerToClient, "5", `"error":{"code":-32603,"message":"boom"}`))
+
+	summary, ok := s.ToolSummary("s1")
+	if !ok {
+		t.Fatal("no tool summary")
+	}
+	byName := make(map[string]ToolStats, len(summary.Tools))
+	for _, tool := range summary.Tools {
+		byName[tool.Name] = tool
+	}
+	for _, want := range []ToolStats{
+		{Name: "search", Errors: 2, ProtocolErrors: 0, ToolErrors: 2},
+		{Name: "write", Errors: 1, ProtocolErrors: 1, ToolErrors: 0},
+		{Name: "mixed", Errors: 2, ProtocolErrors: 1, ToolErrors: 1},
+	} {
+		got, found := byName[want.Name]
+		if !found {
+			t.Fatalf("tool %q is missing from the summary", want.Name)
+		}
+		if got.Errors != want.Errors || got.ProtocolErrors != want.ProtocolErrors || got.ToolErrors != want.ToolErrors {
+			t.Fatalf("%s = %d errors (%d protocol, %d tool), want %d (%d, %d)",
+				want.Name, got.Errors, got.ProtocolErrors, got.ToolErrors,
+				want.Errors, want.ProtocolErrors, want.ToolErrors)
+		}
+	}
+}
+
+// TestEveryToolErrorLandsInExactlyOneBucket is the invariant the split is built
+// to hold rather than to be remembered. ProtocolErrors is the complement of
+// ToolErrors, not its own tally, so the third way errored is set, a task that
+// ends failed carrying neither an error object nor isError, is counted without
+// anyone having had to think of it here.
+func TestEveryToolErrorLandsInExactlyOneBucket(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+
+	// A JSON-RPC error and an isError, one of each of the two obvious kinds.
+	s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"t"}`))
+	s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1", `"error":{"code":-32603,"message":"boom"}`))
+	s.Ingest(req(3, t0.Add(2*time.Millisecond), proxy.ClientToServer, "2", "tools/call", `{"name":"t"}`))
+	s.Ingest(resp(4, t0.Add(3*time.Millisecond), proxy.ServerToClient, "2", `"result":{"content":[],"isError":true}`))
+	// A plain success, which must land in neither.
+	s.Ingest(req(5, t0.Add(4*time.Millisecond), proxy.ClientToServer, "3", "tools/call", `{"name":"t"}`))
+	s.Ingest(resp(6, t0.Add(5*time.Millisecond), proxy.ServerToClient, "3", `"result":{"content":[]}`))
+	// The third kind. The call is parked as a task and the task later ends failed
+	// with no error object and no isError, so nothing about it says which bucket
+	// it belongs in.
+	s.Ingest(req(7, t0.Add(6*time.Millisecond), proxy.ClientToServer, "4", "tools/call", `{"name":"t"}`))
+	s.Ingest(resp(8, t0.Add(7*time.Millisecond), proxy.ServerToClient, "4", `"result":{"resultType":"task","taskId":"t1","status":"working"}`))
+	s.Ingest(req(9, t0.Add(8*time.Millisecond), proxy.ClientToServer, "5", "tasks/get", `{"taskId":"t1"}`))
+	s.Ingest(resp(10, t0.Add(9*time.Millisecond), proxy.ServerToClient, "5", `"result":{"taskId":"t1","status":"failed"}`))
+
+	summary, ok := s.ToolSummary("s1")
+	if !ok {
+		t.Fatal("no tool summary")
+	}
+	if len(summary.Tools) != 1 {
+		t.Fatalf("tools = %d, want 1", len(summary.Tools))
+	}
+	got := summary.Tools[0]
+	// Four calls went wrong, and only one of them was the tool saying so.
+	if got.Errors != 3 || got.ToolErrors != 1 || got.ProtocolErrors != 2 {
+		t.Fatalf("errors = %d (%d protocol, %d tool), want 3 (2, 1); the undiagnosed task failure has to land somewhere",
+			got.Errors, got.ProtocolErrors, got.ToolErrors)
+	}
+	if got.ProtocolErrors+got.ToolErrors != got.Errors {
+		t.Fatalf("%d + %d does not add up to the %d total", got.ProtocolErrors, got.ToolErrors, got.Errors)
+	}
+}
+
+// mrtrProbe builds a session with n MRTR exchanges the client walked away from,
+// then one genuine exchange on the same tool that the client does complete. The
+// abandoned ones carry a requestState and the genuine one does not, which is the
+// ordinary shape: a server that mints state for the operations it expects back,
+// and one it answers statelessly.
+func mrtrProbe(t *testing.T, abandoned int) (*Store, *session) {
+	t.Helper()
+	t0 := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	s := New()
+	var seq uint64
+	ask := func(id, state string) {
+		seq++
+		s.Ingest(req(seq, t0.Add(time.Duration(seq)*time.Millisecond), proxy.ClientToServer, id, "tools/call", `{"name":"delete_files","arguments":{}}`))
+		seq++
+		s.Ingest(resp(seq, t0.Add(time.Duration(seq)*time.Millisecond), proxy.ServerToClient, id,
+			fmt.Sprintf(`"result":{"resultType":"input_required","requestState":%q,"inputRequests":{"k1":{"method":"elicitation/create","params":{}}}}`, state)))
+	}
+	for i := range abandoned {
+		ask(fmt.Sprintf("%d", i), fmt.Sprintf("state-%d", i))
+	}
+	// The genuine exchange, answered and retried the way the pattern intends.
+	seq++
+	s.Ingest(req(seq, t0.Add(time.Duration(seq)*time.Millisecond), proxy.ClientToServer, "200", "tools/call", `{"name":"delete_files","arguments":{}}`))
+	seq++
+	s.Ingest(resp(seq, t0.Add(time.Duration(seq)*time.Millisecond), proxy.ServerToClient, "200",
+		`"result":{"resultType":"input_required","inputRequests":{"k1":{"method":"elicitation/create","params":{}}}}`))
+	seq++
+	s.Ingest(req(seq, t0.Add(time.Duration(seq)*time.Millisecond), proxy.ClientToServer, "201", "tools/call",
+		`{"name":"delete_files","arguments":{},"inputResponses":{"k1":{"result":{}}}}`))
+	seq++
+	s.Ingest(resp(seq, t0.Add(time.Duration(seq)*time.Millisecond), proxy.ServerToClient, "201", `"result":{"content":[]}`))
+	return s, s.sessions["s1"]
+}
+
+// TestAnAbandonedExchangeDoesNotBreakTheNextOne is the defect the two-pass
+// fallback fixes. MRTR says servers "MUST NOT assume that clients will fulfill
+// the inputRequests or retry the original request", so an abandoned exchange is
+// an ordinary outcome, and one of them was enough to make the next conforming
+// retry on the same tool look ambiguous. The retry then stayed its own call, and
+// the operation was counted and timed as two, which is exactly what correlating
+// MRTR was written to prevent.
+func TestAnAbandonedExchangeDoesNotBreakTheNextOne(t *testing.T) {
+	for _, abandoned := range []int{0, 1, 10} {
+		t.Run(fmt.Sprintf("%d abandoned", abandoned), func(t *testing.T) {
+			s, _ := mrtrProbe(t, abandoned)
+			summary, ok := s.ToolSummary("s1")
+			if !ok {
+				t.Fatal("no tool summary")
+			}
+			var calls int
+			for _, tool := range summary.Tools {
+				if tool.Name == "delete_files" {
+					calls = tool.Calls
+				}
+			}
+			// One call per abandoned root, plus one for the completed exchange. The
+			// retry must not add a second.
+			if want := abandoned + 1; calls != want {
+				t.Fatalf("delete_files calls = %d, want %d; the retry was not linked to the operation it continues", calls, want)
+			}
+		})
+	}
+}
+
+// TestParkedOperationsDoNotAccumulate covers the other half. A settled operation
+// is not awaiting a retry, and an abandoned one produces no frame to retire it
+// by, so the list is append only without both a prune and a cap.
+func TestParkedOperationsDoNotAccumulate(t *testing.T) {
+	t.Run("a settled operation is retired", func(t *testing.T) {
+		t0 := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+		s := New()
+		s.Ingest(req(1, t0, proxy.ClientToServer, "1", "tools/call", `{"name":"delete_files","arguments":{}}`))
+		s.Ingest(resp(2, t0.Add(time.Millisecond), proxy.ServerToClient, "1",
+			`"result":{"resultType":"input_required","requestState":"blob","inputRequests":{"k1":{"method":"elicitation/create","params":{}}}}`))
+		sess := s.sessions["s1"]
+		if len(sess.awaiting) != 1 {
+			t.Fatalf("awaiting = %d, want the operation parked", len(sess.awaiting))
+		}
+		// The user declines, and the client says so.
+		s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 3, TS: t0.Add(2 * time.Millisecond),
+			Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1,"reason":"user declined"}}`)})
+		if sess.awaiting[0].state != Cancelled {
+			t.Fatalf("the cancel did not settle the call, state = %v", sess.awaiting[0].state)
+		}
+		// A later exchange is what runs the prune, since that is where the list grows.
+		s.Ingest(req(4, t0.Add(3*time.Millisecond), proxy.ClientToServer, "2", "tools/call", `{"name":"other","arguments":{}}`))
+		s.Ingest(resp(5, t0.Add(4*time.Millisecond), proxy.ServerToClient, "2",
+			`"result":{"resultType":"input_required","requestState":"blob2","inputRequests":{"k1":{"method":"elicitation/create","params":{}}}}`))
+		if len(sess.awaiting) != 1 {
+			t.Fatalf("awaiting = %d, want only the live operation; a cancelled one waits for nothing", len(sess.awaiting))
+		}
+		if sess.awaiting[0].state != Pending {
+			t.Fatalf("the retired entry is the wrong one, kept state = %v", sess.awaiting[0].state)
+		}
+	})
+
+	t.Run("abandoned operations are capped", func(t *testing.T) {
+		_, sess := mrtrProbe(t, 3*awaitingKept)
+		if len(sess.awaiting) > awaitingKept {
+			t.Fatalf("awaiting = %d, want at most the cap of %d", len(sess.awaiting), awaitingKept)
+		}
+		if len(sess.awaiting) == 0 {
+			t.Fatal("the cap retired everything, so no retry could ever link again")
+		}
+		for i, c := range sess.awaiting {
+			if c.state != Pending {
+				t.Fatalf("entry %d is %v, so a settled call survived the prune", i, c.state)
+			}
+		}
+		// The oldest go first, since the oldest requestState is the one the server
+		// itself is likeliest to have expired.
+		abandoned := 3 * awaitingKept
+		if got := sess.awaiting[len(sess.awaiting)-1].mrtrState; got != fmt.Sprintf("state-%d", abandoned-1) {
+			t.Fatalf("newest kept = %q, want the most recent exchange to survive", got)
+		}
+		if got := sess.awaiting[0].mrtrState; got == "state-0" {
+			t.Fatalf("oldest kept = %q, want the front of the list to have been retired", got)
+		}
+	})
+}

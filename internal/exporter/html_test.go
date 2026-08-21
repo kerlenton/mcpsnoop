@@ -193,3 +193,37 @@ func TestWriteHTMLStillEscapesMarkup(t *testing.T) {
 		t.Fatal("expected the markup to stay escaped in the HTML export")
 	}
 }
+
+// TestHTMLNamesTheEndpoint covers the human-facing half of a self-describing
+// capture. The heading falls back to the label, which on HTTP defaults to the
+// target host alone, so the endpoint is what tells two paths of one host apart.
+func TestHTMLNamesTheEndpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "http.jsonl")
+	t0 := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	meta, err := json.Marshal(proxy.SessionMeta{Target: "https://api.example.com/tenant-a/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeEnv(t, path, proxy.Envelope{SessionID: "s1", ServerLabel: "api.example.com", Seq: 1, TS: t0, Direction: proxy.DirectionMeta, Transport: proxy.TransportHTTP, Raw: meta})
+	writeEnv(t, path, proxy.Envelope{SessionID: "s1", ServerLabel: "api.example.com", Seq: 2, TS: t0.Add(time.Millisecond), Direction: proxy.ClientToServer, Transport: proxy.TransportHTTP, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)})
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Write(&buf, out, Options{Format: FormatHTML}); err != nil {
+		t.Fatal(err)
+	}
+	html := buf.String()
+
+	if !strings.Contains(html, `"endpoint":"https://api.example.com/tenant-a/mcp"`) {
+		t.Fatal("the embedded data does not carry the endpoint")
+	}
+	if !strings.Contains(html, "data.session.endpoint") {
+		t.Fatal("the page never renders the endpoint it was given")
+	}
+}
