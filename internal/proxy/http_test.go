@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -959,3 +960,119 @@ type orderSink struct{ fn func(Envelope) }
 
 func (o *orderSink) Emit(e Envelope) { o.fn(e) }
 func (o *orderSink) Close() error    { return nil }
+
+// TestHTTPEmitterWritesNothingUntilTheFirstFrame is the reason the meta frame is
+// built at startup but emitted lazily. ResolveSessionPath skips zero-byte logs so
+// that a bare check or export means the last real capture rather than a listener
+// somebody started and never called, and that listener is always the newest file
+// in the sessions directory. Emitting eagerly would put a line in it and defeat
+// the skip.
+func TestHTTPEmitterWritesNothingUntilTheFirstFrame(t *testing.T) {
+	sink := &captureSink{}
+	emit := newHTTPEmitter(HTTPConfig{SessionID: "s", Label: "l", Target: "https://h/mcp"}, sink)
+
+	if got := len(sink.byDir(DirectionMeta)); got != 0 {
+		t.Fatalf("an idle proxy emitted %d meta frames, want 0", got)
+	}
+
+	emit(ClientToServer, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), route{})
+
+	meta := sink.byDir(DirectionMeta)
+	if len(meta) != 1 {
+		t.Fatalf("meta frames after the first request = %d, want 1", len(meta))
+	}
+	if meta[0].Seq != 1 {
+		t.Fatalf("meta Seq = %d, want 1, since the store reads the session from the frame before the traffic", meta[0].Seq)
+	}
+	if meta[0].Transport != TransportHTTP {
+		t.Fatalf("meta Transport = %q, want %q", meta[0].Transport, TransportHTTP)
+	}
+	if meta[0].SessionID != "s" || meta[0].ServerLabel != "l" {
+		t.Fatalf("meta identity = %q/%q, want s/l", meta[0].SessionID, meta[0].ServerLabel)
+	}
+
+	first := sink.byDir(ClientToServer)
+	if len(first) != 1 || first[0].Seq != 2 {
+		t.Fatalf("first traffic frame = %+v, want one frame at Seq 2", first)
+	}
+	// The meta borrows the frame's own timestamp rather than reading the clock
+	// under the lock. The frame reads it before locking, so a second reading here
+	// would always be later and seq 1 would sort after seq 2.
+	if !meta[0].TS.Equal(first[0].TS) {
+		t.Fatalf("meta TS %v is not the frame's own %v", meta[0].TS, first[0].TS)
+	}
+
+	emit(ServerToClient, []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`), route{})
+	if got := len(sink.byDir(DirectionMeta)); got != 1 {
+		t.Fatalf("meta frames after a second request = %d, want it emitted exactly once", got)
+	}
+}
+
+// TestHTTPEmitterRecordsTheStrippedEndpoint checks the bytes that actually reach
+// the log, not just EndpointForLog's return value, since the meta frame is the
+// only place a target is written down and redaction is off by default.
+func TestHTTPEmitterRecordsTheStrippedEndpoint(t *testing.T) {
+	sink := &captureSink{}
+	emit := newHTTPEmitter(HTTPConfig{SessionID: "s", Target: "https://u:sk-live-secret@api.example.com:8443/mcp?api_key=sk-live-secret&tenant=acme#frag"}, sink)
+	emit(ClientToServer, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), route{})
+
+	meta := sink.byDir(DirectionMeta)
+	if len(meta) != 1 {
+		t.Fatalf("meta frames = %d, want 1", len(meta))
+	}
+	if strings.Contains(string(meta[0].Raw), "sk-live-secret") {
+		t.Fatalf("the log carries the credential: %s", meta[0].Raw)
+	}
+	var got SessionMeta
+	if err := json.Unmarshal(meta[0].Raw, &got); err != nil {
+		t.Fatalf("meta frame is not a SessionMeta: %v", err)
+	}
+	const want = "https://[stripped]@api.example.com:8443/mcp?api_key=[stripped]&tenant=[stripped]"
+	if got.Target != want {
+		t.Fatalf("Target = %q, want %q", got.Target, want)
+	}
+	if len(got.Command) != 0 || got.CWD != "" {
+		t.Fatalf("an HTTP session recorded a command to run: %+v", got)
+	}
+}
+
+// TestHTTPTargetFragmentReachesNeitherTheServerNorTheLog pins the assumption
+// behind dropping the fragment, which is that it was never on the wire to begin
+// with. If Go ever forwarded it, dropping it would be losing something.
+func TestHTTPTargetFragmentReachesNeitherTheServerNorTheLog(t *testing.T) {
+	seen := make(chan string, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case seen <- r.URL.RequestURI() + "|" + r.URL.Fragment:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	defer backend.Close()
+
+	targetURL := backend.URL + "/mcp#never-sent"
+	target, err := url.Parse(targetURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureSink{}
+	front := httptest.NewServer(httpProxyHandler(target, newHTTPEmitter(HTTPConfig{SessionID: "s", Target: targetURL}, sink)))
+	defer front.Close()
+
+	resp, err := http.Post(front.URL+"/mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	got := <-seen
+	if strings.Contains(got, "never-sent") {
+		t.Fatalf("the backend saw the fragment in %q, so dropping it from the log loses what was on the wire", got)
+	}
+	meta := sink.byDir(DirectionMeta)
+	if len(meta) != 1 || strings.Contains(string(meta[0].Raw), "never-sent") {
+		t.Fatalf("meta = %+v, want exactly one frame with no fragment", meta)
+	}
+}

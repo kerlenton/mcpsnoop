@@ -138,8 +138,16 @@ type EventView struct {
 
 // SessionHeader is a lightweight per-session summary for the left panel.
 type SessionHeader struct {
-	ID                   string
-	Label                string
+	ID    string
+	Label string
+	// Transport is the channel the session was captured on, "stdio" or "http",
+	// and is empty only for a log whose frames named none. Endpoint is the MCP
+	// endpoint of an HTTP session as EndpointForLog wrote it down, which is
+	// stripped of userinfo, query values and the fragment, so it identifies the
+	// server without being an address to dial. Empty on stdio, and empty on an
+	// HTTP log captured before mcpsnoop recorded it.
+	Transport            string
+	Endpoint             string
 	First                time.Time
 	Last                 time.Time
 	Requests             int
@@ -156,7 +164,14 @@ type SessionHeader struct {
 	// observed and are still in the log on disk, so the capture is complete and
 	// only this view of it is not.
 	DroppedFromMemory int
-	LateResults       int
+	// RetiredExchanges counts multi round-trip operations dropped at the parking
+	// cap while still open. MRTR tells servers not to assume a client will ever
+	// retry, so abandoned exchanges accumulate with no frame to settle them, and
+	// the cap is what stops the list growing for the life of the session. A
+	// non-zero count means a retry arriving for one of those would no longer link,
+	// so the operation would read as two calls with two durations.
+	RetiredExchanges int
+	LateResults      int
 }
 
 // ToolDefinition is the contract a server advertised for one MCP tool.
@@ -346,13 +361,28 @@ func (e ExtensionView) Agreed() bool { return e.Client && e.Server }
 
 // ToolStats summarizes calls to one MCP tool within a session.
 type ToolStats struct {
-	Name    string
-	Calls   int
-	Errors  int
-	Pending int
-	P50     time.Duration
-	P95     time.Duration
-	P99     time.Duration
+	Name  string
+	Calls int
+	// Errors is every call that went wrong, and ProtocolErrors and ToolErrors
+	// split it into the two things that word covers. They are very different
+	// findings. A tool that answers isError is doing its job, reporting that the
+	// search found nothing or the input failed validation, and a server returning
+	// a JSON-RPC error is broken. Reading one number for both means a well-behaved
+	// tool that reports domain failures looks exactly like a broken server, and in
+	// the summary it also sorts above one.
+	//
+	// ToolErrors counts result.isError. ProtocolErrors counts everything else that
+	// was an error, which is a JSON-RPC error object and a task that ended failed
+	// without one. It is deliberately the complement rather than its own tally, so
+	// the two always add up to Errors and a failure mode added later lands in it
+	// instead of disappearing from both.
+	Errors         int
+	ProtocolErrors int
+	ToolErrors     int
+	Pending        int
+	P50            time.Duration
+	P95            time.Duration
+	P99            time.Duration
 	// ResultBytes totals this tool's results and MaxResultBytes is the largest
 	// single one, both as observed on the wire. Unlike the definition cost this
 	// half is paid per call, so a tool that is cheap to advertise can still be
@@ -460,6 +490,8 @@ func (s *Store) Sessions() []SessionHeader {
 		out = append(out, SessionHeader{
 			ID:                   sess.id,
 			Label:                sess.label,
+			Transport:            sess.transport,
+			Endpoint:             sess.target,
 			First:                sess.first,
 			Last:                 sess.last,
 			Requests:             sess.requests,
@@ -472,6 +504,7 @@ func (s *Store) Sessions() []SessionHeader {
 			HasToolBaselineError: sess.toolDrift.BaselineError != "",
 			MissingFrames:        sess.missing,
 			DroppedFromMemory:    sess.dropped,
+			RetiredExchanges:     sess.retiredExchanges,
 			LateResults:          sess.lateResults,
 		})
 	}
@@ -882,6 +915,11 @@ func foldToolCall(byName map[string]*toolAggregate, slowest *[]SlowToolCall, cal
 	}
 	if c.errored {
 		agg.stats.Errors++
+		if c.toolErr {
+			agg.stats.ToolErrors++
+		} else {
+			agg.stats.ProtocolErrors++
+		}
 	}
 	// max, not len, so a result whose bytes a bounded store released still counts
 	// what it cost. This figure is the whole point of the cost panel.

@@ -286,7 +286,13 @@ type session struct {
 
 	command []string
 	cwd     string
-	calls   map[callKey]*call
+	// target is the MCP endpoint of an HTTP session, already stripped of anything
+	// credential-shaped by the proxy that wrote it. transport is the channel the
+	// session was captured on, taken from the first envelope that named one, so a
+	// reader knows whether an absent target means stdio or an older HTTP log.
+	target    string
+	transport string
+	calls     map[callKey]*call
 	// evictCursor is how far a bounded store's release has reached in this
 	// session's timeline, and bodyBytes is what the frames from there on weigh.
 	evictCursor int
@@ -298,9 +304,13 @@ type session struct {
 	toolStats toolStats
 	tasks     map[string]*call
 	// awaiting holds operations that answered with an InputRequiredResult and are
-	// waiting for the client to retry. It stays tiny, only in-flight ones live here.
-	awaiting []*call
-	events   []*event
+	// waiting for the client to retry, and retiredExchanges counts the ones the
+	// parking cap dropped. A dropped operation can no longer be linked to, so a
+	// retry that does arrive for it reads as its own call, and a reader comparing
+	// counts deserves to be told rather than left to wonder.
+	awaiting         []*call
+	retiredExchanges int
+	events           []*event
 
 	requests, responses, notifications, errors, pending, lateResults int
 
@@ -456,6 +466,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		if json.Unmarshal(e.Raw, &meta) == nil {
 			sess.command = meta.Command
 			sess.cwd = meta.CWD
+			sess.target = meta.Target
 		}
 		return EventView{Kind: EventOther} // control frame, not shown in the stream
 	}
@@ -1094,6 +1105,11 @@ func (s *Store) sessionFor(e proxy.Envelope) *session {
 	}
 	if e.ServerLabel != "" {
 		sess.label = e.ServerLabel
+	}
+	// First writer wins, so a log that somehow mixes channels is described by the
+	// one it opened on rather than by whichever frame happened to arrive last.
+	if sess.transport == "" {
+		sess.transport = e.Transport
 	}
 	sess.last = e.TS
 	return sess
@@ -1737,6 +1753,22 @@ func sortedKeySet(m map[string]json.RawMessage) string {
 	return strings.Join(keys, "\x00")
 }
 
+// awaitingKept caps how many parked operations one session keeps as candidates
+// for a retry. MRTR makes abandonment normal rather than exceptional, since the
+// specification tells servers they "MUST NOT assume that clients will fulfill
+// the inputRequests or retry the original request", and an abandoned operation
+// produces no frame at all to retire it by. Without a cap the list is append
+// only for the life of the session, and matchRetry walks it on every request
+// that carries retry signals.
+//
+// The number is set so that only staleness can reach it. A client gathering
+// input for sixty-four operations at once is not a client anyone has, so a
+// session at the cap is one holding dozens of exchanges nobody is going to
+// finish, and the oldest goes first because it is the one whose requestState the
+// server itself is likeliest to have expired. The specification tells servers to
+// put "a short expiry (TTL)" inside that state and to reject it afterwards.
+const awaitingKept = 64
+
 func (sess *session) park(c *call) {
 	for _, p := range sess.awaiting {
 		if p == c {
@@ -1744,6 +1776,37 @@ func (sess *session) park(c *call) {
 		}
 	}
 	sess.awaiting = append(sess.awaiting, c)
+	sess.pruneAwaiting()
+}
+
+// pruneAwaiting retires parked operations that can no longer be continued, and
+// then bounds what is left. A settled call is not awaiting anything: the client
+// cancelled the operation, or it was superseded, and matchRetry already refuses
+// to link anything but a Pending one, so dropping it changes no verdict and only
+// stops a dead operation from being carried and re-walked for the rest of the
+// session. Growth only happens here, so this is the only place that has to run.
+func (sess *session) pruneAwaiting() {
+	kept := 0
+	for _, c := range sess.awaiting {
+		if c.state == Pending {
+			sess.awaiting[kept] = c
+			kept++
+		}
+	}
+	if excess := kept - awaitingKept; excess > 0 {
+		copy(sess.awaiting, sess.awaiting[excess:kept])
+		kept -= excess
+		// Counted, never silent. Retiring a settled operation above loses nothing,
+		// but these were still open, so a retry arriving for one of them will read
+		// as its own call and the operation will be counted and timed as two. That
+		// is the very thing correlating MRTR exists to prevent, so a session it
+		// happened in has to be able to say so.
+		sess.retiredExchanges += excess
+	}
+	// The tail still points at the retired calls, so clear it rather than only
+	// reslicing, or the backing array keeps every one of them alive.
+	clear(sess.awaiting[kept:])
+	sess.awaiting = sess.awaiting[:kept]
 }
 
 func (sess *session) unpark(c *call) {
@@ -1774,20 +1837,51 @@ func (sess *session) matchRetry(msg proxy.RPCMessage) (*call, MRTRStateIssue) {
 		}
 	}
 
+	// Two passes over the same candidates, narrow first. The narrow one only
+	// considers operations whose requestState presence agrees with the retry's,
+	// because the specification makes that agreement a MUST in both directions:
+	// a client that was given state "MUST echo back the exact value", and one
+	// that was not "MUST NOT include one in the retry". So a retry that carries
+	// no state cannot be continuing an operation that issued one, and an
+	// abandoned exchange with state stops making a conforming stateless retry
+	// look ambiguous. One abandoned exchange was enough to do that, and MRTR
+	// makes abandonment normal, so a single declined elicitation silently broke
+	// the correlation for every later exchange on the same tool.
+	//
+	// The wide pass is what reports the violation when the presence disagrees,
+	// and it runs only when the narrow one found nothing, so an exchange that
+	// really is non-conforming still gets its warning. It is a superset, so
+	// nothing that is ambiguous here becomes unambiguous there.
 	name := operationName(msg)
-	var fallback *call
-	matches := 0
-	for _, c := range sess.awaiting {
-		if c.state == Pending && c.mrtrKeys != "" && c.mrtrKeys == keys &&
-			c.method == msg.Method && c.opName == name {
-			fallback = c
-			matches++
-		}
+	if c, matches := sess.fallbackRetryMatch(msg, name, keys, hasState, true); matches == 1 {
+		return c, classifyMRTRState(c, state, hasState)
 	}
-	if matches == 1 {
-		return fallback, classifyMRTRState(fallback, state, hasState)
+	if c, matches := sess.fallbackRetryMatch(msg, name, keys, hasState, false); matches == 1 {
+		return c, classifyMRTRState(c, state, hasState)
 	}
 	return nil, ""
+}
+
+// fallbackRetryMatch counts the parked operations a retry could be continuing by
+// method, operation name and answered key set, returning the last one seen and
+// how many fit. Callers link only on exactly one, since a wrong link silently
+// attributes one operation's timing to another and leaves no symptom, while an
+// unlinked retry is merely two calls where there was one.
+func (sess *session) fallbackRetryMatch(msg proxy.RPCMessage, name, keys string, hasState, agreeOnState bool) (*call, int) {
+	var found *call
+	matches := 0
+	for _, c := range sess.awaiting {
+		if c.state != Pending || c.mrtrKeys == "" || c.mrtrKeys != keys ||
+			c.method != msg.Method || c.opName != name {
+			continue
+		}
+		if agreeOnState && c.mrtrHasState != hasState {
+			continue
+		}
+		found = c
+		matches++
+	}
+	return found, matches
 }
 
 // classifyMRTRState compares the state a retry carried with the one the server

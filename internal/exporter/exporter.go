@@ -71,13 +71,19 @@ type ToolCostExport struct {
 }
 
 type ToolStatsExport struct {
-	Name    string  `json:"name"`
-	Calls   int     `json:"calls"`
-	Errors  int     `json:"errors"`
-	Pending int     `json:"pending"`
-	P50MS   float64 `json:"p50_ms"`
-	P95MS   float64 `json:"p95_ms"`
-	P99MS   float64 `json:"p99_ms"`
+	Name  string `json:"name"`
+	Calls int    `json:"calls"`
+	// Errors is the total, and the two below split it. A tool answering isError
+	// is reporting a domain outcome, a server returning a JSON-RPC error is
+	// broken, and a consumer that gates on one of those should not have to guess
+	// which it is looking at. They always sum to Errors.
+	Errors         int     `json:"errors"`
+	ProtocolErrors int     `json:"protocol_errors"`
+	ToolErrors     int     `json:"tool_errors"`
+	Pending        int     `json:"pending"`
+	P50MS          float64 `json:"p50_ms"`
+	P95MS          float64 `json:"p95_ms"`
+	P99MS          float64 `json:"p99_ms"`
 	// ResultBytes and MaxResultBytes are the per-call half of the context cost.
 	ResultBytes    int64 `json:"result_bytes"`
 	MaxResultBytes int   `json:"max_result_bytes"`
@@ -92,8 +98,15 @@ type SlowCallExport struct {
 }
 
 type SessionSummary struct {
-	ID            string    `json:"id"`
-	Label         string    `json:"label"`
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	// Transport and Endpoint say what was captured. The label alone cannot: on
+	// HTTP it defaults to the target host, so two proxies pointed at two paths of
+	// one host export under the same name. Endpoint is the MCP endpoint with
+	// userinfo, query values and the fragment already removed, empty on stdio and
+	// on an HTTP log captured before mcpsnoop recorded it.
+	Transport     string    `json:"transport,omitempty"`
+	Endpoint      string    `json:"endpoint,omitempty"`
 	First         time.Time `json:"first"`
 	Last          time.Time `json:"last"`
 	Requests      int       `json:"requests"`
@@ -105,6 +118,10 @@ type SessionSummary struct {
 	// MissingFrames counts envelopes dropped upstream, inferred from Seq gaps.
 	// A non-zero value means the capture is incomplete.
 	MissingFrames uint64 `json:"missing_frames"`
+	// RetiredExchanges counts multi round-trip operations dropped at the parking
+	// cap while still open. A non-zero value means a retry for one of them could
+	// no longer be linked, so an operation may be reported here as two calls.
+	RetiredExchanges int `json:"retired_exchanges,omitempty"`
 }
 
 type CapabilitiesExport struct {
@@ -421,17 +438,20 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 	out := SessionExport{
 		GeneratedAt: time.Now().UTC(),
 		Session: SessionSummary{
-			ID:            header.ID,
-			Label:         header.Label,
-			First:         header.First,
-			Last:          header.Last,
-			Requests:      header.Requests,
-			Responses:     header.Responses,
-			Notifications: header.Notifications,
-			Errors:        header.Errors,
-			Pending:       header.Pending,
-			LateResults:   header.LateResults,
-			MissingFrames: header.MissingFrames,
+			ID:               header.ID,
+			Label:            header.Label,
+			Transport:        header.Transport,
+			Endpoint:         header.Endpoint,
+			First:            header.First,
+			Last:             header.Last,
+			Requests:         header.Requests,
+			Responses:        header.Responses,
+			Notifications:    header.Notifications,
+			Errors:           header.Errors,
+			Pending:          header.Pending,
+			LateResults:      header.LateResults,
+			MissingFrames:    header.MissingFrames,
+			RetiredExchanges: header.RetiredExchanges,
 		},
 		Calls:  outCalls,
 		Events: outEvents,
@@ -465,7 +485,8 @@ func exportToolSummary(summary store.SessionToolSummary) ToolSummaryExport {
 	}
 	for _, tool := range summary.Tools {
 		out.Tools = append(out.Tools, ToolStatsExport{
-			Name: tool.Name, Calls: tool.Calls, Errors: tool.Errors, Pending: tool.Pending,
+			Name: tool.Name, Calls: tool.Calls, Errors: tool.Errors,
+			ProtocolErrors: tool.ProtocolErrors, ToolErrors: tool.ToolErrors, Pending: tool.Pending,
 			P50MS: durationMS(tool.P50), P95MS: durationMS(tool.P95), P99MS: durationMS(tool.P99),
 			ResultBytes: tool.ResultBytes, MaxResultBytes: tool.MaxResultBytes,
 		})

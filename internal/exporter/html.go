@@ -78,6 +78,7 @@ document.title = "mcpsnoop " + (data.session.label || data.session.id);
 document.getElementById("title").textContent = data.session.label || data.session.id;
 document.getElementById("meta").innerHTML = [
   "<span><b>" + esc(data.session.id) + "</b></span>",
+  data.session.endpoint ? "<span>" + esc(data.session.endpoint) + "</span>" : "",
   "<span>" + esc(fmtTime(data.session.first)) + "</span>",
   "<span>" + data.events.length + " frames</span>",
   "<span>" + data.calls.length + " calls</span>"
