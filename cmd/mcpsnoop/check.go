@@ -159,7 +159,9 @@ func newCheckCmd() *cobra.Command {
 	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, late-result, drift, deprecated, incomplete, schema")
 	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text, junit, or sarif")
 	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
-	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this duration (e.g. 500ms), disabled when zero")
+	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this wall-clock duration, including time a user spent answering an elicitation (e.g. 500ms), disabled when zero")
+	cmd.Flags().DurationVar(&assertions.maxServerDuration, "max-server-duration", 0, "fail if the server's own share of any completed tool call exceeds this duration, excluding time the client took to answer, disabled when zero")
+	cmd.Flags().IntVar(&assertions.maxRoundTrips, "max-round-trips", 0, "fail if any tool call took more than this many requests, which multi round-trip requests make possible, disabled when zero")
 	cmd.Flags().StringArrayVar(&assertions.expectTools, "expect-tool", nil, "fail if this tool was never called, repeatable")
 	cmd.Flags().StringArrayVar(&assertions.forbidTools, "forbid-tool", nil, "fail if this tool was called, repeatable")
 	return cmd
@@ -168,9 +170,18 @@ func newCheckCmd() *cobra.Command {
 // checkAssertions holds the first-class check assertions, evaluated per session
 // on top of the signal counts.
 type checkAssertions struct {
-	maxDuration time.Duration
-	expectTools []string
-	forbidTools []string
+	// maxDuration is wall clock for the whole interaction and deliberately stays
+	// that way. Under multi round-trip requests one tool call is several requests
+	// and the seconds a person spent answering are inside the span, which is the
+	// point: that interval is the one you most want to see. Redefining this flag
+	// to measure only the server would quietly loosen every pipeline that already
+	// sets it, so the two figures underneath get flags of their own that say what
+	// they measure.
+	maxDuration       time.Duration
+	maxServerDuration time.Duration
+	maxRoundTrips     int
+	expectTools       []string
+	forbidTools       []string
 }
 
 // eval returns one message per assertion the session violates, empty when all
@@ -178,7 +189,8 @@ type checkAssertions struct {
 // The latency budget only judges calls that got a response, since a call that
 // never did has no real latency and is the pending signal's job.
 func (a checkAssertions) eval(st *store.Store, sessionID string) []string {
-	if a.maxDuration <= 0 && len(a.expectTools) == 0 && len(a.forbidTools) == 0 {
+	if a.maxDuration <= 0 && a.maxServerDuration <= 0 && a.maxRoundTrips <= 0 &&
+		len(a.expectTools) == 0 && len(a.forbidTools) == 0 {
 		return nil
 	}
 	calls := st.Calls(sessionID)
@@ -209,13 +221,12 @@ func (a checkAssertions) eval(st *store.Store, sessionID string) []string {
 			}
 		}
 		if exceeded > 0 {
-			callWord := "calls"
-			if exceeded == 1 {
-				callWord = "call"
-			}
 			failures = append(failures, fmt.Sprintf("%d tool %s exceeded the %s budget (worst: tool %q took %s)",
-				exceeded, callWord, a.maxDuration, worstTool, worstDuration.Round(time.Millisecond)))
+				exceeded, callWord(exceeded), a.maxDuration, worstTool, worstDuration.Round(time.Millisecond)))
 		}
+	}
+	if a.maxServerDuration > 0 || a.maxRoundTrips > 0 {
+		failures = append(failures, a.evalInteractions(st, sessionID)...)
 	}
 	for _, name := range a.expectTools {
 		if !called[name] {
@@ -228,6 +239,66 @@ func (a checkAssertions) eval(st *store.Store, sessionID string) []string {
 		}
 	}
 	return failures
+}
+
+// evalInteractions judges the two figures underneath a wall-clock duration, the
+// share the server held the operation for and how many requests it took.
+//
+// Both are read off frame timestamps and a link mcpsnoop already inferred, so
+// neither guesses at intent, which is what a check has to be able to say. A tool
+// call that never completed is skipped for the same reason --max-duration skips
+// it: an operation still open has no latency to judge, and the pending signal is
+// what reports it.
+func (a checkAssertions) evalInteractions(st *store.Store, sessionID string) []string {
+	var failures []string
+	slowest, slowestTool, slowCount := time.Duration(0), "", 0
+	mostTrips, tripsTool, tripsCount := 0, "", 0
+	for _, in := range st.Interactions(sessionID) {
+		if in.ToolName == "" {
+			continue
+		}
+		// A round trip count needs no ending. Every request of the chain has already
+		// happened, so a runaway one is countable while it is still running, and
+		// that is the case the budget exists for: a server asking again and again is
+		// exactly the operation nobody ever finishes. Skipping it made the assertion
+		// silent on its own headline case.
+		if a.maxRoundTrips > 0 && in.RoundTrips > a.maxRoundTrips {
+			tripsCount++
+			if in.RoundTrips > mostTrips {
+				mostTrips, tripsTool = in.RoundTrips, in.ToolName
+			}
+		}
+		// A latency does need one, which is the rule --max-duration already applies.
+		// An operation still open has no round trip to judge, a superseded one was
+		// never answered, and a cancelled one without a late result delivered
+		// nothing. The pending signal is what reports those.
+		if !in.Measurable() {
+			continue
+		}
+		if a.maxServerDuration > 0 && in.ServerTime > a.maxServerDuration {
+			slowCount++
+			if in.ServerTime > slowest {
+				slowest, slowestTool = in.ServerTime, in.ToolName
+			}
+		}
+	}
+	if slowCount > 0 {
+		failures = append(failures, fmt.Sprintf("%d tool %s exceeded the %s server budget (worst: tool %q held for %s)",
+			slowCount, callWord(slowCount), a.maxServerDuration, slowestTool, slowest.Round(time.Millisecond)))
+	}
+	if tripsCount > 0 {
+		failures = append(failures, fmt.Sprintf("%d tool %s exceeded the %d round trip budget (worst: tool %q took %d)",
+			tripsCount, callWord(tripsCount), a.maxRoundTrips, tripsTool, mostTrips))
+	}
+	return failures
+}
+
+// callWord picks the noun for a count, so a failure line reads as a sentence.
+func callWord(n int) string {
+	if n == 1 {
+		return "call"
+	}
+	return "calls"
 }
 
 func parseCheckSignals(value string) (map[checkSignal]bool, error) {

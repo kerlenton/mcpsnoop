@@ -380,9 +380,14 @@ type ToolStats struct {
 	ProtocolErrors int
 	ToolErrors     int
 	Pending        int
-	P50            time.Duration
-	P95            time.Duration
-	P99            time.Duration
+	// MaxRoundTrips is the most requests any one call of this tool took. One means
+	// no call of it was ever retried. It is the maximum rather than a total,
+	// because the question it answers is whether this tool is chatty, and a total
+	// only says the tool was called a lot.
+	MaxRoundTrips int
+	P50           time.Duration
+	P95           time.Duration
+	P99           time.Duration
 	// ResultBytes totals this tool's results and MaxResultBytes is the largest
 	// single one, both as observed on the wire. Unlike the definition cost this
 	// half is paid per call, so a tool that is cheap to advertise can still be
@@ -906,6 +911,7 @@ func foldToolCall(byName map[string]*toolAggregate, slowest *[]SlowToolCall, cal
 		byName[c.toolName] = agg
 	}
 	agg.stats.Calls++
+	agg.stats.MaxRoundTrips = max(agg.stats.MaxRoundTrips, c.hops)
 	if c.state == Pending {
 		agg.stats.Pending++
 		return

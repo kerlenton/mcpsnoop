@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -1030,6 +1031,7 @@ func (m Model) renderHelp() string {
 		{"c", "show negotiated capabilities"},
 		{"s", "show per-tool latency and error summary"},
 		{"l", "show what servers asked the user for"},
+		{"i", "show interactions with per-hop timing"},
 		{"p", "pause or resume the stream"},
 		{"f", "toggle follow"},
 	}}
@@ -1479,10 +1481,16 @@ const (
 	// and a tool with one problem renders exactly like a tool with five.
 	sumSchemaW = 8
 	sumCallsW  = 7
-	sumErrW    = 6
-	sumLatW    = 10
-	sumDefW    = 9
-	sumResW    = 10
+	sumTripsW  = 6
+	// The fixed columns without TRIPS come to seventy cells, which is exactly what
+	// an eighty-column terminal gives an overlay. TRIPS is the one that drops when
+	// there is no room, the way ACTIVITY and CLIENT drop from the sessions table,
+	// so adding it did not start wrapping every row on a narrow screen.
+	sumWidthWithoutTrips = 70
+	sumErrW              = 6
+	sumLatW              = 10
+	sumDefW              = 9
+	sumResW              = 10
 	// covLabelW fits the longest gutter label plus a space. "definitions" is
 	// eleven cells wide, so eleven would leave no gap at all and run the label
 	// into its value.
@@ -1586,8 +1594,14 @@ func (m Model) summaryContent() string {
 		}
 	})
 	var t strings.Builder
+	overlayW, _ := m.overlayDims()
+	showTrips := overlayW >= sumWidthWithoutTrips+sumTripsW
+	tripsHead := ""
+	if showTrips {
+		tripsHead = cellR("TRIPS", sumTripsW)
+	}
 	t.WriteString(m.styles.dim.Render(cellL("TOOL", sumToolW) +
-		cellR("CALLS", sumCallsW) + cellR("ERR", sumErrW) + cellR("LATENCY", sumLatW) +
+		cellR("CALLS", sumCallsW) + tripsHead + cellR("ERR", sumErrW) + cellR("LATENCY", sumLatW) +
 		cellR("DEF", sumDefW) + cellR("RESULT", sumResW) +
 		"  " + cellL("SCHEMA", sumSchemaW)))
 	for _, tool := range tools {
@@ -1630,8 +1644,20 @@ func (m Model) summaryContent() string {
 			defCell = cellR(base.Render(formatBytes(int64(c.Bytes))), sumDefW)
 		}
 		resCell := cellR(base.Render(formatBytes(tool.ResultBytes)), sumResW)
+		// TRIPS is the most requests any one call of this tool took, so a tool that
+		// elicits is visible without opening a panel. One round trip is what almost
+		// every row says, so it is left blank rather than dotted. A column of dots is
+		// noise, and the point of the column is the row that is not one.
+		trips := ""
+		if showTrips {
+			trips = cellR("", sumTripsW)
+			if tool.MaxRoundTrips > 1 {
+				trips = cellR(m.styles.warn.Render(fmt.Sprintf("%d", tool.MaxRoundTrips)), sumTripsW)
+			}
+		}
 		t.WriteString("\n" + base.Render(cellL(tool.Name, sumToolW)) +
 			cellR(base.Render(fmt.Sprintf("%d", tool.Calls)), sumCallsW) +
+			trips +
 			cellR(errCell, sumErrW) +
 			cellR(lat, sumLatW) +
 			defCell + resCell +
@@ -2519,4 +2545,87 @@ func (m Model) elicitAnswer(row store.ElicitationView) string {
 	}
 	return style.Render(row.Action) +
 		m.styles.faint.Render("  after "+formatLatency(row.Elapsed))
+}
+
+// interactContent renders the interactions overlay: one entry per logical
+// operation, with the per-hop breakdown of a chain.
+//
+// Under multi round-trip requests one tool call is several requests, and the
+// seconds a person spent answering sit inside the total, which is deliberate.
+// This panel is where that total comes apart into the share the server held and
+// the share it was waiting on the client.
+func (m Model) interactContent() string {
+	all := m.store.Interactions(m.currentSessionID())
+	chained := make([]store.InteractionView, 0, len(all))
+	for _, in := range all {
+		if in.RoundTrips > 1 {
+			chained = append(chained, in)
+		}
+	}
+	if len(chained) == 0 {
+		body := "no operation in this session took more than one request"
+		if len(all) > 0 {
+			body += fmt.Sprintf(", so all %s read as they look", countLabel(len(all), len(all), "call"))
+		}
+		return m.styles.panelTitle.Render("interactions") + "\n\n" + m.styles.dim.Render(body)
+	}
+
+	var b strings.Builder
+	b.WriteString(m.styles.panelTitle.Render("interactions") + "  " +
+		m.styles.faint.Render(countLabel(len(chained), len(all), "operation")) + "\n")
+	b.WriteString(m.styles.faint.Render("operations that took more than one request. the total includes the time "+
+		"a person spent answering, so the server's own share is separated out") + "\n")
+
+	for _, in := range chained {
+		who := in.Method
+		if in.ToolName != "" {
+			who = in.Method + " " + in.ToolName
+		}
+		b.WriteString("\n" + m.styles.bright.Render(safeCell(who)) +
+			m.styles.faint.Render(fmt.Sprintf("  id %s  %d round trips", safeCell(in.CallID), in.RoundTrips)) + "\n")
+		b.WriteString(m.styles.dim.Render(cellL("  total", 10)) + m.styles.neutral.Render(formatLatency(in.Duration)) +
+			m.styles.faint.Render("  = ") + m.styles.resp.Render(formatLatency(in.ServerTime)) +
+			m.styles.faint.Render(" server + ") + m.styles.warn.Render(formatLatency(in.ClientTurnaround)) +
+			m.styles.faint.Render(" client") + "\n")
+		for i, hop := range in.Hops {
+			line := fmt.Sprintf("  hop %d", i+1)
+			b.WriteString(m.styles.dim.Render(cellL(line, 10)) +
+				m.styles.faint.Render("id "+safeCell(hop.RequestID)+"  ") +
+				m.styles.resp.Render(formatLatency(hop.ServerTime)))
+			if hop.ClientTurnaround > 0 {
+				b.WriteString(m.styles.faint.Render(" + ") + m.styles.warn.Render(formatLatency(hop.ClientTurnaround)))
+			}
+			if len(hop.Asked) > 0 {
+				b.WriteString(m.styles.faint.Render("  asked " + safeCell(strings.Join(hop.Asked, ", "))))
+			}
+			if hop.Pending {
+				b.WriteString(m.styles.pending.Render("  no answer"))
+			}
+			b.WriteString("\n")
+		}
+		if !in.HopsComplete {
+			// A live store releases old frames, so the breakdown can be a window while
+			// the totals above it stay exact. Saying so keeps the two from reading as
+			// a contradiction.
+			b.WriteString(m.styles.dim.Render(cellL("", 10)) +
+				m.styles.faint.Render(fmt.Sprintf("%d of %d hops still held, the rest were released to stay inside the memory budget",
+					len(in.Hops), in.RoundTrips)) + "\n")
+		}
+	}
+	return b.String()
+}
+
+// safeCell keeps a value the wire supplied from ending the line it is printed on
+// or driving the terminal.
+//
+// A tool name, a method and a JSON-RPC id are all written by whoever wrote the
+// server, and a newline in one closes the row it lands in while an escape
+// sequence moves the cursor out of the panel. paths.CheckLabel refuses a control
+// character for the same reason, and the inventory and stats tables quote rather
+// than drop one so the value stays recoverable.
+func safeCell(s string) string {
+	if strings.ContainsFunc(s, unicode.IsControl) {
+		return strconv.Quote(s)
+	}
+	return s
 }

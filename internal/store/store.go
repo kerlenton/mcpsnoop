@@ -189,6 +189,24 @@ type call struct {
 	// only be answering the round it was issued from.
 	elicitations []*elicitation
 	elicitRound  int
+	// hops, serverTime and clientTime describe a multi round-trip operation as it
+	// is observed, and hopMark is the frame the current interval started at.
+	//
+	// Accumulated at ingest rather than derived from the timeline on read. The
+	// specification puts no bound on how many hops a chain may take, so a slice of
+	// them would grow without one, but three scalars do not. Deriving was the other
+	// option and a bounded live store rules it out: with a window of four frames a
+	// three hop chain shows two request frames and no call at all, so the answer
+	// would silently be a window rather than a chain. These survive eviction.
+	//
+	// The intervals alternate, so one mark is enough. A request starts the server's
+	// interval, its response ends it and starts the client's, and the retry ends
+	// that and starts the next. They telescope, so serverTime + clientTime is
+	// exactly the span from the first request to the last response.
+	hops       int
+	serverTime time.Duration
+	clientTime time.Duration
+	hopMark    time.Time
 	// retired marks an operation the parking cap dropped. Nothing can continue it
 	// any more, so a bounded store may forget it even though it is still Pending,
 	// which it is: no response ever came, and saying otherwise would change what
@@ -702,6 +720,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			root.mrtrState, root.mrtrKeys = "", ""
 			root.mrtrHasState = false
 			sess.unpark(root)
+			// The client's interval ends where the retry starts, and this is the hop
+			// the answers belong to. Counted here rather than from the timeline, since
+			// a bounded store evicts the frames a derived count would need.
+			root.markHop(e.TS, &root.clientTime)
+			root.hops++
 			ev.call = root
 			ev.kind = EventRequest
 			ev.method = msg.Method
@@ -1178,6 +1201,8 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 		params:     msg.Params,
 		start:      e.TS,
 		state:      Pending,
+		hops:       1,
+		hopMark:    e.TS,
 	}
 	if isStreamOpeningMethod(msg.Method) {
 		c.state = Streaming
@@ -1221,11 +1246,13 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 		// late result nor the duplicate this branch used to report.
 		if c.method == "subscriptions/listen" {
 			c.end = ts
+			c.markHop(ts, &c.serverTime)
 			c.result = msg.Result
 			c.err = msg.Error
 			return c, true
 		}
 		c.end = ts
+		c.markHop(ts, &c.serverTime)
 		c.result = msg.Result
 		c.err = msg.Error
 		c.toolErr = isToolError(msg.Result)
@@ -1269,6 +1296,11 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 		if round := parseElicitations(state.requests, ts); !sameElicitRound(c.elicitations[c.elicitRound:], round) {
 			c.elicitRound = len(c.elicitations)
 			c.elicitations = append(c.elicitations, round...)
+			// This hop's server interval ends here and the client's begins. Inside the
+			// fresh-round test on purpose: a server resending the same result on one id
+			// is not a new hop, and charging the gap between the two copies to the
+			// server made the totals contradict the breakdown printed under them.
+			c.markHop(ts, &c.serverTime)
 		}
 		sess.park(c)
 		return c, true
@@ -1285,6 +1317,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 	c.end = ts
 	c.result = msg.Result
 	c.err = msg.Error
+	c.markHop(ts, &c.serverTime)
 	wasPending := c.state == Pending
 	switch {
 	case msg.Error != nil:
@@ -1403,6 +1436,7 @@ func (sess *session) applyParsedTaskState(state taskState, ts time.Time) (*call,
 		return c, false
 	}
 	c.end = ts
+	c.markHop(ts, &c.serverTime)
 	c.errored = countsAsError // the failed and completed-with-isError cases, not cancelled
 	sess.pending--
 	return c, countsAsError
@@ -2016,6 +2050,7 @@ func (sess *session) cancelCall(id string, dir proxy.Direction, conn string, ts 
 	c.state = Cancelled
 	c.cancelledAt = ts
 	c.cancelReason = reason
+	c.markHop(ts, &c.serverTime)
 	sess.pending--
 	return c
 }
@@ -2035,6 +2070,7 @@ func (sess *session) closeStreamingCall(id, conn string, ts time.Time, reason st
 		c := sess.calls[key]
 		if c != nil && c.state == Streaming {
 			c.end = ts
+			c.markHop(ts, &c.serverTime)
 			c.state = Cancelled
 			c.cancelledAt = ts
 			c.cancelReason = reason
@@ -2317,4 +2353,27 @@ func opposite(d proxy.Direction) proxy.Direction {
 		return proxy.ServerToClient
 	}
 	return proxy.ClientToServer
+}
+
+// markHop closes the interval that began at the last mark, adding it to into,
+// and starts the next one at ts.
+//
+// A frame out of order adds nothing rather than a negative interval. Envelope
+// sequence is monotonic per session and the proxy holds a lock across the emit,
+// so this is the log being edited or two captures being concatenated, and a
+// negative hop would make serverTime and clientTime disagree with the wall clock
+// they are supposed to add up to.
+func (c *call) markHop(ts time.Time, into *time.Duration) {
+	if c.hopMark.IsZero() {
+		c.hopMark = ts
+		return
+	}
+	if !ts.After(c.hopMark) {
+		// The mark stays where it was. Moving it to a frame that went backwards
+		// would drop nothing and instead charge the skew to whichever hop closed
+		// next, which is worse than declining to measure the one that was wrong.
+		return
+	}
+	*into += ts.Sub(c.hopMark)
+	c.hopMark = ts
 }

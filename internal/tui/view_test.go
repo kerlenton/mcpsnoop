@@ -332,3 +332,167 @@ func TestElicitKeyIsBoundAndDocumented(t *testing.T) {
 		t.Fatalf("the help never mentions the panel:\n%s", help)
 	}
 }
+
+// mrtrStore builds the capture from issue #201 in a store.
+func mrtrStore(t *testing.T) *store.Store {
+	t.Helper()
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	st := store.New()
+	frames := []struct {
+		dir proxy.Direction
+		ms  int
+		raw string
+	}{
+		{proxy.ClientToServer, 0, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"book_flight"}}`},
+		{proxy.ServerToClient, 400, `{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","requestState":"st-1","inputRequests":{"confirm":{"method":"elicitation/create"}}}}`},
+		{proxy.ClientToServer, 12400, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"book_flight","requestState":"st-1","inputResponses":{"confirm":{"action":"accept"}}}}`},
+		{proxy.ServerToClient, 12700, `{"jsonrpc":"2.0","id":2,"result":{"resultType":"input_required","requestState":"st-2","inputRequests":{"seat":{"method":"elicitation/create"}}}}`},
+		{proxy.ClientToServer, 37700, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"book_flight","requestState":"st-2","inputResponses":{"seat":{"action":"accept"}}}}`},
+		{proxy.ServerToClient, 38200, `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`},
+		{proxy.ClientToServer, 39000, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lookup_price"}}`},
+		{proxy.ServerToClient, 39200, `{"jsonrpc":"2.0","id":4,"result":{"content":[]}}`},
+	}
+	for i, f := range frames {
+		st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "booking", Seq: uint64(i + 1),
+			TS: t0.Add(time.Duration(f.ms) * time.Millisecond), Direction: f.dir,
+			Transport: proxy.TransportStdio, Raw: json.RawMessage(f.raw)})
+	}
+	return st
+}
+
+// TestInteractPanelSplitsTheTotal covers the panel where a wall clock comes
+// apart into the server's share and the client's.
+func TestInteractPanelSplitsTheTotal(t *testing.T) {
+	m := New(mrtrStore(t))
+	m.streamSessionID = "s1"
+	m.width, m.height = 120, 40
+	out := m.interactContent()
+
+	for _, want := range []string{"book_flight", "3 round trips", "hop 1", "hop 2", "hop 3", "elicitation/create"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the panel does not show %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "lookup_price") {
+		t.Fatalf("an ordinary one hop call is already a line in the stream:\n%s", out)
+	}
+	// The three figures, rendered the way the rest of the TUI renders a latency.
+	for _, want := range []string{"38.2s", "1.2s", "37s"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the panel does not show %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestInteractPanelOnASessionWithNoChainSaysSo keeps an empty panel from reading
+// as a broken one.
+func TestInteractPanelOnASessionWithNoChainSaysSo(t *testing.T) {
+	m := New(store.New())
+	m.streamSessionID = "s1"
+	if out := m.interactContent(); !strings.Contains(out, "no operation in this session took more than one request") {
+		t.Fatalf("out = %q", out)
+	}
+}
+
+// TestSummaryShowsRoundTrips covers the column that makes a chatty tool visible
+// without opening a panel, and keeps it quiet for the ordinary case.
+func TestSummaryShowsRoundTrips(t *testing.T) {
+	m := New(mrtrStore(t))
+	m.streamSessionID = "s1"
+	m.width, m.height = 120, 40
+	out := m.summaryContent()
+	if !strings.Contains(out, "TRIPS") {
+		t.Fatalf("the summary has no round trips column:\n%s", out)
+	}
+	// Read by column name, since CALLS also carries small numbers and hunting the
+	// row for one would find the wrong column.
+	if got := summaryCell(t, out, "book_flight", "TRIPS"); got != "3" {
+		t.Fatalf("book_flight TRIPS = %q, want 3\n%s", got, out)
+	}
+	// One round trip is the ordinary case and says nothing.
+	if got := summaryCell(t, out, "lookup_price", "TRIPS"); got != "" {
+		t.Fatalf("lookup_price TRIPS = %q, want blank\n%s", got, out)
+	}
+}
+
+// TestInteractKeyIsBoundAndDocumented keeps the panel reachable and the help
+// honest.
+func TestInteractKeyIsBoundAndDocumented(t *testing.T) {
+	m := New(store.New())
+	if got := m.keys.Interact.Keys(); len(got) != 1 || got[0] != "i" {
+		t.Fatalf("bound to %v, want i", got)
+	}
+	m.width, m.height = 120, 40
+	if help := m.renderHelp(); !strings.Contains(help, "per-hop timing") {
+		t.Fatalf("the help never mentions the panel:\n%s", help)
+	}
+}
+
+// TestInteractPanelCannotBeMadeToForgeRows covers the class of defect the
+// inventory and stats tables were fixed for. A tool name and a method come from
+// whoever wrote the server, so a newline in one would close the row it lands in
+// and an escape sequence would drive the terminal.
+func TestInteractPanelCannotBeMadeToForgeRows(t *testing.T) {
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	st := store.New()
+	const forged = "book\x1b[31mflight\r\n  total     FORGED"
+	// Encoded as JSON, not with %q. Go's quoting spells an escape as \x1b, which
+	// JSON has no such escape for, so the frame would be malformed and the store
+	// would drop it rather than render it.
+	name, err := json.Marshal(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := []struct {
+		dir proxy.Direction
+		ms  int
+		raw string
+	}{
+		{proxy.ClientToServer, 0, fmt.Sprintf(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":%s}}`, name)},
+		{proxy.ServerToClient, 400, `{"jsonrpc":"2.0","id":"1","result":{"resultType":"input_required","requestState":"st","inputRequests":{"k":{"method":"elicitation/create"}}}}`},
+		{proxy.ClientToServer, 5000, fmt.Sprintf(`{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":%s,"requestState":"st","inputResponses":{"k":{"action":"accept"}}}}`, name)},
+		{proxy.ServerToClient, 5100, `{"jsonrpc":"2.0","id":"2","result":{"content":[]}}`},
+	}
+	for i, f := range frames {
+		st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: uint64(i + 1),
+			TS: t0.Add(time.Duration(f.ms) * time.Millisecond), Direction: f.dir,
+			Transport: proxy.TransportStdio, Raw: json.RawMessage(f.raw)})
+	}
+
+	m := New(st)
+	m.streamSessionID = "s1"
+	m.width, m.height = 120, 40
+	out := m.interactContent()
+	if strings.ContainsRune(out, 0x1b) {
+		t.Fatalf("an escape sequence reached the panel:\n%q", out)
+	}
+	if strings.Contains(out, "\n  total     FORGED") {
+		t.Fatalf("a forged line reached the panel:\n%s", out)
+	}
+	if !strings.Contains(out, `\x1b`) {
+		t.Fatalf("the value was dropped rather than quoted, so it is not recoverable:\n%s", out)
+	}
+}
+
+// TestSummaryTableFitsANarrowTerminal keeps the new column from wrapping every
+// row on an eighty-column screen, which is exactly the width the panel was
+// already sized to fill.
+func TestSummaryTableFitsANarrowTerminal(t *testing.T) {
+	for _, width := range []int{80, 84, 90, 120} {
+		m := New(mrtrStore(t))
+		m.streamSessionID = "s1"
+		m.width, m.height = width, 40
+		panelW, _ := m.overlayDims()
+		out := m.summaryContent()
+		for _, line := range strings.Split(out, "\n") {
+			if got := lipgloss.Width(line); got > panelW {
+				t.Fatalf("at %d columns a row is %d cells wide against a %d-cell panel:\n%s",
+					width, got, panelW, line)
+			}
+		}
+		// The column is there when there is room for it, and gone when there is not.
+		if wantTrips := panelW >= sumWidthWithoutTrips+sumTripsW; strings.Contains(out, "TRIPS") != wantTrips {
+			t.Fatalf("at %d columns TRIPS present = %v, want %v", width, strings.Contains(out, "TRIPS"), wantTrips)
+		}
+	}
+}

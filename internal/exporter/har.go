@@ -77,6 +77,13 @@ type harResponse struct {
 type harCache struct{}
 
 type harTimings struct {
+	// Blocked is time the entry spent waiting on something other than the server.
+	// Under multi round-trip requests that is the client gathering an answer from
+	// a person, which is what the field is for, and putting it in wait drew a
+	// server that had been busy for the whole interaction. A one hop call reports
+	// zero, since nothing blocked it, and -1, which HAR 1.2 reserves for a timing
+	// that does not apply, is used only when there is no split to report at all.
+	Blocked float64 `json:"blocked"`
 	Send    float64 `json:"send"`
 	Wait    float64 `json:"wait"`
 	Receive float64 `json:"receive"`
@@ -128,11 +135,28 @@ func WriteHAR(w io.Writer, data SessionExport) error {
 	for _, call := range data.Calls {
 		status, statusText := harStatus(call.Status)
 
-		// Only the total round trip is known, so it all lands in wait, and time is
-		// the sum of the three. An unanswered call has no round trip, so it stays 0.
+		// time is the whole interaction, split between the server and whatever the
+		// client was doing between hops. An unanswered call has no round trip, so it
+		// stays 0.
 		var durationMS float64
 		if call.DurationMS != nil {
 			durationMS = *call.DurationMS
+		}
+		// wait is the server's share and blocked is the rest. Without the split a
+		// viewer drew a thirty-eight second server wait for an operation the server
+		// spent one second on, with the other thirty-seven belonging to a person
+		// answering an elicitation. An operation with no measured share reports -1,
+		// which is how HAR 1.2 spells a timing that does not apply.
+		// The split needs a duration large enough to contain the server's share. An
+		// operation with no exportable duration, which is every pending, superseded
+		// and cancelled one, has zero here, so subtracting a server share that is
+		// real produced a negative blocked. HAR 1.2 allows exactly one negative,
+		// the -1 that means the timing does not apply, so that is what such an entry
+		// reports.
+		wait, blocked := durationMS, float64(-1)
+		if call.ServerTimeMS != nil && *call.ServerTimeMS <= durationMS {
+			wait = *call.ServerTimeMS
+			blocked = durationMS - wait
 		}
 
 		request := harRequest{
@@ -166,7 +190,7 @@ func WriteHAR(w io.Writer, data SessionExport) error {
 				BodySize:    len(body),
 			},
 			Cache:   harCache{},
-			Timings: harTimings{Send: 0, Wait: durationMS, Receive: 0},
+			Timings: harTimings{Blocked: blocked, Send: 0, Wait: wait, Receive: 0},
 		})
 	}
 

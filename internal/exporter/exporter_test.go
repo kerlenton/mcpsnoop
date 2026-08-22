@@ -1814,3 +1814,291 @@ func TestElicitationCallIndexIsAbsentRatherThanNegative(t *testing.T) {
 		t.Fatalf("an unresolved index is present rather than absent:\n%s", buf.String())
 	}
 }
+
+// writeMRTRCapture writes the capture from issue #201: a three hop book_flight
+// chain where the server works 1.2s and the user takes 37s, plus one ordinary
+// call for contrast.
+func writeMRTRCapture(t *testing.T, path string) {
+	t.Helper()
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	frames := []struct {
+		dir proxy.Direction
+		ms  int
+		raw string
+	}{
+		{proxy.ClientToServer, 0, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"book_flight"}}`},
+		{proxy.ServerToClient, 400, `{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","requestState":"st-1","inputRequests":{"confirm":{"method":"elicitation/create"}}}}`},
+		{proxy.ClientToServer, 12400, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"book_flight","requestState":"st-1","inputResponses":{"confirm":{"action":"accept"}}}}`},
+		{proxy.ServerToClient, 12700, `{"jsonrpc":"2.0","id":2,"result":{"resultType":"input_required","requestState":"st-2","inputRequests":{"seat":{"method":"elicitation/create"}}}}`},
+		{proxy.ClientToServer, 37700, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"book_flight","requestState":"st-2","inputResponses":{"seat":{"action":"accept"}}}}`},
+		{proxy.ServerToClient, 38200, `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`},
+		{proxy.ClientToServer, 39000, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lookup_price"}}`},
+		{proxy.ServerToClient, 39200, `{"jsonrpc":"2.0","id":4,"result":{"content":[]}}`},
+	}
+	var buf bytes.Buffer
+	for i, f := range frames {
+		b, err := json.Marshal(proxy.Envelope{SessionID: "demo", ServerLabel: "booking", Seq: uint64(i + 1),
+			TS: t0.Add(time.Duration(f.ms) * time.Millisecond), Direction: f.dir,
+			Transport: proxy.TransportStdio, Raw: json.RawMessage(f.raw)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(append(b, '\n'))
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestExportCarriesTheInteractions covers the json shape and the two fields the
+// per-call record gains, so a consumer stops reading the whole duration as
+// server work.
+func TestExportCarriesTheInteractions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mrtr.jsonl")
+	writeMRTRCapture(t, path)
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Interactions) != 2 {
+		t.Fatalf("interactions = %d, want one per operation: %+v", len(data.Interactions), data.Interactions)
+	}
+	var book InteractionExport
+	for _, in := range data.Interactions {
+		if in.ToolName == "book_flight" {
+			book = in
+		}
+	}
+	if book.RoundTrips != 3 || book.ServerTimeMS != 1200 || book.ClientTurnaroundMS != 37000 || book.DurationMS != 38200 {
+		t.Fatalf("book_flight = %+v", book)
+	}
+	if book.ServerTimeMS+book.ClientTurnaroundMS != book.DurationMS {
+		t.Fatalf("the two shares do not add up: %+v", book)
+	}
+	if len(book.Hops) != 3 || !book.HopsComplete {
+		t.Fatalf("hops = %d complete=%v", len(book.Hops), book.HopsComplete)
+	}
+	if book.Hops[1].ClientTurnaroundMS != 12000 || book.Hops[1].ServerTimeMS != 300 {
+		t.Fatalf("hop 2 = %+v", book.Hops[1])
+	}
+	if book.CallIndex == nil || data.Calls[*book.CallIndex].ID != book.CallID {
+		t.Fatalf("call_index %v does not point at call %q", book.CallIndex, book.CallID)
+	}
+
+	for _, c := range data.Calls {
+		if c.ToolName != "book_flight" {
+			continue
+		}
+		if c.RoundTrips != 3 || c.ServerTimeMS == nil || *c.ServerTimeMS != 1200 {
+			t.Fatalf("the call record does not carry its share: %+v", c)
+		}
+		if c.DurationMS == nil || *c.DurationMS != 38200 {
+			t.Fatalf("the wall clock changed: %+v", c.DurationMS)
+		}
+	}
+
+	for _, format := range []Format{FormatJSON, FormatText, FormatHTML} {
+		var buf bytes.Buffer
+		if err := Write(&buf, data, Options{Format: format}); err != nil {
+			t.Fatalf("%s: %v", format, err)
+		}
+		if !strings.Contains(buf.String(), "book_flight") {
+			t.Fatalf("%s does not name the chained operation", format)
+		}
+	}
+	var text bytes.Buffer
+	if err := Write(&text, data, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "3 round trips, 38.2s total, 1.2s server, 37s client") {
+		t.Fatalf("the text export does not split the total:\n%s", text.String())
+	}
+}
+
+// TestHARSplitsWaitFromBlocked stops a viewer drawing a server that was busy for
+// the whole interaction. HAR keeps wait for the server and blocked for time the
+// entry spent waiting on something else, which here is a person answering.
+func TestHARSplitsWaitFromBlocked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mrtr.jsonl")
+	writeMRTRCapture(t, path)
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := WriteHAR(&buf, data); err != nil {
+		t.Fatal(err)
+	}
+	var har struct {
+		Log struct {
+			Entries []struct {
+				Time    float64 `json:"time"`
+				Request struct {
+					URL string `json:"url"`
+				} `json:"request"`
+				Timings struct {
+					Blocked float64 `json:"blocked"`
+					Send    float64 `json:"send"`
+					Wait    float64 `json:"wait"`
+					Receive float64 `json:"receive"`
+				} `json:"timings"`
+			} `json:"entries"`
+		} `json:"log"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &har); err != nil {
+		t.Fatalf("the HAR does not parse: %v", err)
+	}
+	if len(har.Log.Entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(har.Log.Entries))
+	}
+	for _, e := range har.Log.Entries {
+		sum := e.Timings.Send + e.Timings.Wait + e.Timings.Receive
+		if e.Timings.Blocked > 0 {
+			sum += e.Timings.Blocked
+		}
+		if sum != e.Time {
+			t.Fatalf("%s: timings sum to %v against a time of %v", e.Request.URL, sum, e.Time)
+		}
+		if !strings.Contains(e.Request.URL, "book_flight") {
+			continue
+		}
+		if e.Timings.Wait != 1200 {
+			t.Fatalf("wait = %v, want the 1.2s the server held it", e.Timings.Wait)
+		}
+		if e.Timings.Blocked != 37000 {
+			t.Fatalf("blocked = %v, want the 37s the client took", e.Timings.Blocked)
+		}
+	}
+}
+
+// TestAnOrdinaryExportGainsNoInteractionsSection keeps a capture with no chain
+// unchanged, since every operation there is already one line.
+func TestAnOrdinaryExportGainsNoInteractionsSection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plain.jsonl")
+	writeEnv(t, path, proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t"}}`)})
+	writeEnv(t, path, proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: 2, TS: time.Now().Add(time.Millisecond),
+		Direction: proxy.ServerToClient, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`)})
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "interactions:") {
+		t.Fatalf("a capture with no chain gained a section:\n%s", buf.String())
+	}
+	if len(data.Interactions) != 1 || data.Interactions[0].RoundTrips != 1 {
+		t.Fatalf("an ordinary call is still a one hop interaction: %+v", data.Interactions)
+	}
+}
+
+// TestHARNeverEmitsAnIllegalBlocked covers the entries HAR 1.2 constrains most.
+// An operation with no exportable duration used to report a negative blocked,
+// which is not the -1 sentinel and is the one negative the format forbids
+// elsewhere.
+func TestHARNeverEmitsAnIllegalBlocked(t *testing.T) {
+	dir := t.TempDir()
+	full := filepath.Join(dir, "full.jsonl")
+	writeMRTRCapture(t, full)
+	// The same capture cut while the user is still answering, which MRTR makes an
+	// ordinary outcome rather than damage.
+	body, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.SplitN(string(body), "\n", 5)
+	abandoned := filepath.Join(dir, "abandoned.jsonl")
+	if err := os.WriteFile(abandoned, []byte(strings.Join(lines[:4], "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{full, abandoned} {
+		st, id, err := LoadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := Build(st, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if err := WriteHAR(&buf, data); err != nil {
+			t.Fatal(err)
+		}
+		var har struct {
+			Log struct {
+				Entries []struct {
+					Time    float64 `json:"time"`
+					Timings struct {
+						Blocked float64 `json:"blocked"`
+						Send    float64 `json:"send"`
+						Wait    float64 `json:"wait"`
+						Receive float64 `json:"receive"`
+					} `json:"timings"`
+				} `json:"entries"`
+			} `json:"log"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &har); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range har.Log.Entries {
+			tm := e.Timings
+			if tm.Blocked < 0 && tm.Blocked != -1 {
+				t.Fatalf("%s: blocked = %v, and the only negative HAR allows is -1", filepath.Base(path), tm.Blocked)
+			}
+			for name, v := range map[string]float64{"send": tm.Send, "wait": tm.Wait, "receive": tm.Receive} {
+				if v < 0 {
+					t.Fatalf("%s: %s = %v, which HAR never allows to be negative", filepath.Base(path), name, v)
+				}
+			}
+			if tm.Wait > e.Time {
+				t.Fatalf("%s: wait %v is larger than the entry time %v", filepath.Base(path), tm.Wait, e.Time)
+			}
+		}
+	}
+}
+
+// TestHopsCarryWhetherAnAnswerWasReadable keeps an unreadable hop apart from one
+// that asked for nothing, which is what a released frame body produces.
+func TestHopsCarryWhetherAnAnswerWasReadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mrtr.jsonl")
+	writeMRTRCapture(t, path)
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatJSON}); err != nil {
+		t.Fatal(err)
+	}
+	// A batch read holds every body, so nothing is unknown and the key stays out.
+	if strings.Contains(buf.String(), "asked_unknown") {
+		t.Fatalf("a complete capture reports an unreadable hop:\n%s", buf.String()[:600])
+	}
+	for _, in := range data.Interactions {
+		for _, h := range in.Hops {
+			if h.AskedUnknown {
+				t.Fatalf("hop %s is marked unreadable in a batch read", h.RequestID)
+			}
+		}
+	}
+}
