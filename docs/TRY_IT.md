@@ -59,7 +59,9 @@ well. When you're done, `mcpsnoop unwrap everything` puts it back.
 
 4. Drill into a frame with `enter`, filter with `/`, inspect capabilities with
    `c`, see what servers asked the user for with `l`, replay a call with `r`,
-   or edit its params and replay with `R`.
+   or edit its params and replay with `R`. A session captured over HTTP needs
+   `mcpsnoop open --replay-target <url>` before `r` will send anywhere, since a
+   capture records the endpoint stripped of anything credential-shaped.
 
 Frames stream in as the client works. The quick calls come back OK, and the long
 one sends progress notifications and shows a visibly higher latency.

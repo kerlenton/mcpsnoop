@@ -35,6 +35,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/otlpsink"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/replay"
 	"github.com/kerlenton/mcpsnoop/internal/store"
 	"github.com/kerlenton/mcpsnoop/internal/tui"
 )
@@ -829,6 +830,8 @@ func newOpenCmd() *cobra.Command {
 		redactValues  redactValuesFlag
 		redactPaths   redactPathsFlag
 	)
+	var replayTarget string
+	var replayHeaders []string
 	cmd := &cobra.Command{
 		Use:   "open [session-id|session.jsonl|-]",
 		Short: "Open a captured session in the TUI, or - to read from stdin",
@@ -839,7 +842,23 @@ func newOpenCmd() *cobra.Command {
 			if len(args) == 1 {
 				arg = args[0]
 			}
-			return codeOf(runOpen(arg, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths)))
+			target := replay.HTTPTarget{URL: strings.TrimSpace(replayTarget), Headers: replayHeaders}
+			if target.URL == "" && len(replayHeaders) > 0 {
+				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop open: --replay-header needs --replay-target, since there is nowhere to send them")
+				return codeOf(2)
+			}
+			// Checked here rather than dropped at send time. A header that never
+			// reached the request produced a 401 telling the operator to pass the
+			// credential they had already passed, which is the worst way to be told
+			// about a typo.
+			for _, h := range replayHeaders {
+				name, _, ok := strings.Cut(h, ":")
+				if !ok || strings.TrimSpace(name) == "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "mcpsnoop open: --replay-header %q is not a header, want 'Name: value'\n", h)
+					return codeOf(2)
+				}
+			}
+			return codeOf(runOpen(arg, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths), target))
 		},
 	}
 	cmd.Flags().SortFlags = false
@@ -847,11 +866,13 @@ func newOpenCmd() *cobra.Command {
 	cmd.Flags().Var(&redactKeys, "redact-key", "JSON key name to scrub in captured JSON-RPC payloads, repeat or comma-separated")
 	cmd.Flags().Var(&redactValues, "redact-value", "regular expression to scrub inside captured JSON-RPC string values, stderr, and non-JSON text, repeatable")
 	cmd.Flags().Var(&redactPaths, "redact-path", "JSONPath selecting values in captured JSON-RPC payloads to scrub, repeatable")
+	cmd.Flags().StringVar(&replayTarget, "replay-target", "", "MCP endpoint a replay of an HTTP-captured session posts to; a capture records the endpoint stripped of anything credential-shaped, so it is not an address to dial and this is where you say where a replay goes")
+	cmd.Flags().StringArrayVar(&replayHeaders, "replay-header", nil, "extra header for a replayed request as 'Name: value', repeatable; this is how a credential reaches the server, since mcpsnoop never records one")
 	return cmd
 }
 
 // runOpen loads a session (id, path, or - for stdin) and shows it in the TUI.
-func runOpen(arg string, redaction proxy.RedactConfig) int {
+func runOpen(arg string, redaction proxy.RedactConfig, replayTarget replay.HTTPTarget) int {
 	inPath, usedStdin, err := resolveOpenSessionPath(arg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
@@ -886,12 +907,12 @@ func runOpen(arg string, redaction proxy.RedactConfig) int {
 			return 1
 		}
 		defer tty.Close()
-		if err := tui.RunOpenWithInput(ctx, st, tty); err != nil {
+		if err := tui.RunOpenWithInput(ctx, st, tty, tui.WithHTTPReplay(replayTarget)); err != nil {
 			fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
 			return 1
 		}
 	} else {
-		if err := runOpenTUIFn(ctx, st); err != nil {
+		if err := runOpenTUIFn(ctx, st, tui.WithHTTPReplay(replayTarget)); err != nil {
 			fmt.Fprintln(os.Stderr, "mcpsnoop open:", err)
 			return 1
 		}

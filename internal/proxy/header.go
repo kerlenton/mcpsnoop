@@ -52,3 +52,42 @@ func DecodeHeaderValue(value string) (string, bool) {
 	}
 	return "", false
 }
+
+// EncodeHeaderValue renders a value for a routing header, wrapping it in the
+// Base64 sentinel when it cannot travel as it stands.
+//
+// This is the other half of DecodeHeaderValue and it exists for the one caller
+// that has to build a header rather than read one: a replay derives Mcp-Name
+// from the body it is about to send, because the header "MUST match" that body
+// and a value copied from the capture would not when the body has been edited.
+//
+// The rule is the transport's. A field value may hold only visible ASCII, space
+// and tab, so anything outside that set is wrapped, and so is a value with
+// leading or trailing whitespace, which a reader would strip. A plain value that
+// happens to spell the sentinel is wrapped too, for the same reason the decoder
+// only unwraps once: left alone it would decode into something the body never
+// said.
+func EncodeHeaderValue(value string) string {
+	if needsSentinel(value) {
+		return Base64SentinelPrefix + base64.StdEncoding.EncodeToString([]byte(value)) + Base64SentinelSuffix
+	}
+	return value
+}
+
+func needsSentinel(value string) bool {
+	if value == "" {
+		return false
+	}
+	if strings.TrimSpace(value) != value {
+		return true
+	}
+	if strings.HasPrefix(value, Base64SentinelPrefix) && strings.HasSuffix(value, Base64SentinelSuffix) {
+		return true
+	}
+	for i := range len(value) {
+		if c := value[i]; c != '\t' && (c < 0x20 || c > 0x7e) {
+			return true
+		}
+	}
+	return false
+}
