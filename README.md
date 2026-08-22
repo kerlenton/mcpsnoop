@@ -724,6 +724,55 @@ mcpsnoop still changes nothing about the traffic it forwards.
 Nothing is resolved or fetched. An external `$ref` is recognized by its form
 alone, and the schema it points at is never read.
 
+### See what a server asked your user for
+
+Elicitation is the one path in MCP where a person types data into a server, and
+under MRTR the question and the answer are no longer two halves of one exchange.
+The question is buried in an `InputRequiredResult`, the answer comes back inside
+`inputResponses` on a retry under a different id, and the only thing that ties
+them together is the link mcpsnoop already infers.
+
+Without that pairing a declined password request reads as a plain tool error.
+
+```
+tools/call login_legacy [form] creds: decline after 3s
+  password string
+```
+
+Press `l` in the TUI, or read `elicitations` in the json, text and html exports.
+Each row names the operation the question interrupted, the mode, the message,
+what was asked for, what the user did and how long they took. A question no
+retry ever answered shows as pending, which MRTR makes an ordinary outcome
+rather than an error, since the spec tells servers not to assume a client will
+retry at all.
+
+Form rows list the `requestedSchema` property names and their declared types. A
+property whose subschema a redaction rule replaced shows an unknown type rather
+than the placeholder, because a placeholder is not something the server
+declared. URL rows carry the address whole, which the spec makes a client show
+before consent, and name the host on its own, which it says to highlight against
+subdomain spoofing.
+
+**The ledger never carries a submitted value.** What a user typed stays in the
+capture for whoever needs it, and leaving it out of a summary surface built to
+be exported and pasted around is what keeps this out of the redaction story
+entirely. It matters most in url mode, where the spec puts credentials on
+purpose.
+
+A retry answers the round it was issued from and no other. MRTR tells a server
+that when a client omits some of what was asked it should ask again in a new
+round, so an earlier round holding one unanswered key beside an answered one is
+ordinary traffic, and the unanswered half stays pending rather than borrowing the
+later round's answer.
+
+One recorded question is bounded. The message, the url and the field list are
+held for the life of the session, outside the frame budget that releases bodies,
+so a server cannot make one arbitrarily expensive. The limits are far above any
+real question and a truncated message says it was truncated.
+
+Nothing here warns and nothing here changes a `check` exit code. A ledger
+records what happened; it does not judge it.
+
 ### Find the tool that fails one run in four
 
 `check` reads one session and `diff` reads exactly two, so a tool that fails

@@ -61,6 +61,7 @@ const (
 	overlayInspector
 	overlayCaps
 	overlaySummary
+	overlayElicit
 	overlayReplay
 )
 
@@ -385,7 +386,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Copy):
 			m.copyCurrent()
 		case key.Matches(msg, m.keys.Enter, m.keys.Back, m.keys.Quit),
-			key.Matches(msg, m.keys.Caps, m.keys.Summary):
+			key.Matches(msg, m.keys.Caps, m.keys.Summary, m.keys.Elicit):
 			m.closeOverlay()
 		default:
 			var cmd tea.Cmd
@@ -441,6 +442,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Summary):
 		if m.currentSessionID() != "" {
 			m.openOverlay(overlaySummary, m.summaryContent())
+		}
+	case key.Matches(msg, m.keys.Elicit):
+		if m.currentSessionID() != "" {
+			m.openOverlay(overlayElicit, m.elicitContent())
 		}
 	case key.Matches(msg, m.keys.Replay):
 		if cmd := m.startReplay(); cmd != nil {
@@ -549,6 +554,11 @@ func (m Model) runCommand(cmd string) (Model, tea.Cmd) {
 	case "summary":
 		if m.currentSessionID() != "" {
 			m.openOverlay(overlaySummary, m.summaryContent())
+		}
+		return m, nil
+	case "elicitations":
+		if m.currentSessionID() != "" {
+			m.openOverlay(overlayElicit, m.elicitContent())
 		}
 		return m, nil
 	case "export":
@@ -997,6 +1007,8 @@ func (m *Model) refreshLiveOverlay() {
 		content = m.capsContent()
 	case overlaySummary:
 		content = m.summaryContent()
+	case overlayElicit:
+		content = m.elicitContent()
 	default:
 		return
 	}

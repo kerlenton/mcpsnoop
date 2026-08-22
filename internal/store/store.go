@@ -182,6 +182,13 @@ type call struct {
 	mrtrState    string
 	mrtrHasState bool
 	mrtrKeys     string
+	// elicitations are the questions this operation put to the user, in the order
+	// the rounds arrived. A chain answered with a further InputRequiredResult adds
+	// to the same slice, so every round of one operation stays on the call it
+	// belongs to. elicitRound is where the newest round starts, since a retry can
+	// only be answering the round it was issued from.
+	elicitations []*elicitation
+	elicitRound  int
 	// progressToken is what this request asked progress to be reported under,
 	// remembered so completion can close it and a later notification under the
 	// same token is read as reuse rather than a violation.
@@ -665,11 +672,28 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			ev.warning = appendWarning(ev.warning, note)
 		}
 		var reused bool
-		if root, stateIssue := sess.matchRetry(msg); root != nil {
+		if root, stateIssue, actions := sess.matchRetry(msg); root != nil {
 			// A continuation, not a new call. Mapping the retry id onto the same
 			// call object lets completeCall find it, so the operation keeps one
 			// pending slot and one duration however many round trips it takes.
 			sess.calls[requestCallKey(ev.id, msg.ID, e)] = root
+			// Only the newest round. A retry is matched on the requestState and the
+			// key set of the InputRequiredResult it was issued from, so that is the
+			// round it answers, and reaching further back would answer a question this
+			// client never answered.
+			//
+			// That case is ordinary rather than exotic. MRTR tells a server that when a
+			// client omits some of what was asked it "SHOULD respond with a new
+			// InputRequiredResult requesting the missing information again", so an
+			// earlier round holding an unanswered key beside an answered one is the
+			// specification's own recovery path. Answering it from the later round
+			// reported a decline the user never gave, with a think-time spanning the
+			// round in between.
+			for _, el := range root.elicitations[root.elicitRound:] {
+				if action, ok := actions[el.key]; ok {
+					el.answer(action, e.TS)
+				}
+			}
 			root.mrtrState, root.mrtrKeys = "", ""
 			root.mrtrHasState = false
 			sess.unpark(root)
@@ -1225,6 +1249,19 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 		c.mrtrState = state.requestState
 		c.mrtrHasState = state.hasRequestState
 		c.mrtrKeys = state.keys
+		// Recorded here rather than derived on read, because a bounded live store
+		// releases frame bodies as it goes and the question would be gone by the
+		// time anyone asked. What is kept is names, types and a url, so a chain of
+		// them costs a few strings rather than the frames they came from.
+		//
+		// A repeat of the same result on one id is not a new round. The duplicate
+		// guard above cannot catch it, because parking deliberately leaves the call
+		// Pending, so a server resending its InputRequiredResult would otherwise
+		// append every question again and report one answer as two.
+		if round := parseElicitations(state.requests, ts); !sameElicitRound(c.elicitations[c.elicitRound:], round) {
+			c.elicitRound = len(c.elicitations)
+			c.elicitations = append(c.elicitations, round...)
+		}
 		sess.park(c)
 		return c, true
 	}
@@ -1682,6 +1719,10 @@ type inputRequired struct {
 	// The 2026-07-28 revision routes sampling and roots exclusively through this
 	// map, so it is the only place their method names still appear.
 	methods []string
+	// requests is the map itself, so a caller that wants more than the method
+	// names can read them without parsing the result a second time. matchRetry
+	// keys on keys and requestState alone and is unaffected by this.
+	requests map[string]json.RawMessage
 }
 
 // parseInputRequired recognises the result a server sends when it needs more
@@ -1714,6 +1755,7 @@ func parseInputRequired(raw json.RawMessage) (inputRequired, bool) {
 		hasRequestState: r.RequestState != nil,
 		keys:            sortedKeySet(r.InputRequests),
 		methods:         methods,
+		requests:        r.InputRequests,
 	}
 	if r.RequestState != nil {
 		state.requestState = *r.RequestState
@@ -1722,22 +1764,26 @@ func parseInputRequired(raw json.RawMessage) (inputRequired, bool) {
 }
 
 // retrySignals reads the two things a retry carries that can tie it back to the
-// request it continues.
-func retrySignals(params json.RawMessage) (state string, hasState bool, keys string) {
+// request it continues, plus what it answered.
+//
+// The link is inferred from keys and requestState alone, exactly as before.
+// actions rides along because the same bytes hold it and parsing the params
+// twice to reach it would be reading the same frame for two halves of one fact.
+func retrySignals(params json.RawMessage) (state string, hasState bool, keys string, actions map[string]string) {
 	if len(params) == 0 {
-		return "", false, ""
+		return "", false, "", nil
 	}
 	var p struct {
 		RequestState   *string                    `json:"requestState"`
 		InputResponses map[string]json.RawMessage `json:"inputResponses"`
 	}
 	if json.Unmarshal(params, &p) != nil {
-		return "", false, ""
+		return "", false, "", nil
 	}
 	if p.RequestState != nil {
 		state, hasState = *p.RequestState, true
 	}
-	return state, hasState, sortedKeySet(p.InputResponses)
+	return state, hasState, sortedKeySet(p.InputResponses), elicitActions(p.InputResponses)
 }
 
 // sortedKeySet renders a key set so two of them can be compared as strings.
@@ -1824,15 +1870,15 @@ func (sess *session) unpark(c *call) {
 // match is conclusive on its own. Otherwise the fallback needs the method, the
 // operation name and the full set of answered keys to agree, and gives up when
 // more than one parked operation fits, since a wrong link is worse than no link.
-func (sess *session) matchRetry(msg proxy.RPCMessage) (*call, MRTRStateIssue) {
-	state, hasState, keys := retrySignals(msg.Params)
+func (sess *session) matchRetry(msg proxy.RPCMessage) (*call, MRTRStateIssue, map[string]string) {
+	state, hasState, keys, actions := retrySignals(msg.Params)
 	if !hasState && keys == "" {
-		return nil, ""
+		return nil, "", nil
 	}
 	if hasState {
 		for _, c := range sess.awaiting {
 			if c.state == Pending && c.mrtrHasState && c.mrtrState == state {
-				return c, ""
+				return c, "", actions
 			}
 		}
 	}
@@ -1854,12 +1900,12 @@ func (sess *session) matchRetry(msg proxy.RPCMessage) (*call, MRTRStateIssue) {
 	// nothing that is ambiguous here becomes unambiguous there.
 	name := operationName(msg)
 	if c, matches := sess.fallbackRetryMatch(msg, name, keys, hasState, true); matches == 1 {
-		return c, classifyMRTRState(c, state, hasState)
+		return c, classifyMRTRState(c, state, hasState), actions
 	}
 	if c, matches := sess.fallbackRetryMatch(msg, name, keys, hasState, false); matches == 1 {
-		return c, classifyMRTRState(c, state, hasState)
+		return c, classifyMRTRState(c, state, hasState), actions
 	}
-	return nil, ""
+	return nil, "", nil
 }
 
 // fallbackRetryMatch counts the parked operations a retry could be continuing by

@@ -1029,6 +1029,7 @@ func (m Model) renderHelp() string {
 		{"R", "edit params and replay the selected call"},
 		{"c", "show negotiated capabilities"},
 		{"s", "show per-tool latency and error summary"},
+		{"l", "show what servers asked the user for"},
 		{"p", "pause or resume the stream"},
 		{"f", "toggle follow"},
 	}}
@@ -2443,4 +2444,79 @@ func formatCacheHint(h store.CacheHint) string {
 	default:
 		return fmt.Sprintf("cache cacheScope=%s", h.Scope)
 	}
+}
+
+// elicitContent renders the elicitation ledger overlay: every question a server
+// put to the user through the client, and what came back.
+//
+// It shows the shape of each question and never its content. What the user typed
+// is in the capture for anyone who needs it, and leaving it out is what makes
+// this panel safe to screenshot whatever the session was redacted with, which
+// matters most in url mode, where the specification puts credentials on purpose.
+func (m Model) elicitContent() string {
+	rows := m.store.Elicitations(m.currentSessionID())
+	if len(rows) == 0 {
+		return m.styles.panelTitle.Render("elicitations") + "\n\n" +
+			m.styles.dim.Render("no server asked the user for anything in this session")
+	}
+
+	var b strings.Builder
+	b.WriteString(m.styles.panelTitle.Render("elicitations") + "  " +
+		m.styles.faint.Render(countLabel(len(rows), len(rows), "question")) + "\n")
+	b.WriteString(m.styles.faint.Render("what each server asked for, and what the user answered. "+
+		"submitted values stay in the capture and are deliberately not shown here") + "\n")
+
+	for _, row := range rows {
+		who := row.Method
+		if row.ToolName != "" {
+			who = row.Method + " " + row.ToolName
+		}
+		b.WriteString("\n" + m.styles.bright.Render(who) +
+			m.styles.faint.Render("  id "+row.CallID+"  ["+row.Mode+"]  "+row.Key) + "\n")
+		if row.Message != "" {
+			b.WriteString(m.styles.neutral.Render("  "+row.Message) + "\n")
+		}
+		switch {
+		case row.URL != "":
+			// The full address, because the specification makes a client show it whole
+			// before consent, and the host called out, because it tells one to
+			// highlight the domain against subdomain spoofing.
+			b.WriteString(m.styles.dim.Render(cellL("  url", 10)) + m.styles.neutral.Render(row.URL) + "\n")
+			if row.Host != "" {
+				b.WriteString(m.styles.dim.Render(cellL("  host", 10)) + m.styles.warn.Render(row.Host) + "\n")
+			}
+		case len(row.Fields) > 0:
+			parts := make([]string, 0, len(row.Fields))
+			for _, f := range row.Fields {
+				typ := f.Type
+				if typ == "" {
+					// Not a type the server declared. A redacted subschema arrives here, and
+					// printing mcpsnoop's own placeholder would present it as one.
+					typ = "unknown"
+				}
+				parts = append(parts, f.Name+" "+m.styles.faint.Render(typ))
+			}
+			b.WriteString(m.styles.dim.Render(cellL("  fields", 10)) + m.styles.neutral.Render(strings.Join(parts, ", ")) + "\n")
+		}
+		b.WriteString(m.styles.dim.Render(cellL("  answer", 10)) + m.elicitAnswer(row) + "\n")
+	}
+	return b.String()
+}
+
+// elicitAnswer renders what the user did. Accept, decline and cancel are the
+// three the specification names, and anything else is a client mcpsnoop does not
+// recognise, which is shown as it arrived rather than dropped.
+func (m Model) elicitAnswer(row store.ElicitationView) string {
+	if row.Pending() {
+		return m.styles.pending.Render("pending") + m.styles.faint.Render("  no retry ever answered this")
+	}
+	style := m.styles.neutral
+	switch row.Action {
+	case "accept":
+		style = m.styles.resp
+	case "decline", "cancel":
+		style = m.styles.warn
+	}
+	return style.Render(row.Action) +
+		m.styles.faint.Render("  after "+formatLatency(row.Elapsed))
 }

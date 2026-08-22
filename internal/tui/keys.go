@@ -23,6 +23,7 @@ type keyMap struct {
 	EditReplay key.Binding
 	Caps       key.Binding
 	Summary    key.Binding
+	Elicit     key.Binding
 	Pause      key.Binding
 	Follow     key.Binding
 	Copy       key.Binding
@@ -51,6 +52,7 @@ func defaultKeys() keyMap {
 		EditReplay: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "edit + replay")),
 		Caps:       key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "capabilities")),
 		Summary:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "tool summary")),
+		Elicit:     key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "elicitations")),
 		Pause:      key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause")),
 		Follow:     key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow")),
 		Copy:       key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy JSON")),

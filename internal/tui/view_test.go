@@ -261,3 +261,74 @@ func TestFooterNamesRetiredExchanges(t *testing.T) {
 		t.Fatalf("a clean session shows the marker anyway: %q", footer)
 	}
 }
+
+// TestElicitOverlayShowsTheLedger covers the panel and the boundary it keeps.
+// The values a user typed stay in the capture; a panel people screenshot must
+// not repeat them.
+func TestElicitOverlayShowsTheLedger(t *testing.T) {
+	const submitted = "hunter2-do-not-repeat-me"
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	st := store.New()
+	meta, err := json.Marshal(proxy.SessionMeta{Command: []string{"node", "s.js"}, CWD: "/srv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq := uint64(0)
+	ingest := func(dir proxy.Direction, off time.Duration, raw string) {
+		seq++
+		st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: seq, TS: t0.Add(off),
+			Direction: dir, Transport: proxy.TransportStdio, Raw: json.RawMessage(raw)})
+	}
+	seq++
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: seq, TS: t0,
+		Direction: proxy.DirectionMeta, Transport: proxy.TransportStdio, Raw: meta})
+	ingest(proxy.ClientToServer, time.Second, `{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"login_legacy"}}`)
+	ingest(proxy.ServerToClient, 2*time.Second, `{"jsonrpc":"2.0","id":"1","result":{"resultType":"input_required","requestState":"st","inputRequests":{"creds":{"method":"elicitation/create","params":{"message":"Enter your admin password","requestedSchema":{"type":"object","properties":{"password":{"type":"string"}}}}}}}}`)
+	ingest(proxy.ClientToServer, 5*time.Second, fmt.Sprintf(`{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":"login_legacy","inputResponses":{"creds":{"action":"decline","content":{"password":%q}}},"requestState":"st"}}`, submitted))
+	ingest(proxy.ClientToServer, 10*time.Second, `{"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"sync"}}`)
+	ingest(proxy.ServerToClient, 11*time.Second, `{"jsonrpc":"2.0","id":"3","result":{"resultType":"input_required","requestState":"st2","inputRequests":{"auth":{"method":"elicitation/create","params":{"mode":"url","url":"https://mcp.example.com/ui/key","message":"api key"}}}}}`)
+
+	m := New(st)
+	m.streamSessionID = "s1"
+	m.width, m.height = 120, 40
+	out := m.elicitContent()
+
+	for _, want := range []string{"login_legacy", "creds", "password", "decline", "Enter your admin password",
+		"https://mcp.example.com/ui/key", "mcp.example.com", "pending"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the panel does not show %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, submitted) {
+		t.Fatalf("the panel repeats a submitted value:\n%s", out)
+	}
+	if !strings.Contains(out, "submitted values stay in the capture") {
+		t.Fatalf("the panel does not say what it is deliberately not showing:\n%s", out)
+	}
+}
+
+// TestElicitOverlayOnAQuietSessionSaysSo keeps an empty panel from reading as a
+// broken one.
+func TestElicitOverlayOnAQuietSessionSaysSo(t *testing.T) {
+	m := New(store.New())
+	m.streamSessionID = "s1"
+	if out := m.elicitContent(); !strings.Contains(out, "no server asked the user for anything") {
+		t.Fatalf("out = %q", out)
+	}
+}
+
+// TestElicitKeyIsBoundAndDocumented keeps the panel reachable and the help
+// honest, since a panel nobody can find is a panel that does not exist.
+func TestElicitKeyIsBoundAndDocumented(t *testing.T) {
+	m := New(store.New())
+	if !m.keys.Elicit.Enabled() {
+		t.Fatal("the elicitations key is not bound")
+	}
+	if got := m.keys.Elicit.Keys(); len(got) != 1 || got[0] != "l" {
+		t.Fatalf("bound to %v, want l", got)
+	}
+	m.width, m.height = 120, 40
+	if help := m.renderHelp(); !strings.Contains(help, "asked the user for") {
+		t.Fatalf("the help never mentions the panel:\n%s", help)
+	}
+}
