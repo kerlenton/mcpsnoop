@@ -62,6 +62,7 @@ const (
 	overlayCaps
 	overlaySummary
 	overlayElicit
+	overlayInteract
 	overlayReplay
 )
 
@@ -273,14 +274,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The spinner advances every tick, the store refresh only every fifth and
 			// only when a frame arrived since, so a burst of traffic cannot force a
 			// refresh per envelope (which is quadratic over a session).
+			changed := m.dirty
 			if m.spin%refreshEvery == 0 && m.dirty {
 				m.refresh()
 				m.dirty = false
 			}
-			// An open live overlay rebuilds every tick so a pending spinner animates
-			// at the tick cadence. The content-diff guard makes this a no-op when
-			// nothing changed.
-			m.refreshLiveOverlay()
+			// An open live overlay rebuilds so a pending spinner animates at the tick
+			// cadence, but only the panels that animate pay for it every tick. The
+			// content-diff guard below is downstream of building the content, so a
+			// panel that walks the whole window was doing that walk, under the store's
+			// read lock, twelve times a second whether or not a frame had arrived.
+			m.refreshLiveOverlay(changed)
 		}
 		return m, tick()
 
@@ -386,7 +390,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Copy):
 			m.copyCurrent()
 		case key.Matches(msg, m.keys.Enter, m.keys.Back, m.keys.Quit),
-			key.Matches(msg, m.keys.Caps, m.keys.Summary, m.keys.Elicit):
+			key.Matches(msg, m.keys.Caps, m.keys.Summary, m.keys.Elicit, m.keys.Interact):
 			m.closeOverlay()
 		default:
 			var cmd tea.Cmd
@@ -446,6 +450,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Elicit):
 		if m.currentSessionID() != "" {
 			m.openOverlay(overlayElicit, m.elicitContent())
+		}
+	case key.Matches(msg, m.keys.Interact):
+		if m.currentSessionID() != "" {
+			m.openOverlay(overlayInteract, m.interactContent())
 		}
 	case key.Matches(msg, m.keys.Replay):
 		if cmd := m.startReplay(); cmd != nil {
@@ -559,6 +567,11 @@ func (m Model) runCommand(cmd string) (Model, tea.Cmd) {
 	case "elicitations":
 		if m.currentSessionID() != "" {
 			m.openOverlay(overlayElicit, m.elicitContent())
+		}
+		return m, nil
+	case "interactions":
+		if m.currentSessionID() != "" {
+			m.openOverlay(overlayInteract, m.interactContent())
 		}
 		return m, nil
 	case "export":
@@ -996,19 +1009,37 @@ func (m *Model) refresh() {
 }
 
 // refreshLiveOverlay rebuilds an open live overlay from the current store state,
-// so a capabilities or tool-summary view left open keeps up with the session
-// instead of going stale until it is closed and reopened. It reads the store
-// directly, so it works in any view, and it re-renders only when the content
-// actually changed so the scroll position never jumps on an idle tick.
-func (m *Model) refreshLiveOverlay() {
+// so a panel left open keeps up with the session instead of going stale until it
+// is closed and reopened. It reads the store directly, so it works in any view,
+// and it re-renders only when the content actually changed so the scroll
+// position never jumps on an idle tick.
+//
+// storeChanged says whether a frame has arrived since the last rebuild. Only the
+// panel that animates ignores it, because the content diff below cannot save the
+// cost of producing the content, and producing it means walking the window under
+// the store's read lock while ingest waits for the write one.
+func (m *Model) refreshLiveOverlay(storeChanged bool) {
 	var content string
 	switch m.overlay {
-	case overlayCaps:
-		content = m.capsContent()
 	case overlaySummary:
+		// The only one that animates: a tool whose calls are all in flight shows a
+		// live spinner, so it rebuilds whether or not the store moved.
 		content = m.summaryContent()
+	case overlayCaps:
+		if !storeChanged {
+			return
+		}
+		content = m.capsContent()
 	case overlayElicit:
+		if !storeChanged {
+			return
+		}
 		content = m.elicitContent()
+	case overlayInteract:
+		if !storeChanged {
+			return
+		}
+		content = m.interactContent()
 	default:
 		return
 	}

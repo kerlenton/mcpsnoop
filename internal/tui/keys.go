@@ -24,6 +24,7 @@ type keyMap struct {
 	Caps       key.Binding
 	Summary    key.Binding
 	Elicit     key.Binding
+	Interact   key.Binding
 	Pause      key.Binding
 	Follow     key.Binding
 	Copy       key.Binding
@@ -53,6 +54,7 @@ func defaultKeys() keyMap {
 		Caps:       key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "capabilities")),
 		Summary:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "tool summary")),
 		Elicit:     key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "elicitations")),
+		Interact:   key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "interactions")),
 		Pause:      key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause")),
 		Follow:     key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow")),
 		Copy:       key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy JSON")),

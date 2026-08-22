@@ -126,7 +126,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop` | open the live TUI |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, har, or otlp |
-| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, hung calls, or late results |
+| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, hung calls, late results, or a latency budget |
 | `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
@@ -723,6 +723,65 @@ mcpsnoop still changes nothing about the traffic it forwards.
 
 Nothing is resolved or fetched. An external `$ref` is recognized by its form
 alone, and the schema it points at is never read.
+
+### Tell the server's latency from the user's
+
+Under multi round-trip requests one tool call is several requests, and the
+seconds a person spent answering an elicitation sit inside the span. That is
+deliberate, since that interval is usually the one you most want to see, but it
+means one number cannot answer both questions.
+
+On a `book_flight` chain where the server worked 1.2 seconds while the user took
+37, `check --max-duration 5s` blames the tool for 38.2 seconds. It still does,
+because changing what that flag means would loosen every pipeline that already
+sets it. Two siblings name what they measure instead.
+
+```bash
+mcpsnoop check --max-server-duration 1s session.jsonl   # the server's share alone
+mcpsnoop check --max-round-trips 2 session.jsonl        # how chatty a tool is
+```
+
+```
+assertion failed: 1 tool call exceeded the 1s server budget (worst: tool "book_flight" held for 1.2s)
+assertion failed: 1 tool call exceeded the 2 round trip budget (worst: tool "book_flight" took 3)
+```
+
+Both are off by default, so a default `check` run is unaffected, and both are
+read off frame timestamps and a link mcpsnoop already inferred, so neither
+guesses at intent.
+
+Press `i` in the TUI for the breakdown, or read `interactions` in the json,
+text and html exports. Each entry is one logical operation with its round trip
+count, its total, the share the server held it for and the share it was waiting
+on the client, plus a per-hop line naming what each answer asked for. The
+per-tool summary gains a `TRIPS` column so a chatty tool is visible without
+opening anything.
+
+`export --format har` puts the server's share in `wait` and the rest in
+`blocked`, which is what that field is for, so a viewer stops drawing a 38-second
+server wait that never happened.
+
+The counts and the two shares are accumulated as frames arrive rather than
+derived when you ask, because the live store releases old frames to stay inside
+its budget and a derived answer would quietly be a window instead of a chain.
+The per-hop breakdown is read from the frames still held, and says so when it is
+only part of one. `ServerTime + ClientTurnaround` equals the total by
+construction rather than by arithmetic anyone has to trust.
+
+`--max-round-trips` judges a chain that is still running, because every request
+it has already made is countable and a server asking again and again produces
+exactly the operation nobody ever finishes. `--max-server-duration` waits for an
+ending, which is the rule `--max-duration` already applies, since an operation
+still open has no latency to judge.
+
+An operation mcpsnoop could not link stays its own single-hop entry. `matchRetry`
+refuses an ambiguous link on purpose, and this view does not fill that gap in.
+
+An operation that took one request carries no hop breakdown, because a single
+hop restates the totals above it word for word. A chain reports one hop per
+request, and says so when the store no longer holds every frame or when work
+settled off the request and answer pair a hop is made of, which a task handle
+does.
 
 ### See what a server asked your user for
 

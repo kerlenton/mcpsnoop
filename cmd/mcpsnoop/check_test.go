@@ -801,3 +801,167 @@ func TestCheckRejectsAnUnknownSignalAndAcceptsEveryKnownOne(t *testing.T) {
 		t.Fatal("an unknown signal must be rejected rather than silently ignored")
 	}
 }
+
+// mrtrCheckLog is the capture from issue #201, encoded for check -. The server
+// works 1.2s in total while the user takes 37s, so the wall clock is 38.2s.
+func mrtrCheckLog(t *testing.T) string {
+	t.Helper()
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	frames := []struct {
+		dir proxy.Direction
+		ms  int
+		raw string
+	}{
+		{proxy.ClientToServer, 0, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"book_flight"}}`},
+		{proxy.ServerToClient, 400, `{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","requestState":"st-1","inputRequests":{"confirm":{"method":"elicitation/create"}}}}`},
+		{proxy.ClientToServer, 12400, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"book_flight","requestState":"st-1","inputResponses":{"confirm":{"action":"accept"}}}}`},
+		{proxy.ServerToClient, 12700, `{"jsonrpc":"2.0","id":2,"result":{"resultType":"input_required","requestState":"st-2","inputRequests":{"seat":{"method":"elicitation/create"}}}}`},
+		{proxy.ClientToServer, 37700, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"book_flight","requestState":"st-2","inputResponses":{"seat":{"action":"accept"}}}}`},
+		{proxy.ServerToClient, 38200, `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`},
+		{proxy.ClientToServer, 39000, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lookup_price"}}`},
+		{proxy.ServerToClient, 39200, `{"jsonrpc":"2.0","id":4,"result":{"content":[]}}`},
+	}
+	envs := make([]proxy.Envelope, 0, len(frames))
+	for i, f := range frames {
+		envs = append(envs, proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: uint64(i + 1),
+			TS: t0.Add(time.Duration(f.ms) * time.Millisecond), Direction: f.dir,
+			Raw: json.RawMessage(f.raw)})
+	}
+	return encodeCheckLog(t, envs...)
+}
+
+// TestCheckServerDurationBlamesTheServerAlone is the reason the flag exists.
+// --max-duration blames a tool for 38.2s of which it is responsible for 1.2s,
+// because the seconds a person spent answering are inside the span. That figure
+// stays what it is, and this one names what it measures.
+func TestCheckServerDurationBlamesTheServerAlone(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := mrtrCheckLog(t)
+
+	code, stdout, _ := executeCheck(t, []string{"--max-server-duration", "1s", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 for a server over the budget", code)
+	}
+	if !strings.Contains(stdout, `1 tool call exceeded the 1s server budget (worst: tool "book_flight" held for 1.2s)`) {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	if strings.Contains(stdout, "38.2s") {
+		t.Fatalf("the server budget reported the wall clock:\n%s", stdout)
+	}
+
+	code, stdout, _ = executeCheck(t, []string{"--max-server-duration", "2s", "-"}, log)
+	if code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("a server within budget should pass, code %d stdout %q", code, stdout)
+	}
+}
+
+// TestCheckRoundTripsAssertion covers the second sibling, which multi round-trip
+// requests make possible: the specification puts no bound on how many times a
+// server may ask again.
+func TestCheckRoundTripsAssertion(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := mrtrCheckLog(t)
+
+	code, stdout, _ := executeCheck(t, []string{"--max-round-trips", "2", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 for a chain over the budget", code)
+	}
+	if !strings.Contains(stdout, `1 tool call exceeded the 2 round trip budget (worst: tool "book_flight" took 3)`) {
+		t.Fatalf("stdout = %q", stdout)
+	}
+
+	code, stdout, _ = executeCheck(t, []string{"--max-round-trips", "3", "-"}, log)
+	if code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("a chain within budget should pass, code %d stdout %q", code, stdout)
+	}
+}
+
+// TestCheckWallClockIsUnchangedByTheSiblings is the promise the whole flag
+// surface rests on. Nobody's pipeline changes behaviour on upgrade, so
+// --max-duration still means the whole interaction including the human.
+func TestCheckWallClockIsUnchangedByTheSiblings(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := mrtrCheckLog(t)
+
+	code, stdout, _ := executeCheck(t, []string{"--max-duration", "5s", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stdout, `1 tool call exceeded the 5s budget (worst: tool "book_flight" took 38.2s)`) {
+		t.Fatalf("--max-duration no longer means wall clock: %q", stdout)
+	}
+
+	// And the new ones are opt in, so a default run over the same capture passes.
+	code, stdout, _ = executeCheck(t, []string{"-"}, log)
+	if code != 0 || !strings.Contains(stdout, "check passed") {
+		t.Fatalf("a default run should be unaffected, code %d stdout %q", code, stdout)
+	}
+}
+
+// TestCheckSiblingsSkipAnOperationWithNoLatency keeps the two new assertions to
+// the same rule --max-duration already applies. An operation still open has no
+// latency to judge, and reporting one would blame a server for a chain the
+// client walked away from.
+func TestCheckSiblingsSkipAnOperationWithNoLatency(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	// A chain the client abandoned after two answers, over an hour of wall clock.
+	log := encodeCheckLog(t,
+		proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: t0, Direction: proxy.ClientToServer,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"book"}}`)},
+		proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0.Add(time.Hour), Direction: proxy.ServerToClient,
+			Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","requestState":"st","inputRequests":{"q":{"method":"elicitation/create"}}}}`)},
+	)
+	for _, args := range [][]string{
+		{"--max-server-duration", "1ms", "-"},
+		{"--max-round-trips", "1", "-"},
+	} {
+		code, stdout, _ := executeCheck(t, args, log)
+		if code != 0 {
+			t.Fatalf("%v exited %d on an operation that never completed: %s", args, code, stdout)
+		}
+	}
+}
+
+// TestCheckRoundTripsCountsAnUnfinishedChain is the case the assertion exists
+// for. A server asking again and again produces exactly the operation nobody
+// finishes, so gating the count on completion made the budget silent on its own
+// headline case. A latency still needs an ending; a count of requests already
+// made does not.
+func TestCheckRoundTripsCountsAnUnfinishedChain(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	frames := []struct {
+		dir proxy.Direction
+		ms  int
+		raw string
+	}{
+		{proxy.ClientToServer, 0, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"book_flight"}}`},
+		{proxy.ServerToClient, 400, `{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","requestState":"st-1","inputRequests":{"a":{"method":"elicitation/create"}}}}`},
+		{proxy.ClientToServer, 5000, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"book_flight","requestState":"st-1","inputResponses":{"a":{"action":"accept"}}}}`},
+		{proxy.ServerToClient, 5400, `{"jsonrpc":"2.0","id":2,"result":{"resultType":"input_required","requestState":"st-2","inputRequests":{"b":{"method":"elicitation/create"}}}}`},
+		{proxy.ClientToServer, 9000, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"book_flight","requestState":"st-2","inputResponses":{"b":{"action":"accept"}}}}`},
+		{proxy.ServerToClient, 9400, `{"jsonrpc":"2.0","id":3,"result":{"resultType":"input_required","requestState":"st-3","inputRequests":{"c":{"method":"elicitation/create"}}}}`},
+	}
+	envs := make([]proxy.Envelope, 0, len(frames))
+	for i, f := range frames {
+		envs = append(envs, proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: uint64(i + 1),
+			TS: t0.Add(time.Duration(f.ms) * time.Millisecond), Direction: f.dir, Raw: json.RawMessage(f.raw)})
+	}
+	log := encodeCheckLog(t, envs...)
+
+	code, stdout, _ := executeCheck(t, []string{"--max-round-trips", "2", "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; the chain took three requests and nobody finished it\n%s", code, stdout)
+	}
+	if !strings.Contains(stdout, `exceeded the 2 round trip budget (worst: tool "book_flight" took 3)`) {
+		t.Fatalf("stdout = %q", stdout)
+	}
+
+	// A latency, by contrast, still needs an ending, so the server budget stays
+	// quiet on the same capture.
+	code, stdout, _ = executeCheck(t, []string{"--max-server-duration", "1ms", "-"}, log)
+	if code != 0 {
+		t.Fatalf("the server budget judged an operation that never completed, code %d: %s", code, stdout)
+	}
+}

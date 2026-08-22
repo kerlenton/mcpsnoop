@@ -1474,6 +1474,42 @@ func summaryHasRow(styled, name, cell string) bool {
 	return false
 }
 
+// summaryCell reads one column of a tool's row by the header above it, so an
+// assertion names the column it means. Searching the whole row for a marker
+// worked only while exactly one column could produce it, and a column added
+// later silently broke that.
+func summaryCell(t *testing.T, styled, name, column string) string {
+	t.Helper()
+	lines := strings.Split(ansi.Strip(styled), "\n")
+	header := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "TOOL") && strings.Contains(ln, "CALLS") {
+			header = i
+			break
+		}
+	}
+	if header < 0 {
+		t.Fatalf("no summary header in:\n%s", ansi.Strip(styled))
+	}
+	// Indexed in runes, not bytes. The header is ASCII so the two agree there, but
+	// a row can hold a multi-byte rune before the column, and slicing by byte cut
+	// one in half.
+	start := strings.Index(lines[header], column)
+	if start < 0 {
+		t.Fatalf("no %s column in %q", column, lines[header])
+	}
+	end := start + len([]rune(column))
+	for _, ln := range lines[header+1:] {
+		row := []rune(ln)
+		if !strings.HasPrefix(strings.TrimSpace(ln), name+" ") || len(row) < start {
+			continue
+		}
+		return strings.TrimSpace(string(row[start:min(end, len(row))]))
+	}
+	t.Fatalf("no row for %q in:\n%s", name, ansi.Strip(styled))
+	return ""
+}
+
 func TestSummaryHeaderShowsOnlyCallsAndSort(t *testing.T) {
 	st := store.New()
 	base := time.Now()
@@ -1501,11 +1537,14 @@ func TestSummaryHeaderShowsOnlyCallsAndSort(t *testing.T) {
 			t.Fatalf("header should show only calls, found %q: %q", banned, header)
 		}
 	}
-	// The clean tool shows · for zero errors; the erroring tool shows a count.
-	// This works because an empty SCHEMA cell is blank, so the only · in a row
-	// is the ERR one.
-	if !summaryHasRow(out, "good", "·") || summaryHasRow(out, "bad", "·") {
-		t.Fatalf("ERR column should show · only for the clean tool\n%s", out)
+	// The clean tool shows · for zero errors and the erroring tool shows a count,
+	// read from the ERR column by name rather than by hunting the row for a marker
+	// that another column could also produce.
+	if got := summaryCell(t, out, "good", "ERR"); got != "·" {
+		t.Fatalf("clean tool ERR = %q, want ·\n%s", got, out)
+	}
+	if got := summaryCell(t, out, "bad", "ERR"); got != "1" {
+		t.Fatalf("erroring tool ERR = %q, want 1\n%s", got, out)
 	}
 	// The erroring tool sorts above the clean one, not alphabetically.
 	if strings.Index(out, "bad") > strings.Index(out, "good") {

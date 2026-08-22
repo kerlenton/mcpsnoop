@@ -47,6 +47,50 @@ type SessionExport struct {
 	// answered. Absent from a session that saw none, so an ordinary export is
 	// unchanged.
 	Elicitations []ElicitationExport `json:"elicitations,omitempty"`
+	// Interactions is one entry per logical operation, with the per-hop breakdown
+	// of a multi round-trip chain. A call with no retry is a one hop interaction,
+	// so this describes every operation uniformly.
+	Interactions []InteractionExport `json:"interactions,omitempty"`
+}
+
+// InteractionExport is one logical operation, however many requests it took.
+type InteractionExport struct {
+	CallIndex *int   `json:"call_index,omitempty"`
+	CallID    string `json:"call_id"`
+	Method    string `json:"method"`
+	ToolName  string `json:"tool_name,omitempty"`
+	State     string `json:"state"`
+	// RoundTrips is how many requests the operation took. ServerTimeMS is how long
+	// the server held it across all of them and ClientTurnaroundMS is the rest,
+	// mostly a person deciding. The two sum to DurationMS by construction.
+	RoundTrips         int       `json:"round_trips"`
+	ServerTimeMS       float64   `json:"server_time_ms"`
+	ClientTurnaroundMS float64   `json:"client_turnaround_ms"`
+	DurationMS         float64   `json:"duration_ms"`
+	StartedAt          time.Time `json:"started_at"`
+	// Hops is the per-hop breakdown. HopsComplete is false when the store no
+	// longer holds every frame, which a live one does to stay inside its budget,
+	// so a partial breakdown is never read as the whole operation.
+	Hops         []HopExport `json:"hops,omitempty"`
+	HopsComplete bool        `json:"hops_complete"`
+}
+
+// HopExport is one request and its answer inside an interaction.
+type HopExport struct {
+	RequestID  string     `json:"request_id"`
+	RequestAt  time.Time  `json:"request_at"`
+	ResponseAt *time.Time `json:"response_at,omitempty"`
+	// ServerTimeMS is this hop alone and ClientTurnaroundMS the wait before it,
+	// zero on the first since nothing preceded it.
+	ServerTimeMS       float64 `json:"server_time_ms"`
+	ClientTurnaroundMS float64 `json:"client_turnaround_ms"`
+	// Asked names what this hop's answer asked the client for, sorted, and is
+	// absent on a hop that finished the operation. AskedUnknown separates that from
+	// a hop whose answer is no longer readable, which a live store produces by
+	// releasing frame bodies.
+	Asked        []string `json:"asked,omitempty"`
+	AskedUnknown bool     `json:"asked_unknown,omitempty"`
+	Pending      bool     `json:"pending,omitempty"`
 }
 
 // ElicitationExport is one question a server put to the user through the client.
@@ -202,6 +246,13 @@ type CallExport struct {
 	CancelReason string          `json:"cancel_reason,omitempty"`
 	LateResult   bool            `json:"late_result,omitempty"`
 	DurationMS   *float64        `json:"duration_ms,omitempty"`
+	// RoundTrips is how many requests this operation took, and ServerTimeMS the
+	// share of DurationMS the server held it for. Under multi round-trip requests
+	// one call is several requests and the time a person spent answering sits
+	// inside the duration, so a record carrying only the total implies the server
+	// was busy for all of it. Absent on an operation with no measured hops.
+	RoundTrips   int             `json:"round_trips,omitempty"`
+	ServerTimeMS *float64        `json:"server_time_ms,omitempty"`
 	Params       json.RawMessage `json:"params,omitempty"`
 	Result       json.RawMessage `json:"result,omitempty"`
 	Error        *proxy.RPCError `json:"error,omitempty"`
@@ -539,6 +590,50 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 		outEvents = append(outEvents, exportEvent(ev, callIndex))
 	}
 
+	interactions := st.Interactions(sessionID)
+	// Indexed by the call each one belongs to, so a per-call record can say how
+	// many requests it took and how much of its duration was the server.
+	byCall := make(map[uint64]store.InteractionView, len(interactions))
+	outInteractions := make([]InteractionExport, 0, len(interactions))
+	for _, in := range interactions {
+		byCall[in.CallSeq] = in
+		row := InteractionExport{
+			CallID: in.CallID, Method: in.Method, ToolName: in.ToolName,
+			State:        in.State.String(),
+			RoundTrips:   in.RoundTrips,
+			ServerTimeMS: durationMS(in.ServerTime), ClientTurnaroundMS: durationMS(in.ClientTurnaround),
+			DurationMS: durationMS(in.Duration), StartedAt: in.Start,
+			HopsComplete: in.HopsComplete,
+		}
+		if idx, ok := callIndex[strconv.FormatUint(in.CallSeq, 10)]; ok {
+			row.CallIndex = &idx
+		}
+		for _, h := range in.Hops {
+			hop := HopExport{
+				RequestID: h.RequestID, RequestAt: h.RequestAt,
+				ServerTimeMS: durationMS(h.ServerTime), ClientTurnaroundMS: durationMS(h.ClientTurnaround),
+				Asked: h.Asked, AskedUnknown: h.AskedUnknown, Pending: h.Pending,
+			}
+			if !h.ResponseAt.IsZero() {
+				at := h.ResponseAt
+				hop.ResponseAt = &at
+			}
+			row.Hops = append(row.Hops, hop)
+		}
+		outInteractions = append(outInteractions, row)
+	}
+	for i := range outCalls {
+		in, ok := byCall[calls[i].RequestSeq]
+		if !ok {
+			continue
+		}
+		outCalls[i].RoundTrips = in.RoundTrips
+		if in.ServerTime > 0 || in.RoundTrips > 1 {
+			ms := durationMS(in.ServerTime)
+			outCalls[i].ServerTimeMS = &ms
+		}
+	}
+
 	elicitations := st.Elicitations(sessionID)
 	outElicitations := make([]ElicitationExport, 0, len(elicitations))
 	for _, e := range elicitations {
@@ -583,6 +678,7 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 		Calls:        outCalls,
 		Events:       outEvents,
 		Elicitations: outElicitations,
+		Interactions: outInteractions,
 	}
 	if summary, ok := st.ToolSummary(sessionID); ok {
 		out.Summary = exportToolSummary(summary)
@@ -1111,6 +1207,63 @@ func writeText(w io.Writer, data SessionExport) error {
 	if err != nil {
 		return err
 	}
+	if len(data.Interactions) > 0 {
+		chained := 0
+		for _, in := range data.Interactions {
+			if in.RoundTrips > 1 {
+				chained++
+			}
+		}
+		if chained > 0 {
+			if _, err := fmt.Fprintln(w, "interactions:"); err != nil {
+				return err
+			}
+			for _, in := range data.Interactions {
+				if in.RoundTrips <= 1 {
+					continue // an ordinary call is already a line above
+				}
+				who := in.Method
+				if in.ToolName != "" {
+					who = in.Method + " " + in.ToolName
+				}
+				if _, err := fmt.Fprintf(w, "  %s: %d round trips, %s total, %s server, %s client\n",
+					oneLine(who), in.RoundTrips,
+					msDuration(in.DurationMS), msDuration(in.ServerTimeMS), msDuration(in.ClientTurnaroundMS)); err != nil {
+					return err
+				}
+				for i, hop := range in.Hops {
+					asked := ""
+					if len(hop.Asked) > 0 {
+						asked = "  asked " + oneLine(strings.Join(hop.Asked, ", "))
+					}
+					state := ""
+					if hop.Pending {
+						state = "  (no answer)"
+					}
+					if _, err := fmt.Fprintf(w, "    hop %d id=%s  %s server", i+1, oneLine(hop.RequestID), msDuration(hop.ServerTimeMS)); err != nil {
+						return err
+					}
+					if hop.ClientTurnaroundMS > 0 {
+						if _, err := fmt.Fprintf(w, ", %s waiting on the client", msDuration(hop.ClientTurnaroundMS)); err != nil {
+							return err
+						}
+					}
+					if _, err := fmt.Fprintf(w, "%s%s\n", asked, state); err != nil {
+						return err
+					}
+				}
+				if !in.HopsComplete {
+					if _, err := fmt.Fprintf(w, "    (%d of %d hops still held, the rest were released to stay inside the memory budget)\n",
+						len(in.Hops), in.RoundTrips); err != nil {
+						return err
+					}
+				}
+			}
+			if _, err := fmt.Fprintln(w); err != nil {
+				return err
+			}
+		}
+	}
 	if len(data.Elicitations) > 0 {
 		if _, err := fmt.Fprintln(w, "elicitations:"); err != nil {
 			return err
@@ -1356,4 +1509,10 @@ func oneLine(s string) string {
 		return strconv.Quote(s)
 	}
 	return s
+}
+
+// msDuration renders a millisecond figure the way the rest of the text export
+// renders a duration, so a reader is not comparing two spellings.
+func msDuration(ms float64) string {
+	return time.Duration(ms * float64(time.Millisecond)).Round(time.Millisecond).String()
 }

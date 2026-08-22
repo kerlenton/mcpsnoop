@@ -94,6 +94,35 @@ document.getElementById("summary").innerHTML = [
   ["Late results", data.session.late_results],
   ["Protocol", data.capabilities?.protocol_version || ""]
 ].map(([k,v]) => "<div class=\"pill\">" + esc(k) + "<br><b>" + esc(v) + "</b></div>").join("");
+const chained = (data.interactions || []).filter(i => i.round_trips > 1);
+if (chained.length) {
+  const block = document.createElement("div");
+  block.innerHTML = "<div class=\"section-title\">Interactions</div>" +
+    "<div class=\"dim\">Operations that took more than one request. Under multi round-trip requests " +
+    "the time a person spent answering sits inside the total, so the server's own share is separated out.</div>";
+  const list = document.createElement("div");
+  list.className = "grid";
+  const ms = (v) => v >= 1000 ? (v / 1000).toFixed(1) + "s" : Math.round(v) + "ms";
+  for (const i of chained) {
+    const who = esc(i.tool_name ? i.method + " " + i.tool_name : i.method);
+    const hops = (i.hops || []).map((h, n) =>
+      "hop " + (n + 1) + " <span class=\"dim\">id " + esc(h.request_id) + "</span> " + ms(h.server_time_ms) + " server" +
+      (h.client_turnaround_ms > 0 ? ", " + ms(h.client_turnaround_ms) + " waiting on the client" : "") +
+      ((h.asked || []).length ? " <span class=\"dim\">asked " + esc(h.asked.join(", ")) + "</span>" : "") +
+      (h.pending ? " <span class=\"dim\">(no answer)</span>" : "")).join("<br>");
+    const card = document.createElement("div");
+    card.className = "pill";
+    card.innerHTML = who + " <span class=\"dim\">" + i.round_trips + " round trips</span><br>" +
+      "<b>" + ms(i.duration_ms) + "</b> total, " + ms(i.server_time_ms) + " server, " +
+      ms(i.client_turnaround_ms) + " client" +
+      (hops ? "<br>" + hops : "") +
+      (i.hops_complete === false ? "<br><span class=\"dim\">" + (i.hops || []).length + " of " +
+        i.round_trips + " hops still held</span>" : "");
+    list.appendChild(card);
+  }
+  block.appendChild(list);
+  document.getElementById("summary").after(block);
+}
 if ((data.elicitations || []).length) {
   const block = document.createElement("div");
   block.innerHTML = "<div class=\"section-title\">Elicitations</div>" +
