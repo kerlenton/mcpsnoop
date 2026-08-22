@@ -281,6 +281,60 @@ func LoadFile(path string) (*store.Store, string, error) {
 	return Load(f, path)
 }
 
+// LoadFileTolerant is LoadFile for a caller reading many logs at once, where one
+// of them being live must not fail the run.
+//
+// The two differ on exactly one thing, a truncated final envelope. LoadFile
+// treats it as corruption and returns an error, which is right for check and
+// export: they were pointed at one capture, and a capture that ends mid-frame is
+// itself the finding. A shim appending to its log right now leaves that same
+// torn tail every time, so a command walking the sessions directory would fail
+// whenever anything was running, which is the moment its answer matters most.
+// This one stops at the tear and reports what came before it, the way
+// proxy.Decode does for the live path.
+//
+// Reach for LoadFile whenever the log is the subject. Reach for this one only
+// when it is one of many and the others still have to be read.
+func LoadFileTolerant(path string) (*store.Store, string, error) {
+	return loadFileTolerant(path, store.New())
+}
+
+// LoadFileTolerantBounded is LoadFileTolerant into a store that releases frame
+// bodies and old frames as it reads, so peak memory is the bound rather than the
+// size of the log.
+//
+// What survives eviction is session state, which the store folds in at ingest:
+// the negotiated capabilities, the tool inventory and whether its listing
+// completed, the counters, the drift verdict. What does not is the timeline and
+// the call list, since those are the frames themselves. Reach for this only when
+// the answer is one of the former. A caller that will read Timeline or Calls
+// wants LoadFileTolerant, or it will silently read a window instead of a log.
+func LoadFileTolerantBounded(path string, bodyBytes, frames int) (*store.Store, string, error) {
+	return loadFileTolerant(path, store.NewBounded(bodyBytes, frames))
+}
+
+func loadFileTolerant(path string, st *store.Store) (*store.Store, string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, "", err
+	}
+	defer f.Close()
+
+	var firstSession string
+	if err := proxy.Decode(f, func(env proxy.Envelope) {
+		if firstSession == "" {
+			firstSession = env.SessionID
+		}
+		st.Ingest(env)
+	}); err != nil {
+		return nil, "", fmt.Errorf("%s: invalid JSONL envelope: %w", path, err)
+	}
+	if firstSession == "" {
+		return nil, "", fmt.Errorf("%s: no envelopes found", path)
+	}
+	return st, firstSession, nil
+}
+
 // LoadFileLines is LoadFile plus the log line every envelope was decoded from,
 // for a caller that has to point a reader at one specific frame of the file.
 func LoadFileLines(path string) (*store.Store, string, FrameLines, error) {
