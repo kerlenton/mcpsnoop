@@ -130,6 +130,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
+| `mcpsnoop inventory` | list every server that has run through mcpsnoop on this machine |
 | `mcpsnoop prune` | delete saved session logs older than a cutoff |
 | `mcpsnoop wrap <server>` | route one of Claude Desktop's servers through mcpsnoop |
 | `mcpsnoop unwrap <server>` | put that server's entry back the way it was |
@@ -721,6 +722,66 @@ mcpsnoop still changes nothing about the traffic it forwards.
 
 Nothing is resolved or fetched. An external `$ref` is recognized by its form
 alone, and the schema it points at is never read.
+
+### See which servers have actually run here
+
+The finding people keep repeating about Shadow MCP is that organisations
+discover several times more MCP servers running than anyone approved, because a
+server is often just a dependency somebody added to an IDE plugin. The same
+thing happens in miniature on one laptop, and mcpsnoop has been recording the
+answer the whole time without ever showing it.
+
+```bash
+mcpsnoop inventory
+mcpsnoop inventory --tools          # also count what each server last advertised
+mcpsnoop inventory --format json    # for something else to read
+```
+
+One row per server rather than per session. The row key is the recorded command
+and working directory, never the label, because the label comes from the
+command's last path element and `node ~/one/build/index.js` and
+`node ~/two/build/index.js` both derive `index.js`. An HTTP session keys on the
+endpoint it proxied instead, since mcpsnoop launched nothing there.
+
+Reading is one envelope per log, the meta frame the proxy writes first, so this
+stays cheap over a directory of large captures. `--tools` is the exception and
+reads one log per server, the most recent run of each, which is why it is a flag
+rather than a column. Even then the read is bounded, because a tool inventory is
+session state the store folds in as it goes, so a hundred-megabyte capture is
+read through a fixed window rather than held whole to produce one integer.
+
+When there is no count the row says which of three things happened, because a
+log that could not be read is not a server that advertised nothing, and one
+sentence for both would make mcpsnoop state something false.
+
+A command a `--redact` rule rewrote is printed as recorded and marked, rather
+than passed off as the command that ran. Two runs of one server, one scrubbed
+and one not, are two rows: mcpsnoop cannot know what the placeholder replaced,
+and merging them would mean guessing the hidden halves matched. One server run
+under two `--label` values is one row carrying both names, since the key is the
+command rather than the name.
+
+Nothing in a row is written by mcpsnoop. A command comes from whoever installed
+the server, a working directory comes off the filesystem, and a derived label
+comes from the command. A value holding a control character is quoted rather
+than printed raw, so a directory whose name contains a newline cannot close the
+field it is printed in and make the following lines read as servers that never
+ran. An argument containing a space is quoted too, because `node "~/My Project/
+build/index.js"` is otherwise indistinguishable from two arguments.
+
+Anything the walk could not fold in is named in the header rather than dropped.
+Empty logs are counted apart from damaged ones, since a zero-byte log is the
+ordinary residue of a run whose exec failed or of an HTTP proxy nobody called.
+
+Output is sorted by name rather than by recency so two runs over one directory
+produce the same bytes, which is what makes it usable as a baseline to diff
+against later.
+
+Two gaps are there by construction rather than by oversight. A run with
+`--trace-file` wrote outside the sessions directory and will not appear, and
+`prune` deletes logs, so first seen is only ever as old as what is still on
+disk. mcpsnoop reports what ran on this machine through it; it scans no network,
+reads no client config it was not pointed at, and judges nothing.
 
 ### Tell a broken server from a tool that says no
 
