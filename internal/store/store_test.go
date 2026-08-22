@@ -3182,3 +3182,88 @@ func TestTheParkingCapSaysWhatItRetired(t *testing.T) {
 		}
 	})
 }
+
+// TestARetiredOperationStopsBeingHeld is the other half of the parking cap. The
+// cap stops an abandoned exchange from being a match candidate, but the call
+// itself stayed in the session's call map, because dropOldestFrame refuses to
+// forget a Pending one and a parked multi round-trip operation is Pending by
+// design, so its duration can span the whole exchange.
+//
+// The result was a bounded store that was not bounded: a server answering every
+// call with an input request grew it with each one, however small the frame
+// window was. Measured before the fix at five thousand calls held against a two
+// hundred frame window.
+func TestARetiredOperationStopsBeingHeld(t *testing.T) {
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	const frames = 200
+	const exchanges = 2000
+	s := NewBounded(64<<10, frames)
+	seq := uint64(0)
+	emit := func(dir proxy.Direction, raw string) {
+		seq++
+		s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "d", Seq: seq,
+			TS: t0.Add(time.Duration(seq) * time.Millisecond), Direction: dir,
+			Transport: proxy.TransportStdio, Raw: json.RawMessage(raw)})
+	}
+	for i := range exchanges {
+		id := fmt.Sprintf("c%d", i)
+		emit(proxy.ClientToServer, fmt.Sprintf(`{"jsonrpc":"2.0","id":%q,"method":"tools/call","params":{"name":"t"}}`, id))
+		emit(proxy.ServerToClient, fmt.Sprintf(
+			`{"jsonrpc":"2.0","id":%q,"result":{"resultType":"input_required","requestState":"s%d","inputRequests":{"k":{"method":"elicitation/create","params":{"message":"m"}}}}}`, id, i))
+	}
+
+	sess := s.sessions["s1"]
+	// Bounded by the frame window and the parking cap, not by how many exchanges
+	// went unfinished. The window holds two frames per exchange, so a hundred
+	// calls are still reachable through it.
+	if held := len(sess.calls); held > frames {
+		t.Fatalf("calls held = %d after %d abandoned exchanges, want no more than the %d-frame window",
+			held, exchanges, frames)
+	}
+	if len(sess.awaiting) > awaitingKept {
+		t.Fatalf("awaiting = %d, want at most the cap of %d", len(sess.awaiting), awaitingKept)
+	}
+
+	// Nothing about the session's verdict moved. Releasing a call the store can no
+	// longer reach is a memory decision, and a reader is told what happened by the
+	// pending count and by RetiredExchanges, both of which still count every one.
+	header := s.Sessions()[0]
+	if header.Pending != exchanges {
+		t.Fatalf("pending = %d, want %d; forgetting a call must not change what the session reports",
+			header.Pending, exchanges)
+	}
+	if header.RetiredExchanges != exchanges-awaitingKept {
+		t.Fatalf("RetiredExchanges = %d, want %d", header.RetiredExchanges, exchanges-awaitingKept)
+	}
+}
+
+// TestAPendingCallIsStillHeldWhileItCanBeAnswered keeps the release narrow. Only
+// an operation the cap has retired may be forgotten, because only that one can
+// never be continued. An ordinary call still waiting for its response has to stay
+// reachable, or the response that arrives will open a second call instead of
+// settling the first.
+func TestAPendingCallIsStillHeldWhileItCanBeAnswered(t *testing.T) {
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	s := NewBounded(64<<10, 4) // a window far smaller than the exchange
+	seq := uint64(0)
+	emit := func(dir proxy.Direction, raw string) {
+		seq++
+		s.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "d", Seq: seq,
+			TS: t0.Add(time.Duration(seq) * time.Millisecond), Direction: dir,
+			Transport: proxy.TransportStdio, Raw: json.RawMessage(raw)})
+	}
+	emit(proxy.ClientToServer, `{"jsonrpc":"2.0","id":"slow","method":"tools/call","params":{"name":"t"}}`)
+	// Enough traffic to push the request frame out of the window entirely.
+	for range 10 {
+		emit(proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/progress","params":{}}`)
+	}
+	emit(proxy.ServerToClient, `{"jsonrpc":"2.0","id":"slow","result":{"content":[]}}`)
+
+	header := s.Sessions()[0]
+	if header.Pending != 0 {
+		t.Fatalf("pending = %d, want 0; the response could not find the call it answers", header.Pending)
+	}
+	if header.Responses != 1 {
+		t.Fatalf("responses = %d, want 1", header.Responses)
+	}
+}
