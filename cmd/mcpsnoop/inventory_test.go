@@ -809,7 +809,17 @@ func TestInventoryKeepsARangeInOneZone(t *testing.T) {
 	// Read as clock faces, not as instants. Parsing keeps the offsets and orders
 	// them correctly whatever they are, which is exactly what a person reading two
 	// wall-clock times side by side cannot do.
-	zone := func(stamp string) string { return stamp[len(stamp)-6:] }
+	//
+	// RFC3339 spells the offset either as Z or as a six-character +hh:mm, so the
+	// tail cannot be sliced blind. Doing that read part of the time as the offset
+	// wherever the local zone was UTC, which passed on a machine at +03:00 and
+	// failed in CI.
+	zone := func(stamp string) string {
+		if strings.HasSuffix(stamp, "Z") {
+			return "Z"
+		}
+		return stamp[len(stamp)-6:]
+	}
 	if zone(first) != zone(last) {
 		t.Fatalf("the two ends are rendered in different zones, so the range reads backwards: %q", rendered)
 	}

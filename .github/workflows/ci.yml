@@ -23,6 +23,11 @@ jobs:
       - name: staticcheck
         run: make staticcheck
       - name: test
+        # Stated rather than inherited. The runner is UTC today, `make check`
+        # pins CHECK_TZ to UTC to match it, and neither should depend on the
+        # other's default staying put.
+        env:
+          TZ: UTC
         run: go test -race ./...
       - name: build
         run: go build ./...
@@ -49,6 +54,8 @@ jobs:
           go-version: stable
           check-latest: true
       - name: check
+        env:
+          TZ: UTC
         run: ${{ matrix.check }}
       - name: build
         run: go build ./...

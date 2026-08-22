@@ -8,6 +8,14 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 # CI. Bump this deliberately rather than discovering it on an unrelated pull
 # request.
 STATICCHECK_VERSION ?= v0.8.0
+# Pinned for the same reason, one layer down. CI runners are UTC and a
+# contributor's machine is whatever they live in, so a test that renders a local
+# timestamp passes in one and fails in the other. It has: an inventory test took
+# the last six characters of an RFC3339 stamp as its offset, which is the offset
+# at +03:00 and part of the minutes at UTC. `check` claims to match CI, so it
+# pins the zone the way it pins the analyser. Override it to reproduce something
+# zone-specific.
+CHECK_TZ ?= UTC
 
 .PHONY: all build test vet staticcheck fmt fmt-check lint check clean
 
@@ -40,7 +48,7 @@ lint: vet staticcheck
 # check is the pre-commit/CI gate, formatting, static analysis, and the full
 # test suite under the race detector (matching CI).
 check: fmt-check lint
-	$(GO) test -race $(PKG)
+	TZ=$(CHECK_TZ) $(GO) test -race $(PKG)
 
 clean:
 	rm -f $(BIN)
