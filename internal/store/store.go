@@ -189,6 +189,11 @@ type call struct {
 	// only be answering the round it was issued from.
 	elicitations []*elicitation
 	elicitRound  int
+	// retired marks an operation the parking cap dropped. Nothing can continue it
+	// any more, so a bounded store may forget it even though it is still Pending,
+	// which it is: no response ever came, and saying otherwise would change what
+	// check reports about a session rather than only what the store holds.
+	retired bool
 	// progressToken is what this request asked progress to be reported under,
 	// remembered so completion can close it and a later notification under the
 	// same token is read as reuse rather than a violation.
@@ -1032,7 +1037,10 @@ func (sess *session) dropOldestFrame() int {
 	if sess.evictCursor > 0 {
 		sess.evictCursor--
 	}
-	if ev.call != nil && ev.call.state != Pending && ev.call.state != Streaming {
+	// A retired operation is released too. It is still Pending, and stays Pending
+	// in every count and verdict, but nothing can answer it, so holding the map
+	// entry keeps a call alive that no reader can reach.
+	if ev.call != nil && (ev.call.retired || ev.call.state != Pending && ev.call.state != Streaming) {
 		for key, c := range sess.calls {
 			if c == ev.call {
 				delete(sess.calls, key)
@@ -1840,6 +1848,15 @@ func (sess *session) pruneAwaiting() {
 		}
 	}
 	if excess := kept - awaitingKept; excess > 0 {
+		// Marked before they go. An operation off this list can never be linked to a
+		// retry, so it is finished as far as the store is concerned, and a bounded
+		// store is free to release it once its frames have gone. Without that a
+		// parked call stays Pending for ever, dropOldestFrame refuses to forget a
+		// Pending one, and sess.calls grows with every exchange nobody finished:
+		// measured at five thousand entries against a two hundred frame window.
+		for _, c := range sess.awaiting[:excess] {
+			c.retired = true
+		}
 		copy(sess.awaiting, sess.awaiting[excess:kept])
 		kept -= excess
 		// Counted, never silent. Retiring a settled operation above loses nothing,

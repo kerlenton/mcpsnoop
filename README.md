@@ -990,6 +990,14 @@ shows `N unlinked` and the export carries `session.retired_exchanges`, because a
 retry that does arrive for a retired operation reads as its own call, and a
 reader comparing counts deserves to be told.
 
+Retiring one also lets the live store release it. A parked operation stays
+pending on purpose, so its duration spans the whole exchange, and the store
+refuses to forget a pending call because a response may still be coming. Once
+the cap has retired an operation nothing can answer it, so holding it keeps a
+call alive that no reader can reach. What the session reports does not move. It
+is still counted pending and still counted in `N unlinked`, because how much
+memory a record occupies and what the record says are different questions.
+
 An abandoned exchange does not disturb the next one. MRTR tells servers they
 must not assume a client will ever retry, so a user declining an elicitation
 leaves an operation that no later frame will ever settle. mcpsnoop looks first
