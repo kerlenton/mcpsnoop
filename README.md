@@ -131,6 +131,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
 | `mcpsnoop inventory` | list every server that has run through mcpsnoop on this machine |
+| `mcpsnoop stats` | fold every stored capture into one row per server and tool |
 | `mcpsnoop prune` | delete saved session logs older than a cutoff |
 | `mcpsnoop wrap <server>` | route one of Claude Desktop's servers through mcpsnoop |
 | `mcpsnoop unwrap <server>` | put that server's entry back the way it was |
@@ -722,6 +723,66 @@ mcpsnoop still changes nothing about the traffic it forwards.
 
 Nothing is resolved or fetched. An external `$ref` is recognized by its form
 alone, and the schema it points at is never read.
+
+### Find the tool that fails one run in four
+
+`check` reads one session and `diff` reads exactly two, so a tool that fails
+occasionally stays invisible until somebody opens the captures by hand. Over
+sixteen captures of a server whose `run_query` answers `isError` about a quarter
+of the time, `check` reports the newest one, honestly, as clean.
+
+```bash
+mcpsnoop stats
+mcpsnoop stats --since 7d --label prod
+mcpsnoop stats --limit 20 --format json
+```
+
+```
+read 16 logs of 16 in ~/.local/state/mcpsnoop/sessions
+
+SERVER       TOOL          CALLS   ERR  PROTO    FAIL%       SESS       p50      p95      p99      DEF
+flaky-demo   run_query        13     3      0    23.1%       3/13     434ms    519ms    519ms     195B
+docs-mirror  run_query         3     1      0    33.3%        1/3     357ms    434ms    434ms     195B
+docs-mirror  search_docs      12     0      0     0.0%        0/3     377ms    386ms    386ms     200B
+flaky-demo   search_docs      52     0      0     0.0%       0/13      42ms     58ms      59ms    200B
+```
+
+`ERR` and `PROTO` are separate columns because the specification makes them
+separate things. A tool answering `isError` is reporting something a model can
+act on and retry; a JSON-RPC error is the request or the server being wrong.
+`SESS` is the count of sessions that saw a failure over the sessions that called
+the tool, which is the "one run in ten" question a rate over calls cannot
+answer.
+
+Rows key on the server and the label together. The server is the recorded
+command and working directory for stdio and the endpoint for HTTP, the same
+identity `inventory` uses. Either half alone pools something it should not: the
+label alone merges two servers that derive one name, which happens whenever two
+checkouts of a project run the same entry point, and the identity alone merges
+one command deliberately run as `prod` and again as `staging`. Both mistakes
+smear two clean distributions into one that describes neither.
+
+When two rows do share a label, the `SERVER` cell carries the working directory
+or endpoint that tells them apart, and the JSON carries `command`, `cwd` and
+`endpoint` on every row. A name that was never ambiguous is left alone, so the
+ordinary table is unchanged.
+
+Every session in a log is folded, not just the first, so a file made by
+concatenating captures counts all of them.
+
+Percentiles are pooled over the raw durations. A median of medians is a median
+of nothing. One multi round-trip operation is one call with one duration however
+many requests it took, and a call still open counts toward `CALLS` while
+contributing no latency.
+
+One capture is resident at a time. A log is loaded, folded into the running
+counters, and dropped before the next one opens, so a directory of hundreds
+costs the largest single capture rather than their sum.
+
+`--limit` defaults to a hundred of the newest logs and the header says how many
+of how many were read, so a bounded answer never passes for a complete one.
+`stats` reports and does not gate: it writes nothing, touches no baseline, opens
+no socket, and exits 0 whenever the walk succeeded.
 
 ### See which servers have actually run here
 
