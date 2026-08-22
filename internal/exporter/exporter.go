@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
@@ -42,6 +43,55 @@ type SessionExport struct {
 	Capabilities *CapabilitiesExport `json:"capabilities,omitempty"`
 	Calls        []CallExport        `json:"calls"`
 	Events       []EventExport       `json:"events"`
+	// Elicitations is the ledger of what servers asked the user for and what they
+	// answered. Absent from a session that saw none, so an ordinary export is
+	// unchanged.
+	Elicitations []ElicitationExport `json:"elicitations,omitempty"`
+}
+
+// ElicitationExport is one question a server put to the user through the client.
+//
+// It carries the shape of the question and never its content. The submitted
+// values stay in the log, so this document is safe to pass around whatever the
+// capture was redacted with, which matters most in url mode, where the
+// specification puts credentials on purpose.
+type ElicitationExport struct {
+	// CallIndex points into Calls, and is absent when the call it names is not in
+	// this document, which a bounded live store can produce by dropping the frame
+	// that opened it. A pointer rather than a sentinel: -1 is a number, and jq and
+	// Python both resolve calls[-1] to the last call rather than to nothing.
+	// CallID, Method and ToolName name the operation regardless.
+	CallIndex *int   `json:"call_index,omitempty"`
+	CallID    string `json:"call_id"`
+	Method    string `json:"method"`
+	ToolName  string `json:"tool_name,omitempty"`
+	// Key is the inputRequests entry the question was filed under, and what paired
+	// it with its answer.
+	Key string `json:"key"`
+	// Mode is form or url. A request naming neither is form, which is what the
+	// specification tells a client to assume.
+	Mode    string `json:"mode"`
+	Message string `json:"message,omitempty"`
+	// Fields are the form mode requestedSchema properties. A type is absent when
+	// the schema declared none, which includes a subschema redaction replaced with
+	// its placeholder.
+	Fields []ElicitFieldExport `json:"fields,omitempty"`
+	// URL is the url mode target in full, since the specification makes a client
+	// show it whole, and Host is the part it is told to highlight.
+	URL  string `json:"url,omitempty"`
+	Host string `json:"host,omitempty"`
+	// Action is what the user did. Absent means no retry ever answered, which
+	// Pending states outright so a consumer does not have to infer it.
+	Action     string     `json:"action,omitempty"`
+	Pending    bool       `json:"pending,omitempty"`
+	AskedAt    time.Time  `json:"asked_at"`
+	AnsweredAt *time.Time `json:"answered_at,omitempty"`
+	ElapsedMS  *float64   `json:"elapsed_ms,omitempty"`
+}
+
+type ElicitFieldExport struct {
+	Name string `json:"name"`
+	Type string `json:"type,omitempty"`
 }
 
 type ToolSummaryExport struct {
@@ -489,6 +539,29 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 		outEvents = append(outEvents, exportEvent(ev, callIndex))
 	}
 
+	elicitations := st.Elicitations(sessionID)
+	outElicitations := make([]ElicitationExport, 0, len(elicitations))
+	for _, e := range elicitations {
+		row := ElicitationExport{
+			CallID: e.CallID, Method: e.Method, ToolName: e.ToolName,
+			Key: e.Key, Mode: e.Mode, Message: e.Message,
+			URL: e.URL, Host: e.Host,
+			Action: e.Action, Pending: e.Pending(), AskedAt: e.Asked,
+		}
+		if idx, ok := callIndex[strconv.FormatUint(e.CallSeq, 10)]; ok {
+			row.CallIndex = &idx
+		}
+		for _, f := range e.Fields {
+			row.Fields = append(row.Fields, ElicitFieldExport{Name: f.Name, Type: f.Type})
+		}
+		if !e.Answered.IsZero() {
+			answered := e.Answered
+			elapsed := durationMS(e.Elapsed)
+			row.AnsweredAt, row.ElapsedMS = &answered, &elapsed
+		}
+		outElicitations = append(outElicitations, row)
+	}
+
 	out := SessionExport{
 		GeneratedAt: time.Now().UTC(),
 		Session: SessionSummary{
@@ -507,8 +580,9 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 			MissingFrames:    header.MissingFrames,
 			RetiredExchanges: header.RetiredExchanges,
 		},
-		Calls:  outCalls,
-		Events: outEvents,
+		Calls:        outCalls,
+		Events:       outEvents,
+		Elicitations: outElicitations,
 	}
 	if summary, ok := st.ToolSummary(sessionID); ok {
 		out.Summary = exportToolSummary(summary)
@@ -1037,6 +1111,31 @@ func writeText(w io.Writer, data SessionExport) error {
 	if err != nil {
 		return err
 	}
+	if len(data.Elicitations) > 0 {
+		if _, err := fmt.Fprintln(w, "elicitations:"); err != nil {
+			return err
+		}
+		for _, e := range data.Elicitations {
+			if _, err := fmt.Fprintf(w, "  %s\n", elicitationLine(e)); err != nil {
+				return err
+			}
+			// The message is what the server wrote for a human to read, so it is on
+			// every row rather than standing in for the fields when there are none.
+			if e.Message != "" {
+				if _, err := fmt.Fprintf(w, "    %s\n", oneLine(e.Message)); err != nil {
+					return err
+				}
+			}
+			if detail := elicitationDetail(e); detail != "" {
+				if _, err := fmt.Fprintf(w, "    %s\n", detail); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+	}
 	if data.Summary.Definitions != nil && len(data.Summary.Definitions.PerTool) > 0 {
 		hasFindings := false
 		for _, tool := range data.Summary.Definitions.PerTool {
@@ -1200,4 +1299,61 @@ func safeFileName(s string) string {
 
 func errPathNotFound(path string) error {
 	return fmt.Errorf("session log %q not found", path)
+}
+
+// elicitationLine is the headline of one ledger row: who asked, in which mode,
+// what the user did and how long they took.
+func elicitationLine(e ElicitationExport) string {
+	who := e.Method
+	if e.ToolName != "" {
+		who = e.Method + " " + e.ToolName
+	}
+	answer := "pending, no retry ever answered"
+	if !e.Pending {
+		answer = e.Action
+		if e.ElapsedMS != nil {
+			answer += fmt.Sprintf(" after %s", time.Duration(*e.ElapsedMS*float64(time.Millisecond)).Round(time.Millisecond))
+		}
+	}
+	return fmt.Sprintf("%s [%s] %s: %s", oneLine(who), oneLine(e.Mode), oneLine(e.Key), answer)
+}
+
+// elicitationDetail is what was asked for. A form names its fields and their
+// declared types, a url names the address whole and the host to look at, since
+// the specification tells a client to show one and highlight the other.
+func elicitationDetail(e ElicitationExport) string {
+	switch {
+	case e.URL != "":
+		out := oneLine(e.URL)
+		if e.Host != "" {
+			out += " (host " + oneLine(e.Host) + ")"
+		}
+		return out
+	case len(e.Fields) > 0:
+		parts := make([]string, 0, len(e.Fields))
+		for _, f := range e.Fields {
+			typ := f.Type
+			if typ == "" {
+				typ = "unknown"
+			}
+			parts = append(parts, oneLine(f.Name)+" "+oneLine(typ))
+		}
+		return strings.Join(parts, ", ")
+	default:
+		return ""
+	}
+}
+
+// oneLine keeps a value the wire supplied from ending the line it is printed on.
+//
+// A key, a message, a field name and a url are all written by the server, and a
+// newline in one of them closes the line it lands in, so the lines after it read
+// as more ledger rows in a document somebody diffs. Quoting rather than dropping
+// keeps the value recoverable, and matches what inventory and stats already do
+// with the values they print.
+func oneLine(s string) string {
+	if strings.ContainsFunc(s, unicode.IsControl) {
+		return strconv.Quote(s)
+	}
+	return s
 }

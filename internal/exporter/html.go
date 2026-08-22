@@ -23,6 +23,8 @@ h1 { margin:0 0 10px; font-size:22px; letter-spacing:0; }
 .toolbar { margin-top:14px; display:flex; gap:10px; align-items:center; }
 input { width:min(680px, 100%); padding:9px 11px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--fg); font:inherit; }
 main { padding:18px 24px 40px; max-width:1180px; margin:0 auto; }
+.dim { color:var(--muted); }
+.elicit-url { word-break:break-all; overflow-wrap:anywhere; }
 .section-title { margin:22px 0 10px; color:var(--muted); font-size:12px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
 .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; }
 .pill { padding:10px 12px; border:1px solid var(--line); border-radius:6px; background:var(--panel); }
@@ -92,6 +94,33 @@ document.getElementById("summary").innerHTML = [
   ["Late results", data.session.late_results],
   ["Protocol", data.capabilities?.protocol_version || ""]
 ].map(([k,v]) => "<div class=\"pill\">" + esc(k) + "<br><b>" + esc(v) + "</b></div>").join("");
+if ((data.elicitations || []).length) {
+  const block = document.createElement("div");
+  block.innerHTML = "<div class=\"section-title\">Elicitations</div>" +
+    "<div class=\"dim\">What each server asked the user for, and what they answered. " +
+    "The submitted values are not here by design; they stay in the capture.</div>";
+  const list = document.createElement("div");
+  list.className = "grid";
+  for (const e of data.elicitations) {
+    const who = esc(e.tool_name ? e.method + " " + e.tool_name : e.method);
+    const answer = e.pending ? "pending" : esc(e.action) +
+      (e.elapsed_ms != null ? " after " + Math.round(e.elapsed_ms) + "ms" : "");
+    let detail = "";
+    if (e.url) {
+      detail = "<span class=\"elicit-url\">" + esc(e.url) + "</span>" + (e.host ? " <b>" + esc(e.host) + "</b>" : "");
+    } else if ((e.fields || []).length) {
+      detail = e.fields.map(f => esc(f.name) + " <span class=\"dim\">" + esc(f.type || "unknown") + "</span>").join(", ");
+    }
+    const card = document.createElement("div");
+    card.className = "pill";
+    card.innerHTML = who + " <span class=\"dim\">[" + esc(e.mode) + "] " + esc(e.key) + "</span><br>" +
+      "<b>" + answer + "</b>" + (e.message ? "<br><span class=\"dim\">" + esc(e.message) + "</span>" : "") +
+      (detail ? "<br>" + detail : "");
+    list.appendChild(card);
+  }
+  block.appendChild(list);
+  document.getElementById("summary").after(block);
+}
 if (data.summary?.definitions?.per_tool?.length) {
   const withFindings = data.summary.definitions.per_tool.filter(t => (t.findings || []).length);
   if (withFindings.length) {

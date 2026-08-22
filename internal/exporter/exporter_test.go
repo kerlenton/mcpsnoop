@@ -1586,3 +1586,231 @@ func TestACleanExportOmitsRetiredExchanges(t *testing.T) {
 		t.Fatalf("a clean export carries the field:\n%s", buf.String())
 	}
 }
+
+// writeElicitCapture writes a capture holding one form exchange, one url
+// exchange and one nobody ever answered. The submitted value is deliberately
+// distinctive so a test can prove it never reaches the ledger.
+func writeElicitCapture(t *testing.T, path, submitted string) {
+	t.Helper()
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	meta, err := json.Marshal(proxy.SessionMeta{Command: []string{"node", "s.js"}, CWD: "/srv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq := uint64(0)
+	env := func(dir proxy.Direction, off time.Duration, raw string) proxy.Envelope {
+		seq++
+		return proxy.Envelope{SessionID: "s1", ServerLabel: "demo", Seq: seq, TS: t0.Add(off),
+			Direction: dir, Transport: proxy.TransportStdio, Raw: json.RawMessage(raw)}
+	}
+	seq++
+	envs := []proxy.Envelope{{SessionID: "s1", ServerLabel: "demo", Seq: seq, TS: t0,
+		Direction: proxy.DirectionMeta, Transport: proxy.TransportStdio, Raw: meta}}
+	envs = append(envs,
+		env(proxy.ClientToServer, time.Second, `{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"create_account"}}`),
+		env(proxy.ServerToClient, 2*time.Second, `{"jsonrpc":"2.0","id":"1","result":{"resultType":"input_required","requestState":"st-1","inputRequests":{"profile":{"method":"elicitation/create","params":{"mode":"form","message":"contact information","requestedSchema":{"type":"object","properties":{"name":{"type":"string"}}}}}}}}`),
+		env(proxy.ClientToServer, 11*time.Second, fmt.Sprintf(`{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":"create_account","inputResponses":{"profile":{"action":"accept","content":{"name":%q}}},"requestState":"st-1"}}`, submitted)),
+		env(proxy.ServerToClient, 12*time.Second, `{"jsonrpc":"2.0","id":"2","result":{"content":[]}}`),
+		env(proxy.ClientToServer, 20*time.Second, `{"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"sync_calendar"}}`),
+		env(proxy.ServerToClient, 21*time.Second, `{"jsonrpc":"2.0","id":"3","result":{"resultType":"input_required","requestState":"st-2","inputRequests":{"auth":{"method":"elicitation/create","params":{"mode":"url","url":"https://mcp.example.com/ui/set_api_key","message":"api key"}}}}}`),
+		env(proxy.ClientToServer, 50*time.Second, `{"jsonrpc":"2.0","id":"4","method":"tools/call","params":{"name":"sync_calendar","inputResponses":{"auth":{"action":"accept"}},"requestState":"st-2"}}`),
+		env(proxy.ServerToClient, 51*time.Second, `{"jsonrpc":"2.0","id":"4","result":{"content":[]}}`),
+		env(proxy.ClientToServer, 60*time.Second, `{"jsonrpc":"2.0","id":"5","method":"tools/call","params":{"name":"abandoned"}}`),
+		env(proxy.ServerToClient, 61*time.Second, `{"jsonrpc":"2.0","id":"5","result":{"resultType":"input_required","requestState":"st-3","inputRequests":{"q":{"method":"elicitation/create","params":{"message":"still there","requestedSchema":{"type":"object","properties":{"ok":{"type":"boolean"}}}}}}}}`),
+	)
+	var buf bytes.Buffer
+	for _, e := range envs {
+		b, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(append(b, '\n'))
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestExportCarriesTheElicitationLedger covers the surfaces the ledger has to
+// reach, and the boundary it must not cross.
+func TestExportCarriesTheElicitationLedger(t *testing.T) {
+	const submitted = "hunter2-do-not-repeat-me"
+	path := filepath.Join(t.TempDir(), "elicit.jsonl")
+	writeElicitCapture(t, path, submitted)
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Elicitations) != 3 {
+		t.Fatalf("rows = %d, want 3: %+v", len(data.Elicitations), data.Elicitations)
+	}
+
+	byKey := map[string]ElicitationExport{}
+	for _, e := range data.Elicitations {
+		byKey[e.Key] = e
+	}
+	form := byKey["profile"]
+	if form.Mode != "form" || form.Action != "accept" || form.ElapsedMS == nil || *form.ElapsedMS != 9000 {
+		t.Fatalf("form row = %+v", form)
+	}
+	if len(form.Fields) != 1 || form.Fields[0].Name != "name" || form.Fields[0].Type != "string" {
+		t.Fatalf("form fields = %+v", form.Fields)
+	}
+	if form.CallIndex == nil || data.Calls[*form.CallIndex].ID != form.CallID {
+		t.Fatalf("call_index %v does not point at call %q", form.CallIndex, form.CallID)
+	}
+	url := byKey["auth"]
+	if url.URL != "https://mcp.example.com/ui/set_api_key" || url.Host != "mcp.example.com" {
+		t.Fatalf("url row = %+v", url)
+	}
+	pending := byKey["q"]
+	if !pending.Pending || pending.Action != "" || pending.AnsweredAt != nil || pending.ElapsedMS != nil {
+		t.Fatalf("pending row = %+v", pending)
+	}
+
+	for _, format := range []Format{FormatJSON, FormatText, FormatHTML} {
+		var buf bytes.Buffer
+		if err := Write(&buf, data, Options{Format: format}); err != nil {
+			t.Fatalf("%s: %v", format, err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "profile") || !strings.Contains(out, "mcp.example.com") {
+			t.Fatalf("%s does not carry the ledger:\n%s", format, out[:min(len(out), 1500)])
+		}
+	}
+
+	// The submitted value belongs to the capture and to nothing else. It rides the
+	// raw frames legitimately, so the assertion is about the ledger itself.
+	ledger, err := json.Marshal(data.Elicitations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(ledger), submitted) {
+		t.Fatalf("a submitted value reached the ledger: %s", ledger)
+	}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, submitted) && !strings.Contains(line, `"name"`) {
+			t.Fatalf("the text export repeats a submitted value outside the raw frame: %q", line)
+		}
+	}
+}
+
+// TestExportWithoutElicitationOmitsTheLedger keeps an ordinary export byte
+// identical to what it was.
+func TestExportWithoutElicitationOmitsTheLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plain.jsonl")
+	writeEnv(t, path, proxy.Envelope{
+		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: time.Now(),
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+	})
+	st, id, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := Build(st, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Elicitations) != 0 {
+		t.Fatalf("elicitations = %+v, want none", data.Elicitations)
+	}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatJSON}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "elicitations") {
+		t.Fatalf("a session with none carries the key anyway:\n%s", buf.String())
+	}
+	if err := Write(&buf, data, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "elicitations:") {
+		t.Fatal("the text export gained an empty section")
+	}
+}
+
+// TestElicitationTextExportCannotForgeRows keeps a value the wire supplied from
+// ending the line it is printed on. A key, a message and a field name are all
+// written by the server, and a newline in one made the lines after it read as
+// more ledger rows.
+func TestElicitationTextExportCannotForgeRows(t *testing.T) {
+	data := SessionExport{Elicitations: []ElicitationExport{{
+		CallID: "1", Method: "tools/call", ToolName: "login",
+		Key:     "creds\nelicitations:",
+		Mode:    "form",
+		Message: "m\n  FORGED [form] x: accept after 99s",
+		Fields:  []ElicitFieldExport{{Name: "pass\nword", Type: "string"}},
+		Action:  "decline",
+	}}}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "\nFORGED") || strings.Contains(out, "\n  FORGED") {
+		t.Fatalf("a forged row reached the output:\n%s", out)
+	}
+	if !strings.Contains(out, `\n`) {
+		t.Fatalf("the control character was dropped rather than quoted, so it is not recoverable:\n%s", out)
+	}
+	// One question, one headline line, one message line, one detail line.
+	rows := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "tools/call login") {
+			rows++
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("the ledger printed %d headline rows for one question:\n%s", rows, out)
+	}
+}
+
+// TestElicitationTextExportKeepsTheMessage covers the line the switch used to
+// swallow. The message is what the server wrote for a human, so it is on every
+// row rather than standing in for the fields when there are none.
+func TestElicitationTextExportKeepsTheMessage(t *testing.T) {
+	data := SessionExport{Elicitations: []ElicitationExport{{
+		CallID: "1", Method: "tools/call", Key: "k", Mode: "form",
+		Message: "Enter your admin password to continue",
+		Fields:  []ElicitFieldExport{{Name: "password", Type: "string"}},
+		Action:  "decline",
+	}}}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Enter your admin password to continue") {
+		t.Fatalf("the message a human was shown is missing:\n%s", out)
+	}
+	if !strings.Contains(out, "password string") {
+		t.Fatalf("the fields are missing:\n%s", out)
+	}
+}
+
+// TestElicitationCallIndexIsAbsentRatherThanNegative keeps a sentinel out of a
+// document other tools read. jq and Python both resolve calls[-1] to the last
+// call, so -1 would silently point a consumer at the wrong one.
+func TestElicitationCallIndexIsAbsentRatherThanNegative(t *testing.T) {
+	data := SessionExport{Elicitations: []ElicitationExport{{
+		CallID: "1", Method: "tools/call", Key: "k", Mode: "form", Pending: true,
+	}}}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatJSON}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "-1") {
+		t.Fatalf("a negative index reached the document:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "call_index") {
+		t.Fatalf("an unresolved index is present rather than absent:\n%s", buf.String())
+	}
+}

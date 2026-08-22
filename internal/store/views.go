@@ -942,3 +942,37 @@ func nearestRank(sorted []time.Duration, percentile float64) time.Duration {
 	index := int(math.Ceil(percentile*float64(len(sorted)))) - 1
 	return sorted[max(index, 0)]
 }
+
+// Elicitations returns every question this session's servers put to the user,
+// oldest first, each paired with the answer that came back.
+//
+// Rounds are read from the calls rather than from the timeline, because a chain
+// folds into one call and the timeline no longer holds the interim results: the
+// retry overwrites them. Ordering is by when the question was asked, which is
+// the order a reader watched them happen.
+func (s *Store) Elicitations(sessionID string) []ElicitationView {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return nil
+	}
+	var out []ElicitationView
+	seen := make(map[*call]struct{})
+	for _, ev := range sess.events {
+		// Walked through the timeline so the calls arrive in the order they opened,
+		// and deduplicated because a chain maps several request frames onto one call.
+		if ev.kind != EventRequest || ev.call == nil {
+			continue
+		}
+		if _, done := seen[ev.call]; done {
+			continue
+		}
+		seen[ev.call] = struct{}{}
+		for _, el := range ev.call.elicitations {
+			out = append(out, el.view(ev.call))
+		}
+	}
+	slices.SortStableFunc(out, func(a, b ElicitationView) int { return a.Asked.Compare(b.Asked) })
+	return out
+}
