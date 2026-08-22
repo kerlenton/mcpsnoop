@@ -21,6 +21,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/replay"
 	"github.com/kerlenton/mcpsnoop/internal/store"
 )
 
@@ -137,6 +138,14 @@ type Model struct {
 
 	paused bool
 
+	// httpReplay is where a replay of an HTTP session goes, supplied by whoever
+	// opened the capture. Empty means this build of the session cannot replay one.
+	httpReplay replay.HTTPTarget
+	// replayRouting is the request metadata of the frame a replay came from, kept
+	// so repeating one, or sending it again after an edit, carries the same
+	// headers as the first attempt rather than none.
+	replayRouting replay.Routing
+
 	overlay        overlayMode
 	replayReq      store.CallView  // last user-supplied request sent to replay, so r can re-run it from the result
 	replayCaptured json.RawMessage // immutable params from the observed request behind the current replay loop
@@ -227,7 +236,18 @@ func (m Model) flashActive() bool {
 // its own version resolution, so New stays test friendly.
 var Version = "dev"
 
-func New(st *store.Store) Model {
+// Option configures a Model at construction. It is variadic so the callers that
+// need nothing keep their call sites.
+type Option func(*Model)
+
+// WithHTTPReplay says where a replay of an HTTP-captured session goes. Without
+// it such a session is not replayable, because what a capture records is the
+// endpoint stripped of anything credential-shaped and is not an address to dial.
+func WithHTTPReplay(target replay.HTTPTarget) Option {
+	return func(m *Model) { m.httpReplay = target }
+}
+
+func New(st *store.Store, opts ...Option) Model {
 	ti := textinput.New()
 	ti.Prompt = ""
 
@@ -240,6 +260,10 @@ func New(st *store.Store) Model {
 		view:   viewSessions,
 		follow: true,
 		input:  ti,
+	}
+
+	for _, opt := range opts {
+		opt(&m)
 	}
 
 	m.refresh()
@@ -306,7 +330,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		edited := !replayParamsEquivalent(msg.captured, msg.call.Params)
-		return m, m.runReplay(msg.call, msg.captured, edited)
+		routing := m.replayRouting
+		routing.Edited = edited
+		return m, m.runReplay(msg.call, msg.captured, edited, routing)
 
 	case replayDoneMsg:
 		if !m.replaying || msg.token != m.replayToken {
@@ -815,8 +841,23 @@ func (m Model) canReplay() bool {
 // per-frame flicker, so replay is never offered for a session that can never
 // run it (for example a log opened without its meta frame).
 func (m Model) sessionReplayable() bool {
-	_, _, ok := m.store.Command(m.streamSessionID)
-	return ok
+	if _, _, ok := m.store.Command(m.streamSessionID); ok {
+		return true
+	}
+	// An HTTP session records no command to run, because mcpsnoop launched
+	// nothing, and the endpoint it does record is deliberately not an address to
+	// dial. So it is replayable only once somebody has said where a replay goes.
+	return m.httpReplay.URL != "" && m.sessionTransport() == proxy.TransportHTTP
+}
+
+// sessionTransport is the channel the streamed session was captured on.
+func (m Model) sessionTransport() string {
+	for _, h := range m.allSessions {
+		if h.ID == m.streamSessionID {
+			return h.Transport
+		}
+	}
+	return ""
 }
 
 func (m *Model) startReplay() tea.Cmd {
@@ -832,7 +873,8 @@ func (m *Model) startReplay() tea.Cmd {
 		m.setFlash("this frame's body was released to stay inside the live memory budget; reopen the session log to replay it")
 		return nil
 	}
-	return m.runReplay(*ev.Call, ev.Call.Params, false)
+	m.replayRouting = routingOf(ev)
+	return m.runReplay(*ev.Call, ev.Call.Params, false, m.replayRouting)
 }
 
 // replayAgain re-runs the last replayed request, so r works straight from the
@@ -841,7 +883,7 @@ func (m *Model) replayAgain() tea.Cmd {
 	if m.replayReq.Method == "" {
 		return nil
 	}
-	return m.runReplay(m.replayReq, m.replayCaptured, m.replayEdited)
+	return m.runReplay(m.replayReq, m.replayCaptured, m.replayEdited, m.replayRouting)
 }
 
 // startEditReplay opens the focused request, or the current replay candidate,
@@ -863,6 +905,7 @@ func (m *Model) startEditReplay() tea.Cmd {
 			m.setFlash("edit replay needs a request frame")
 			return nil
 		}
+		m.replayRouting = routingOf(ev)
 		if ev.BodyReleased {
 			m.setFlash("this frame's body was released to stay inside the live memory budget; reopen the session log to edit it")
 			return nil
@@ -872,7 +915,7 @@ func (m *Model) startEditReplay() tea.Cmd {
 	}
 
 	if !m.sessionReplayable() {
-		m.setFlash("no recorded server command to replay")
+		m.setFlash(m.unreplayableReason())
 		return nil
 	}
 	cmd, err := editReplayCmd(call, captured)
@@ -883,14 +926,13 @@ func (m *Model) startEditReplay() tea.Cmd {
 	return cmd
 }
 
-func (m *Model) runReplay(call store.CallView, captured json.RawMessage, edited bool) tea.Cmd {
+func (m *Model) runReplay(call store.CallView, captured json.RawMessage, edited bool, routing replay.Routing) tea.Cmd {
 	if m.replaying {
 		return nil // a replay is already in flight; ignore until it lands or is abandoned
 	}
 	command, cwd, ok := m.store.Command(m.streamSessionID)
 	if !ok {
-		m.setFlash("no recorded server command to replay")
-		return nil
+		return m.runHTTPReplay(call, captured, edited, routing)
 	}
 	// The command comes out of the log's meta frame, so replaying runs whatever
 	// that file says. A log is data people hand around, and the hub backfills any
@@ -906,7 +948,10 @@ func (m *Model) runReplay(call store.CallView, captured json.RawMessage, edited 
 		m.replayToken++
 		return replayCmd(m.replayToken, command, cwd, call.Method, call.Params)
 	}
-	if m.replayConfirmed == m.streamSessionID {
+	// An empty session id is not a session anybody confirmed. A log whose frames
+	// carry no session_id decodes to one, and the zero value of replayConfirmed
+	// would otherwise match it, so the first r would send unprompted.
+	if m.streamSessionID != "" && m.replayConfirmed == m.streamSessionID {
 		return start(m)
 	}
 	// The prompt names the edit, so answering n is unambiguously declining to send
@@ -918,6 +963,68 @@ func (m *Model) runReplay(call store.CallView, captured json.RawMessage, edited 
 	}
 	m.ask(what+strings.Join(command, " ")+"  y/n", start)
 	return nil
+}
+
+// unreplayableReason says why this session cannot replay, in its own terms. An
+// HTTP capture has no command and never had one, so telling its reader that a
+// command is missing describes a transport they are not using.
+func (m Model) unreplayableReason() string {
+	if m.sessionTransport() == proxy.TransportHTTP {
+		return "this session was captured over HTTP, so replay needs an address: reopen with --replay-target"
+	}
+	return "no recorded server command to replay"
+}
+
+// runHTTPReplay sends a captured request to a live endpoint over HTTP.
+//
+// The address is not the one in the capture. What a capture records is the
+// endpoint with its userinfo and every query value removed, so it names the
+// server without being dialable, and a replay reaches something real that may be
+// production. The person replaying says where it goes, with --replay-target, and
+// still answers for it once per session the way a recorded command is answered
+// for before it is run.
+func (m *Model) runHTTPReplay(call store.CallView, captured json.RawMessage, edited bool, routing replay.Routing) tea.Cmd {
+	if m.sessionTransport() != proxy.TransportHTTP {
+		m.setFlash(m.unreplayableReason())
+		return nil
+	}
+	if m.httpReplay.URL == "" {
+		m.setFlash(m.unreplayableReason())
+		return nil
+	}
+	start := func(m *Model) tea.Cmd {
+		m.replayConfirmed = m.streamSessionID
+		m.replayReq = call
+		m.replayReq.Params = append(json.RawMessage(nil), call.Params...)
+		m.replayCaptured = append(json.RawMessage(nil), captured...)
+		m.replayEdited = edited
+		m.replaying = true
+		m.replayToken++
+		return replayHTTPCmd(m.replayToken, m.httpReplay, call.Method, call.Params, routing)
+	}
+	if m.streamSessionID != "" && m.replayConfirmed == m.streamSessionID {
+		return start(m)
+	}
+	what := "replay posts to: "
+	if edited {
+		what = "replay your edited params to: "
+	}
+	m.ask(what+m.httpReplay.URL+"  y/n", start)
+	return nil
+}
+
+// routingOf reads the request metadata a captured frame carried, so a replay
+// re-sends what the client sent rather than deriving it again. The transport
+// makes these mandatory and a server rejects a mismatch, so re-deriving would be
+// a second chance to get them wrong. A value outside the safe ASCII set travels
+// base64-wrapped, and the capture holds whatever the client sent, so re-sending
+// it needs no encoder and cannot disagree with the body.
+//
+// Read off the frame rather than looked up by call, because the timeline is a
+// window on the current view and the frame is already in hand where replay
+// starts.
+func routingOf(ev store.EventView) replay.Routing {
+	return replay.Routing{Name: ev.MCPName, ParamHeaders: ev.MCPParamHeaders}
 }
 
 // applySortKey maps a shift+<letter> to a column sort for the current view.

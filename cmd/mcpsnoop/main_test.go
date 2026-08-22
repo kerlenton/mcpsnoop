@@ -22,6 +22,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
+	"github.com/kerlenton/mcpsnoop/internal/tui"
 )
 
 func TestLabelFor(t *testing.T) {
@@ -392,7 +393,7 @@ func TestOpenRedactsCapturedSessionInMemoryWithoutModifyingInput(t *testing.T) {
 	input, original := writeUnredactedSession(t)
 	var opened *store.Store
 	previous := runOpenTUIFn
-	runOpenTUIFn = func(_ context.Context, st *store.Store) error {
+	runOpenTUIFn = func(_ context.Context, st *store.Store, _ ...tui.Option) error {
 		opened = st
 		return nil
 	}
@@ -432,7 +433,7 @@ func TestCapturedSessionReadDefaultsRemainUnredacted(t *testing.T) {
 
 	var opened *store.Store
 	previous := runOpenTUIFn
-	runOpenTUIFn = func(_ context.Context, st *store.Store) error {
+	runOpenTUIFn = func(_ context.Context, st *store.Store, _ ...tui.Option) error {
 		opened = st
 		return nil
 	}
@@ -1050,4 +1051,28 @@ func TestTraceSinkReportsOnlyTheFileSinkDrops(t *testing.T) {
 			t.Fatal("--no-trace writes nothing, so nothing can be incomplete")
 		}
 	})
+}
+
+// TestOpenRejectsAMalformedReplayHeader catches a typo at the flag rather than
+// dropping it at send time, where the resulting 401 told the operator to pass
+// the credential they had already passed.
+func TestOpenRejectsAMalformedReplayHeader(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	for _, value := range []string{"Authorization Bearer sk", "  : value", ""} {
+		cmd := newOpenCmd()
+		cmd.SetArgs([]string{"--replay-target", "https://h/mcp", "--replay-header", value, "-"})
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SilenceErrors, cmd.SilenceUsage = true, true
+
+		err := cmd.Execute()
+		var code exitCode
+		if err == nil || !errors.As(err, &code) || int(code) != 2 {
+			t.Fatalf("--replay-header %q exited %v, want a usage error", value, err)
+		}
+		if !strings.Contains(stderr.String(), "is not a header") {
+			t.Fatalf("--replay-header %q: stderr %q", value, stderr.String())
+		}
+	}
 }

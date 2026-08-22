@@ -256,3 +256,14 @@ func indentJSON(raw json.RawMessage) string {
 	}
 	return buf.String()
 }
+
+// replayHTTPCmd sends a captured request to a live endpoint over HTTP, off the
+// UI goroutine, and reports the outcome under the token of the run that asked
+// for it so a result the user walked away from cannot be rendered against the
+// run that replaced it.
+func replayHTTPCmd(token uint64, target replay.HTTPTarget, method string, params json.RawMessage, routing replay.Routing) tea.Cmd {
+	return func() tea.Msg {
+		res, err := replay.ReplayHTTP(context.Background(), target, method, params, routing, replayTimeout)
+		return replayDoneMsg{token: token, res: res, err: err}
+	}
+}

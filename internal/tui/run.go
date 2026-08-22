@@ -123,8 +123,8 @@ func observeAndNudge(m *toolbaseline.Manager, st *store.Store, sessionID string,
 }
 
 // RunOpen starts the TUI using a preloaded store without starting the live hub.
-func RunOpen(ctx context.Context, st *store.Store) error {
-	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx))
+func RunOpen(ctx context.Context, st *store.Store, opts ...Option) error {
+	p := tea.NewProgram(New(st, opts...), tea.WithAltScreen(), tea.WithContext(ctx))
 	go observeAllInBackground(p, st)
 	_, err := p.Run()
 	if errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, context.Canceled) {
@@ -134,8 +134,8 @@ func RunOpen(ctx context.Context, st *store.Store) error {
 }
 
 // RunOpenWithInput starts the TUI using a preloaded store and a custom input reader (e.g., controlling TTY).
-func RunOpenWithInput(ctx context.Context, st *store.Store, in io.Reader) error {
-	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx), tea.WithInput(in))
+func RunOpenWithInput(ctx context.Context, st *store.Store, in io.Reader, opts ...Option) error {
+	p := tea.NewProgram(New(st, opts...), tea.WithAltScreen(), tea.WithContext(ctx), tea.WithInput(in))
 	go observeAllInBackground(p, st)
 	_, err := p.Run()
 	if errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, context.Canceled) {

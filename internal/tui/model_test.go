@@ -2304,3 +2304,229 @@ func TestStreamSaysWhenOlderFramesAreOnlyOnDisk(t *testing.T) {
 		t.Fatalf("dropped frames are being reported as a hole in the capture:\n%s", view)
 	}
 }
+
+// httpSessionStore builds a capture of an HTTP session with its meta frame and
+// one tools/call carrying the routing headers the transport requires.
+func httpSessionStore(t *testing.T) *store.Store {
+	t.Helper()
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	meta, err := json.Marshal(proxy.SessionMeta{Target: "https://api.example.com/mcp?key=[stripped]"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.New()
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "httpdemo", Seq: 1, TS: t0,
+		Direction: proxy.DirectionMeta, Transport: proxy.TransportHTTP, Raw: meta})
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "httpdemo", Seq: 2, TS: t0.Add(time.Millisecond),
+		Direction: proxy.ClientToServer, Transport: proxy.TransportHTTP,
+		MCPMethod: "tools/call", MCPName: "echo",
+		MCPParamHeaders: []proxy.MCPParamHeader{{Name: "Mcp-Param-Region", Value: "us-west1"}},
+		Raw:             json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}`)})
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "httpdemo", Seq: 3, TS: t0.Add(10 * time.Millisecond),
+		Direction: proxy.ServerToClient, Transport: proxy.TransportHTTP,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`)})
+	return st
+}
+
+// TestHTTPSessionIsReplayableOnlyWithATarget is the gate. An HTTP capture
+// records no command to run, and the endpoint it does record is stripped of
+// anything credential-shaped, so it is not an address to dial. Replay is offered
+// once somebody has said where it goes and not before.
+func TestHTTPSessionIsReplayableOnlyWithATarget(t *testing.T) {
+	st := httpSessionStore(t)
+
+	without := New(st)
+	without.streamSessionID = "s1"
+	without.allSessions = st.Sessions()
+	if without.sessionReplayable() {
+		t.Fatal("an HTTP session with no target should not offer replay")
+	}
+
+	with := New(st, WithHTTPReplay(replay.HTTPTarget{URL: "https://api.example.com/mcp?key=real"}))
+	with.streamSessionID = "s1"
+	with.allSessions = st.Sessions()
+	if !with.sessionReplayable() {
+		t.Fatal("an HTTP session with a target should offer replay")
+	}
+}
+
+// TestHTTPReplayWithoutATargetSaysWhy keeps the key from failing silently, and
+// keeps the stdio message off a session that never had a command to begin with.
+func TestHTTPReplayWithoutATargetSaysWhy(t *testing.T) {
+	st := httpSessionStore(t)
+	m := New(st)
+	m.streamSessionID = "s1"
+	m.allSessions = st.Sessions()
+	m.width, m.height = 120, 40
+	m.refresh()
+
+	call := store.CallView{RequestSeq: 2, Method: "tools/call", ToolName: "echo", IsTool: true}
+	if cmd := m.runReplay(call, nil, false, replay.Routing{}); cmd != nil {
+		t.Fatal("a replay was started with nowhere to send it")
+	}
+	if !strings.Contains(m.flash, "--replay-target") {
+		t.Fatalf("flash = %q, want it to name the flag", m.flash)
+	}
+	if strings.Contains(m.flash, "no recorded server command") {
+		t.Fatalf("an HTTP session was told it is missing a command it never had: %q", m.flash)
+	}
+}
+
+// TestHTTPReplayAsksBeforeItSends keeps the once-per-session confirmation that
+// a recorded command already gets, because a replay reaches a live server that
+// may be the production one.
+func TestHTTPReplayAsksBeforeItSends(t *testing.T) {
+	st := httpSessionStore(t)
+	const target = "https://api.example.com/mcp?key=real"
+	m := New(st, WithHTTPReplay(replay.HTTPTarget{URL: target}))
+	m.streamSessionID = "s1"
+	m.allSessions = st.Sessions()
+	m.width, m.height = 120, 40
+	m.refresh()
+
+	call := store.CallView{RequestSeq: 2, Method: "tools/call", ToolName: "echo", IsTool: true}
+	if cmd := m.runReplay(call, nil, false, replay.Routing{}); cmd != nil {
+		t.Fatal("a replay was sent before it was answered for")
+	}
+	if !strings.Contains(m.confirm, target) {
+		t.Fatalf("the prompt does not name where it posts: %q", m.confirm)
+	}
+	if m.replaying {
+		t.Fatal("the replay is already in flight")
+	}
+}
+
+// TestHTTPReplayReusesTheCapturedRoutingHeaders keeps a replay from deriving the
+// request metadata a second time. The capture holds what the client sent,
+// including any base64 sentinel form, so re-sending it cannot disagree with the
+// body the way a re-derivation could.
+func TestHTTPReplayReusesTheCapturedRoutingHeaders(t *testing.T) {
+	st := httpSessionStore(t)
+	m := New(st, WithHTTPReplay(replay.HTTPTarget{URL: "https://h/mcp"}))
+	m.streamSessionID = "s1"
+	m.allSessions = st.Sessions()
+	m.width, m.height = 120, 40
+	m.refresh()
+
+	call := store.CallView{RequestSeq: 2, Method: "tools/call", ToolName: "echo", IsTool: true}
+	_ = call
+	// Read off the frame where a replay starts, which is where the headers are.
+	m.view = viewStream
+	m.refresh()
+	ev, ok := m.focusedFrameByMethod("tools/call")
+	if !ok {
+		t.Fatalf("no request frame in the timeline: %d frames", len(m.timeline))
+	}
+	routing := routingOf(ev)
+	if routing.Name != "echo" {
+		t.Fatalf("Mcp-Name = %q, want the captured one", routing.Name)
+	}
+	if len(routing.ParamHeaders) != 1 || routing.ParamHeaders[0].Name != "Mcp-Param-Region" ||
+		routing.ParamHeaders[0].Value != "us-west1" {
+		t.Fatalf("param headers = %+v, want the captured one", routing.ParamHeaders)
+	}
+}
+
+// TestAStdioSessionStillReplaysItsCommand keeps the transport that already
+// worked working, and keeps its prompt naming the command rather than an address.
+func TestAStdioSessionStillReplaysItsCommand(t *testing.T) {
+	st := store.New()
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	meta, err := json.Marshal(proxy.SessionMeta{Command: []string{"node", "server.js"}, CWD: "/srv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: t0,
+		Direction: proxy.DirectionMeta, Transport: proxy.TransportStdio, Raw: meta})
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: t0.Add(time.Millisecond),
+		Direction: proxy.ClientToServer, Transport: proxy.TransportStdio,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`)})
+
+	m := New(st, WithHTTPReplay(replay.HTTPTarget{URL: "https://h/mcp"}))
+	m.streamSessionID = "s1"
+	m.allSessions = st.Sessions()
+	m.width, m.height = 120, 40
+	m.refresh()
+	if !m.sessionReplayable() {
+		t.Fatal("a stdio session lost its replay")
+	}
+	call := store.CallView{RequestSeq: 2, Method: "tools/call", ToolName: "echo", IsTool: true}
+	m.runReplay(call, nil, false, replay.Routing{})
+	if !strings.Contains(m.confirm, "node server.js") {
+		t.Fatalf("the prompt should still name the command it runs: %q", m.confirm)
+	}
+	if strings.Contains(m.confirm, "https://h/mcp") {
+		t.Fatalf("a stdio session was offered an HTTP target: %q", m.confirm)
+	}
+}
+
+// focusedFrameByMethod finds a request frame in the current timeline, so a test
+// can read the routing headers a replay would send without driving the cursor.
+func (m Model) focusedFrameByMethod(method string) (store.EventView, bool) {
+	for _, ev := range m.timeline {
+		if ev.Kind == store.EventRequest && ev.Method == method {
+			return ev, true
+		}
+	}
+	return store.EventView{}, false
+}
+
+// TestEditReplayOnAnHTTPSessionSaysWhy keeps R from telling an HTTP reader that
+// a command is missing. It never had one, and the message describes a transport
+// they are not using.
+func TestEditReplayOnAnHTTPSessionSaysWhy(t *testing.T) {
+	st := httpSessionStore(t)
+	m := New(st)
+	m.streamSessionID = "s1"
+	m.allSessions = st.Sessions()
+	m.width, m.height = 120, 40
+	m.view = viewStream
+	m.refresh()
+	for i, ev := range m.timeline {
+		if ev.Kind == store.EventRequest {
+			m.selEvent = i
+		}
+	}
+
+	if cmd := m.startEditReplay(); cmd != nil {
+		t.Fatal("an editor was opened for a session with nowhere to send the result")
+	}
+	if !strings.Contains(m.flash, "--replay-target") {
+		t.Fatalf("flash = %q, want it to name the flag", m.flash)
+	}
+	if strings.Contains(m.flash, "no recorded server command") {
+		t.Fatalf("an HTTP session was told it is missing a command it never had: %q", m.flash)
+	}
+}
+
+// TestAnEmptySessionIdStillAsksBeforeReplaying keeps the once-per-session
+// confirmation from being satisfied by a zero value. A log whose frames carry no
+// session_id decodes to a session whose id is empty, which the unset
+// replayConfirmed matched.
+func TestAnEmptySessionIdStillAsksBeforeReplaying(t *testing.T) {
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	meta, err := json.Marshal(proxy.SessionMeta{Command: []string{"node", "server.js"}, CWD: "/srv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.New()
+	st.Ingest(proxy.Envelope{ServerLabel: "srv", Seq: 1, TS: t0,
+		Direction: proxy.DirectionMeta, Transport: proxy.TransportStdio, Raw: meta})
+	st.Ingest(proxy.Envelope{ServerLabel: "srv", Seq: 2, TS: t0.Add(time.Millisecond),
+		Direction: proxy.ClientToServer, Transport: proxy.TransportStdio,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`)})
+
+	m := New(st)
+	m.streamSessionID = ""
+	m.allSessions = st.Sessions()
+	m.width, m.height = 120, 40
+	m.refresh()
+
+	call := store.CallView{RequestSeq: 2, Method: "tools/call", ToolName: "echo", IsTool: true}
+	if cmd := m.runReplay(call, nil, false, replay.Routing{}); cmd != nil {
+		t.Fatal("a replay was sent without being answered for")
+	}
+	if m.confirm == "" {
+		t.Fatal("no confirmation was asked for")
+	}
+}

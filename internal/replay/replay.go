@@ -170,6 +170,18 @@ func withClientMeta(params json.RawMessage) json.RawMessage {
 	meta["io.modelcontextprotocol/protocolVersion"] = json.RawMessage(strconv.Quote(statelessProtocolVersion))
 	meta["io.modelcontextprotocol/clientInfo"] = json.RawMessage(
 		fmt.Sprintf(`{"name":%q,"version":"dev"}`, clientName))
+	// Required on every request from this revision, unlike clientInfo, which is
+	// not. A request missing a required field is malformed and the server "MUST
+	// reject it with JSON-RPC error code -32602", answering 400 over HTTP, so
+	// leaving it out made every replay fail against a conforming server. The
+	// store's own checker reports a client that omits it, which is to say
+	// mcpsnoop was flagging its own replayed request.
+	//
+	// An empty object is the honest declaration rather than a placeholder. It says
+	// this client has nothing to offer, which is true of a one-shot replay: it
+	// cannot answer an input request, and a server is told not to rely on a
+	// capability nobody declared.
+	meta["io.modelcontextprotocol/clientCapabilities"] = json.RawMessage(`{}`)
 
 	// jsonwire on all three marshals in this file: these carry captured params
 	// back to a live server, and the replay overlay renders what is built here.

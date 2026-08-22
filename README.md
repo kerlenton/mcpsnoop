@@ -152,7 +152,7 @@ Run `mcpsnoop help` for the full list, or `mcpsnoop help <command>` for the flag
 | Interactive terminal UI | no | yes |
 | Zero-config, no flags or ordering | no | yes |
 | Capability inspector | partial | yes |
-| Replay a captured call | no | yes |
+| Replay a captured call | no | yes, over stdio and over HTTP |
 | Session export (json / html / text / otlp) | no | yes |
 | Single binary, no runtime deps | no | yes |
 
@@ -723,6 +723,65 @@ mcpsnoop still changes nothing about the traffic it forwards.
 
 Nothing is resolved or fetched. An external `$ref` is recognized by its form
 alone, and the schema it points at is never read.
+
+### Replay a call captured over HTTP
+
+`r` re-issues a captured call against a live server. For a stdio capture the
+command is in the log, so mcpsnoop launches an isolated copy and sends the
+request to that. An HTTP capture has no command to launch, and the endpoint it
+records is stripped of its userinfo and every query value, so it names the server
+without being an address to dial.
+
+So you say where a replay goes, and mcpsnoop never dials a production endpoint
+because somebody pressed a key.
+
+```bash
+mcpsnoop open --replay-target https://api.example.com/mcp session.jsonl
+mcpsnoop open --replay-target https://api.example.com/mcp \
+  --replay-header 'Authorization: Bearer sk-…' session.jsonl
+```
+
+Without `--replay-target` an HTTP session says so rather than offering a key that
+cannot work. With one, `r` still asks before the first send of a session, the
+same way a recorded command is answered for before it is run.
+
+A credential reaches the server through `--replay-header` and nowhere else.
+mcpsnoop records no `Authorization` header and replays none, so there is nothing
+captured for a replay to leak.
+
+The replayed POST carries what the transport makes mandatory, which a POST of the
+bare captured body does not: `MCP-Protocol-Version`, an `Accept` listing both
+`application/json` and `text/event-stream`, `Mcp-Method`, `Mcp-Name` where the
+spec requires it, and every captured `Mcp-Param-*`. Those are re-sent verbatim
+from the capture, base64 sentinel and all, so they cannot disagree with the body
+the way a re-derivation could. The one header that is not copied is the protocol
+version, because the replayed body declares the revision mcpsnoop speaks and the
+header has to match the body.
+
+`Mcp-Name` is derived from the body being sent rather than copied, because the
+spec sources it from `params.name` or `params.uri` and requires a server to
+reject a header that disagrees with the body, so an edit that renames the tool
+would otherwise send the old name. The `Mcp-Param-*` headers mirror the captured
+arguments, so an edited replay sends none of them rather than asserting
+something about a body somebody rewrote. A capture can only set headers in that
+one family: a log is a file people hand around, and letting it name any header
+would let it overwrite the mandatory ones or add a credential nobody passed.
+
+A `Mcp-Param-*` a redaction rule scrubbed stops the replay with a reason. Sending
+the placeholder would put mcpsnoop's own bytes on a live server as though a user
+had typed them.
+
+A redirect is refused rather than followed. The address is the one you named and
+answered for, and following a 307 would hand that choice to the far end, resending
+the body and, on a hop that only changes the port, the credential too. mcpsnoop
+reports where the server wanted to send it and lets you decide whether to name
+that one instead.
+
+An answer arriving as a single JSON object and one arriving as an event stream
+are both read, and a failure is named rather than numbered: a 401 reports the
+scheme the server demanded, a `-32020` reports what it objected to, and a
+non-JSON-RPC 400 or 404 says the address is not a Streamable HTTP endpoint of
+this revision.
 
 ### Tell the server's latency from the user's
 
