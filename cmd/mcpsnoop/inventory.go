@@ -285,30 +285,13 @@ func readSessionHead(path string) (sessionHead, error) {
 	return head, nil
 }
 
-// key is what makes two sessions the same server.
-//
-// For stdio it is the recorded command and working directory, never the label,
-// because labelFor derives the label from the command's last path element and
-// two checkouts of one project, or two servers written in one language, collide
-// there routinely. For HTTP it is the endpoint, since mcpsnoop launched nothing
-// and the endpoint is what the transport specification makes the server's
-// identity. A log carrying neither falls back to its label and transport, which
-// is the most a trimmed or pre-meta log can honestly claim.
-//
-// A redacted command keys as itself. Two runs of one server, one scrubbed and
-// one not, are two rows, and that is the honest answer: mcpsnoop cannot know
-// what the placeholder replaced, and merging them would mean guessing that the
-// hidden halves matched.
+// key folds the head into the identity every command in this binary shares, so
+// what counts as one server is decided once. See serverIdentity in sessionscan.go.
 func (h sessionHead) key() string {
-	const sep = "\x00"
-	switch {
-	case len(h.command) > 0:
-		return "stdio" + sep + h.cwd + sep + strings.Join(h.command, sep)
-	case h.endpoint != "":
-		return "http" + sep + h.endpoint
-	default:
-		return "label" + sep + h.transport + sep + h.label
-	}
+	return serverIdentity{
+		label: h.label, transport: h.transport,
+		command: h.command, cwd: h.cwd, endpoint: h.endpoint,
+	}.key()
 }
 
 // toolCountStatus distinguishes the three ways --tools can fail to produce a

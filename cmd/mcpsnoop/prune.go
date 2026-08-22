@@ -2,12 +2,10 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -82,37 +80,13 @@ func newPruneCmd() *cobra.Command {
 	return cmd
 }
 
-// pruneCutoff turns an --older-than value into the cutoff time, before which a log
-// is old enough to remove. time.ParseDuration rejects a day suffix, so a whole
-// number of days is parsed here on top of the Go duration forms it does accept.
+// pruneCutoff turns an --older-than value into the cutoff time, before which a
+// log is old enough to remove. The parsing is shared with stats --since, which
+// takes the same forms, so the two cannot drift into accepting different ones.
 func pruneCutoff(olderThan string) (time.Time, error) {
-	s := strings.TrimSpace(olderThan)
-	if s == "" {
-		return time.Time{}, errors.New("--older-than is required, e.g. 30d or 72h")
-	}
-	// A zero age would make the cutoff the current moment and match every log,
-	// including the one a running shim is still appending to, so both forms require
-	// a strictly positive value. That is the easiest way to express "delete
-	// everything", which issue #107 asked to keep out of reach.
-	var age time.Duration
-	if days, ok := strings.CutSuffix(s, "d"); ok {
-		n, err := strconv.Atoi(days)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("invalid --older-than %q, want a whole number of days like 30d, or a Go duration like 72h", s)
-		}
-		if n <= 0 {
-			return time.Time{}, errors.New("--older-than must be greater than zero")
-		}
-		age = time.Duration(n) * 24 * time.Hour
-	} else {
-		d, err := time.ParseDuration(s)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("invalid --older-than %q, want a day count like 30d, or a Go duration like 72h", s)
-		}
-		if d <= 0 {
-			return time.Time{}, errors.New("--older-than must be greater than zero")
-		}
-		age = d
+	age, err := parseAge(olderThan, "--older-than")
+	if err != nil {
+		return time.Time{}, err
 	}
 	return time.Now().Add(-age), nil
 }
