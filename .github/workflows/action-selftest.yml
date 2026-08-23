@@ -128,9 +128,14 @@ jobs:
       # The other half of install: false. This one downloads a published release
       # and verifies it, which is the part that has to work on three operating
       # systems and cannot be tested anywhere but here.
+      # Pinned to a known release rather than tracking the newest one. What this
+      # leg tests is that install.sh can fetch and verify a published archive on
+      # three operating systems, and a moving target would make a failure here
+      # ambiguous between the script and whatever was published that morning.
+      # Bumping it is optional and safe; pointing it at "latest" is not.
       - name: Install a published release and check with it
         uses: ./
         with:
           session: captures/clean.jsonl
-          version: v0.20.0
+          version: v0.21.0
           category: mcpsnoop-selftest-release-${{ matrix.os }}
