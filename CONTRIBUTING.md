@@ -63,8 +63,13 @@ mcpsnoop follows [Semantic Versioning](https://semver.org), with tags shaped lik
 - **From `1.0.0` on**, breaking changes go in a **major** bump, new features in a
   **minor**, and fixes in a **patch**.
 
+A prerelease tag must be spelled `-rc.N`, as in `v1.0.0-rc.1`. Homebrew keeps
+prereleases out of `brew install mcpsnoop` with a list of keywords that contains
+`rc` and not, say, `next`, so a differently spelled tag would be bumped to every
+Homebrew user.
+
 A release is cut by pushing a version tag. See [RELEASING.md](RELEASING.md) for
-the steps.
+the steps, and for what else is true of a prerelease.
 
 ## Reporting bugs and proposing features
 

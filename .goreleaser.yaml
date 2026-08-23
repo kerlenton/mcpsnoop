@@ -29,6 +29,22 @@ archives:
       - goos: windows
         formats: [zip]
 
+# Without this, a v*-rc tag publishes as an ordinary release and takes the Latest
+# badge, because prerelease defaults to false and GitHub's own make_latest
+# default is true. The npm half already keeps a prerelease off the `latest`
+# dist-tag, and this is the other half of the same promise. Detection is on the
+# semver prerelease field, not a substring, so any hyphenated tag is caught.
+release:
+  prerelease: auto
+
+git:
+  # Tells git's version sort that -rc marks a prerelease. Without it,
+  # `git tag --points-at HEAD --sort -version:refname` puts v0.20.1-rc.1 above
+  # v0.20.1, so promoting a release candidate by tagging the same commit makes
+  # GoReleaser rebuild the rc and leaves the npm job downloading a release that
+  # was never created.
+  prerelease_suffix: "-rc"
+
 checksum:
   name_template: "checksums.txt"
 
