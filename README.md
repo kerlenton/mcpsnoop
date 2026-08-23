@@ -8,6 +8,7 @@ between your AI client and your MCP servers, live in your terminal.
 [![CI](https://github.com/kerlenton/mcpsnoop/actions/workflows/ci.yml/badge.svg)](https://github.com/kerlenton/mcpsnoop/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/kerlenton/mcpsnoop.svg)](https://pkg.go.dev/github.com/kerlenton/mcpsnoop)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Marketplace](https://img.shields.io/badge/marketplace-mcpsnoop-blue?logo=github)](https://github.com/marketplace/actions/mcpsnoop)
 
 <p align="center">
   <img src="docs/demo.gif" alt="mcpsnoop demo">
@@ -24,6 +25,26 @@ call just hangs, you're left digging through logs and guessing.
 
 **mcpsnoop sits in the real data path instead.** Wrap your server command with
 it and watch every JSON-RPC frame live, as your real client and server talk.
+
+## In CI
+
+This page is also the listing for the [mcpsnoop GitHub Action](https://github.com/marketplace/actions/mcpsnoop),
+so here is the whole of it. It checks a captured session, files every finding as
+a code scanning alert, and fails the job on what you gated on.
+
+```yaml
+permissions:
+  security-events: write
+  contents: read
+
+steps:
+  - uses: kerlenton/mcpsnoop@v0.21.0
+    with:
+      session: artifacts/session.jsonl
+```
+
+Every input, what the exit codes mean, and how to wire it up without the action
+are in [The GitHub Action](#the-github-action) further down.
 
 ## Quick start
 

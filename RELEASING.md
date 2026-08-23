@@ -132,8 +132,14 @@ checkbox only appears when a release is edited in the web UI. Publishing also
 asks for two-factor authentication.
 
 So after a release lands, open it on the releases page, tick the box, and publish
-again. Skipping it does not break anything, it only leaves the listing pointing
-at the previous release.
+again.
+
+Skipping it breaks nothing. `uses: kerlenton/mcpsnoop@vX.Y.Z` resolves the
+repository at that git ref and never consults the Marketplace, which the action's
+own self-test proves on every pull request: it runs the action from the working
+tree, with no listing involved. What the box affects is the version the listing
+advertises, so forgetting it leaves the page recommending an older release than
+the one that exists.
 
 The listing is keyed on the `name` field in `action.yml`, not on the repository,
 so that field must not change. Do not rename `action.yml` to `action.yaml`
