@@ -40,7 +40,14 @@ replaced**, and unpublishing is restricted to a 72 hour window. The packaging
 step refuses to write anything unless all six archives are present and match
 their checksums, for that reason. If the npm half fails after the GitHub Release
 is out, do not re-tag. Re-run the `npm` job on its own from the Actions tab with
-`workflow_dispatch`, giving it the same tag.
+`workflow_dispatch`, giving it the same tag. It skips whatever is already on the
+registry, so a publish that died partway through picks up where it stopped.
+
+A prerelease goes out under the `next` tag rather than claiming `latest`, so a
+`vX.Y.Z-rc.1` does not reach everyone running `npx mcpsnoop`. Do not make the
+*first* release of a package a prerelease, though. npm's handling of `latest` on
+a package that has never been published is not documented, and the first release
+is the one time there is no existing `latest` to protect.
 
 The first release of a package has to go through the token, because npm's
 [trusted publishing](https://docs.npmjs.com/trusted-publishers) is configured in
