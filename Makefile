@@ -16,8 +16,15 @@ STATICCHECK_VERSION ?= v0.8.0
 # pins the zone the way it pins the analyser. Override it to reproduce something
 # zone-specific.
 CHECK_TZ ?= UTC
+# Pinned for the third time for the same reason, one layer out. `make check` was
+# green on shellcheck 0.11.0 while CI failed on the ubuntu image's older one,
+# which still reports SC2015 for a pattern 0.11 accepts. An analyser the two
+# sides do not share is an analyser that finds things only on somebody else's
+# pull request. Downloaded when the local one is a different version, the way
+# staticcheck is run through `go run` at a fixed version.
+SHELLCHECK_VERSION ?= v0.11.0
 
-.PHONY: all build test vet vet-cross staticcheck fmt fmt-check lint check clean action-test
+.PHONY: all build test vet vet-cross staticcheck fmt fmt-check lint check clean action-test shellcheck-bin
 
 all: check build
 
@@ -66,16 +73,34 @@ fmt-check:
 # drive the real scripts against a stand-in releases page and a stand-in binary,
 # so they need mcpsnoop built but no network. shellcheck is run when it is here,
 # since a contributor working on Go has no reason to have installed it.
-action-test:
+action-test: shellcheck-bin
 	@$(GO) build -o "$(CURDIR)/.action-bin/mcpsnoop" ./cmd/mcpsnoop
-	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck action/*.sh action/tests/*.sh || exit 1; \
-	else \
-		echo "shellcheck not installed, skipping the shell lint"; \
-	fi
+	@"$(CURDIR)/.action-bin/shellcheck" action/*.sh action/tests/*.sh
 	@PATH="$(CURDIR)/.action-bin:$$PATH" bash action/tests/install_test.sh
 	@PATH="$(CURDIR)/.action-bin:$$PATH" bash action/tests/check_test.sh
 	@rm -rf "$(CURDIR)/.action-bin"
+
+# Resolve a shellcheck of exactly SHELLCHECK_VERSION: the one already installed
+# if it is that version, otherwise a downloaded copy. It is a Haskell binary
+# rather than a Go module, so there is no `go run` equivalent to lean on.
+shellcheck-bin:
+	@mkdir -p "$(CURDIR)/.action-bin"
+	@want="$(SHELLCHECK_VERSION)"; want="$${want#v}"; \
+	if command -v shellcheck >/dev/null 2>&1 && \
+		shellcheck --version | grep -qx "version: $$want"; then \
+		ln -sf "$$(command -v shellcheck)" "$(CURDIR)/.action-bin/shellcheck"; \
+	elif [ ! -x "$(CURDIR)/.action-bin/shellcheck" ]; then \
+		case "$$(uname -s)/$$(uname -m)" in \
+			Darwin/arm64) plat=darwin.aarch64 ;; \
+			Darwin/*) plat=darwin.x86_64 ;; \
+			Linux/aarch64|Linux/arm64) plat=linux.aarch64 ;; \
+			Linux/*) plat=linux.x86_64 ;; \
+			*) echo "no pinned shellcheck for $$(uname -s)/$$(uname -m)"; exit 1 ;; \
+		esac; \
+		echo "fetching shellcheck $(SHELLCHECK_VERSION) for $$plat"; \
+		curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/$(SHELLCHECK_VERSION)/shellcheck-$(SHELLCHECK_VERSION).$$plat.tar.xz" \
+			| tar -xJ -C "$(CURDIR)/.action-bin" --strip-components=1 "shellcheck-$(SHELLCHECK_VERSION)/shellcheck"; \
+	fi
 
 lint: vet vet-cross staticcheck
 

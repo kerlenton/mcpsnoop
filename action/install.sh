@@ -94,10 +94,14 @@ else
 	want="$(awk -v name="$archive" '$2 == name || $2 == "*" name { print $1; n++ } END { if (n != 1) exit 1 }' "$dir/checksums.txt")" ||
 		die "checksums.txt for $version does not list exactly one entry for $archive"
 
+	# The file on stdin rather than named as an argument. Given a name, GNU
+	# coreutils escapes the line it prints when that name contains a backslash,
+	# and prefixes the whole thing with one. RUNNER_TEMP on a Windows runner is
+	# D:\a\_temp, so every hash came back as \<hash> and never matched anything.
 	if command -v sha256sum >/dev/null 2>&1; then
-		got="$(sha256sum "$dir/$archive" | cut -d' ' -f1)"
+		got="$(sha256sum <"$dir/$archive" | cut -d' ' -f1)"
 	elif command -v shasum >/dev/null 2>&1; then
-		got="$(shasum -a 256 "$dir/$archive" | cut -d' ' -f1)"
+		got="$(shasum -a 256 <"$dir/$archive" | cut -d' ' -f1)"
 	else
 		die "neither sha256sum nor shasum is available, so the download cannot be verified"
 	fi

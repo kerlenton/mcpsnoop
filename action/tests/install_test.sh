@@ -118,6 +118,38 @@ else
 fi
 
 serve
+# A destination path with a backslash in it, which every Windows runner has:
+# RUNNER_TEMP there is D:\a\_temp.
+#
+# The hasher has to be a stand-in. GNU coreutils escapes the line it prints when
+# the name it was given contains a backslash, and prefixes the whole line with
+# one, so every hash came back as \<hash> and matched nothing. macOS ships a
+# sha256sum that does not do this, so on a developer's machine the real bug is
+# invisible and a test using the local tool would pass while Windows failed.
+mkdir -p "$root/win\\temp"
+real_hasher="$(command -v shasum)"
+cat >"$root/bin/sha256sum" <<GNU
+#!/usr/bin/env bash
+# Stands in for GNU coreutils sha256sum, escaping the way it documents.
+if [ \$# -eq 0 ]; then "$real_hasher" -a 256; exit; fi
+line="\$("$real_hasher" -a 256 "\$1")"
+case "\$1" in
+*\\\\*) printf '\\\\%s\\n' "\${line%% *}" ;;
+*) printf '%s\\n' "\${line%% *}" ;;
+esac
+GNU
+chmod +x "$root/bin/sha256sum"
+if out="$(env PATH="$root/bin:$PATH" SERVE_DIR="$root/serve" \
+	RUNNER_TEMP="$root/win\\temp" GITHUB_PATH="$root/path" \
+	RUNNER_OS=Linux RUNNER_ARCH=X64 GITHUB_ACTION_REF=v9.9.9 \
+	bash "$install_sh" 2>&1)"; then
+	ok "verifies a download into a path holding a backslash, as every Windows runner has"
+else
+	bad "a backslash in the destination path broke the verification" "$out"
+fi
+rm -f "$root/bin/sha256sum"
+
+serve
 # A checksums file that also vouches for an artifact whose name contains the
 # archive's. A release that grows a signature or an SBOM alongside each archive
 # produces exactly this, and a substring match would then have two candidates

@@ -32,12 +32,16 @@ refuse() {
 
 session="${MCPSNOOP_SESSION:-}"
 report="${RUNNER_TEMP:-}/mcpsnoop.sarif"
-[ -n "$session" ] && [ -n "${RUNNER_TEMP:-}" ] || {
-	# Neither is anything a caller can get wrong through the action's inputs, so
-	# there is no help to offer beyond saying which one is missing.
-	printf 'mcpsnoop-action: %s is not set\n' "$([ -z "$session" ] && echo "the session input" || echo RUNNER_TEMP)" >&2
+# Neither is anything a caller can get wrong through the action's inputs, so
+# there is no help to offer beyond saying which one is missing.
+if [ -z "$session" ]; then
+	printf 'mcpsnoop-action: the session input is not set\n' >&2
 	exit 1
-}
+fi
+if [ -z "${RUNNER_TEMP:-}" ]; then
+	printf 'mcpsnoop-action: RUNNER_TEMP is not set, which means this is not running on a GitHub runner\n' >&2
+	exit 1
+fi
 
 # The action reports through a file, so a capture piped in on stdin has nothing
 # for a result to point at and every alert would arrive with no location.
