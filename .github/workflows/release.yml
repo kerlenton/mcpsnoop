@@ -62,10 +62,17 @@ jobs:
           check-latest: true
       # 24 rather than the 22 that CI runs. Trusted publishing needs npm 11.5.1
       # or later to authenticate by OIDC, and node 22 still carries npm 10.
-      - uses: actions/setup-node@v4
+      #
+      # v7 rather than v4 for two things this job hit. v4 writes always-auth
+      # into the .npmrc, which npm now warns on and says will stop working, and
+      # it exports a dummy NODE_AUTH_TOKEN. Both are gone by v7. Caching is off
+      # because a release must build from what is in the tag, not from whatever
+      # a cache happens to hold.
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
       # Without this, an npm too old to speak OIDC fails at the publish with a
       # 401, which reads like a credential problem and is not one.
