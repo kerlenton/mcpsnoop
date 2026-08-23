@@ -118,34 +118,49 @@ else
 fi
 
 serve
-# A destination path with a backslash in it, which every Windows runner has:
-# RUNNER_TEMP there is D:\a\_temp.
+# A hasher that escapes its own output, which is what GNU coreutils does when the
+# name it was handed contains a backslash: it escapes the line and prefixes the
+# whole thing with one. RUNNER_TEMP on a Windows runner is D:\a\_temp, so every
+# hash came back as \<hash> and matched nothing, and the install failed on
+# releases that were fine.
 #
-# The hasher has to be a stand-in. GNU coreutils escapes the line it prints when
-# the name it was given contains a backslash, and prefixes the whole line with
-# one, so every hash came back as \<hash> and matched nothing. macOS ships a
-# sha256sum that does not do this, so on a developer's machine the real bug is
-# invisible and a test using the local tool would pass while Windows failed.
-mkdir -p "$root/win\\temp"
-real_hasher="$(command -v shasum)"
+# A stand-in rather than a real path with a backslash in it. The escaping is what
+# is under test; putting a backslash in a directory name instead drags in how tar
+# and the filesystem treat one, which differs between platforms and is not the
+# bug. macOS also ships a sha256sum that does not escape at all, so a test using
+# whatever is installed proves nothing on a developer's machine.
+# The real hasher resolved to an absolute path here, before the stand-in goes on
+# PATH under the same name. Written as a bare name it would find itself, and a
+# stand-in that recurses returns a pile of backslashes and nothing to compare, so
+# the case would pass whatever the script did.
+real_hasher=""
+for candidate in sha256sum shasum; do
+	if path="$(command -v "$candidate")"; then
+		case "$candidate" in
+		sha256sum) real_hasher="$path" ;;
+		shasum) real_hasher="$path -a 256" ;;
+		esac
+		break
+	fi
+done
+[ -n "$real_hasher" ] || bad "no hasher to build the stand-in from, so the case below would prove nothing"
 cat >"$root/bin/sha256sum" <<GNU
 #!/usr/bin/env bash
-# Stands in for GNU coreutils sha256sum, escaping the way it documents.
-if [ \$# -eq 0 ]; then "$real_hasher" -a 256; exit; fi
-line="\$("$real_hasher" -a 256 "\$1")"
-case "\$1" in
-*\\\\*) printf '\\\\%s\\n' "\${line%% *}" ;;
-*) printf '%s\\n' "\${line%% *}" ;;
-esac
+line="\$($real_hasher "\$@")"
+hash="\${line%% *}"
+# Named as an argument, escape the way GNU does when the name holds a backslash.
+# Read from stdin there is no name to escape, which is the whole way out.
+if [ \$# -gt 0 ]; then printf '\\\\%s  %s\\n' "\$hash" "\$1"; else printf '%s  -\\n' "\$hash"; fi
 GNU
 chmod +x "$root/bin/sha256sum"
-if out="$(env PATH="$root/bin:$PATH" SERVE_DIR="$root/serve" \
-	RUNNER_TEMP="$root/win\\temp" GITHUB_PATH="$root/path" \
-	RUNNER_OS=Linux RUNNER_ARCH=X64 GITHUB_ACTION_REF=v9.9.9 \
-	bash "$install_sh" 2>&1)"; then
-	ok "verifies a download into a path holding a backslash, as every Windows runner has"
+# The stand-in has to produce the right hash for the file, or it is testing
+# nothing but itself.
+[ "$("$root/bin/sha256sum" <"$root/serve/mcpsnoop_9.9.9_linux_amd64.tar.gz" | cut -d' ' -f1)" = "$(cat "$root/serve/sum")" ] ||
+	bad "the stand-in hasher does not agree with the real one, so the case below proves nothing"
+if out="$(run)"; then
+	ok "is not fooled by a hasher that escapes its own output, as GNU does on Windows"
 else
-	bad "a backslash in the destination path broke the verification" "$out"
+	bad "an escaping hasher broke the verification" "$out"
 fi
 rm -f "$root/bin/sha256sum"
 
