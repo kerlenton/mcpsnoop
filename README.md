@@ -43,8 +43,10 @@ steps:
       session: artifacts/session.jsonl
 ```
 
-Every input, what the exit codes mean, and how to wire it up without the action
-are in [The GitHub Action](#the-github-action) further down.
+Pin whichever release you want; the newest is on the
+[releases page](https://github.com/kerlenton/mcpsnoop/releases). Every input,
+what the exit codes mean, and how to wire it up without the action are in
+[The GitHub Action](#the-github-action) further down.
 
 ## Quick start
 
@@ -560,9 +562,11 @@ steps:
       session: artifacts/session.jsonl
 ```
 
-Pin a release. There is no floating `v1`, deliberately: the pinned release is
-also the binary the action installs, so the two can never disagree and there is
-no version default to go stale.
+Pin a release, whichever one you want; the newest is on the
+[releases page](https://github.com/kerlenton/mcpsnoop/releases). There is no
+floating `v1`, deliberately: the pinned release is also the binary the action
+installs, so the two can never disagree and there is no version default to go
+stale.
 
 | Input | |
 |---|---|
