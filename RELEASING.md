@@ -141,6 +141,14 @@ tree, with no listing involved. What the box affects is the version the listing
 advertises, so forgetting it leaves the page recommending an older release than
 the one that exists.
 
+The listing body is this repository's README, read from the default branch rather
+than from the release, so a documentation fix reaches the page without
+republishing anything. The version beside it comes from the release, so the two
+drift: after a tag, the sidebar advertises the new version while the snippet in
+the text still pins the old one, and the reader copies the snippet. **Update the
+`uses:` versions in README.md before tagging**, which `action/tests/docs_test.sh`
+keeps consistent with each other but cannot keep current.
+
 The listing is keyed on the `name` field in `action.yml`, not on the repository,
 so that field must not change. Do not rename `action.yml` to `action.yaml`
 either, and do not create a floating major tag such as `v1`: Homebrew autobumps

@@ -78,6 +78,7 @@ action-test: shellcheck-bin
 	@"$(CURDIR)/.action-bin/shellcheck" action/*.sh action/tests/*.sh
 	@PATH="$(CURDIR)/.action-bin:$$PATH" bash action/tests/install_test.sh
 	@PATH="$(CURDIR)/.action-bin:$$PATH" bash action/tests/check_test.sh
+	@bash action/tests/docs_test.sh
 	@rm -rf "$(CURDIR)/.action-bin"
 
 # Resolve a shellcheck of exactly SHELLCHECK_VERSION: the one already installed
