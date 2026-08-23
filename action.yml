@@ -13,8 +13,13 @@ name: mcpsnoop
 description: Fail CI on what an MCP server actually did on the wire, and file every finding as a code scanning alert.
 author: kerlenton
 
+# The badge GitHub generates for the Marketplace listing. A custom logo is not
+# possible here: it is always one Feather icon on one of nine fixed colours.
+# git-commit is a node cut into the middle of a line, which is the same sentence
+# the project mark says and what a transparent proxy is. It also survives the
+# 16-pixel size the search results use, where a heartbeat does not.
 branding:
-  icon: activity
+  icon: git-commit
   color: blue
 
 inputs:

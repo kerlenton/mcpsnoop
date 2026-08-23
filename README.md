@@ -43,7 +43,7 @@ steps:
       session: artifacts/session.jsonl
 ```
 
-Pin whichever release you want; the newest is on the
+Pin whichever release you want. The newest is on the
 [releases page](https://github.com/kerlenton/mcpsnoop/releases). Every input,
 what the exit codes mean, and how to wire it up without the action are in
 [The GitHub Action](#the-github-action) further down.
@@ -106,11 +106,10 @@ mcpsnoop http --target http://localhost:3000/mcp --listen :7000
 The HTTP status of every response shows in the stream, so a response that carries
 no JSON-RPC message of its own is still a visible frame rather than nothing: the
 401 challenge, the 403 on a rejected Origin, the 202 that acknowledges a
-notification, and the 502 when the target cannot be reached at all. A 401's
-`WWW-Authenticate` header is kept verbatim and shown in the inspector, since it
-names the auth scheme and the resource metadata to go to next. Filter by status
-with `status:401` in the TUI, or by any failure with `status:err`. A 4xx or 5xx
-counts as an error, so a default `mcpsnoop check` run fails on it.
+notification, and the 502 when the target cannot be reached at all. A 401's `WWW-Authenticate` header is kept verbatim and shown in the inspector,
+since it names the auth scheme and the resource metadata to go to next. Filter by
+status with `status:401` in the TUI, or by any failure with `status:err`. A 4xx
+or 5xx counts as an error, so a default `mcpsnoop check` run fails on it.
 
 No server of your own? [Try it for real](docs/TRY_IT.md) against a published
 test server, driven by your own client. To inspect a session after it happened,
@@ -256,7 +255,7 @@ from the TUI reads the log too, so neither is bounded. `check`, `export` and
 `diff` build an unbounded store on purpose, since a gate that under-reports on a
 large capture is worse than one that uses the memory.
 
-The history limit bounds what is loaded; `mcpsnoop prune` bounds what is kept.
+The history limit bounds what is loaded. `mcpsnoop prune` bounds what is kept.
 It deletes saved session logs older than a cutoff, and never runs on its own.
 
 ```bash
@@ -334,7 +333,7 @@ mcpsnoop export -T json|html|text|har|otlp [-o file|-] [session-id|log.jsonl|-]
 | `html` | a self-contained browser file with search and collapsible JSON |
 | `text` | a pretty plain-text dump |
 | `har` | one entry per correlated call, openable in browser devtools and anything else that reads HAR |
-| `otlp` | OTLP JSON with a span per correlated call; W3C trace context joins caller traces, otherwise one trace is used per session |
+| `otlp` | OTLP JSON with a span per correlated call, with W3C trace context joining caller traces where it is present and one trace per session otherwise |
 
 MCP is not HTTP, so a HAR entry's URL, status code, and timings are a deliberate
 mapping of each call rather than a wire transcript.
@@ -357,6 +356,8 @@ Omit `-o` to write to stdout, and omit the session to take the newest, or pass
 `-` to read JSONL from stdin. In the TUI, press `e` to export the selected
 session as HTML, or run `:export json|html|text|har|otlp [path]` from command mode.
 
+### Redaction
+
 To scrub an existing capture before inspecting or sharing it, pass the same
 redaction flags used during capture to `export` or `open`:
 
@@ -371,21 +372,25 @@ and writes through a temporary file that is renamed into place, so a run that
 fails leaves the previous file whole.
 
 A tool's `inputSchema` and `outputSchema`, as advertised in a `tools/list`
-result, are left alone by `--redact-key` and `--redact-secrets`. A name inside a
-schema is a type declaration rather than a value, the name itself stays in the
-log either way, and scrubbing the subschema under a property called `token`
-would take the tool's own checks with it. The exemption is that position only,
-so an argument that happens to be called `inputSchema` is scrubbed like any
-other, and it stops at `default`, `const`, `examples` and `enum`, which hold
-data rather than structure. Use `--redact-path` to name something inside a
-schema, or `--redact-value`, which matches text wherever it sits except in the
-two keywords mcpsnoop parses, `type` and `x-mcp-header`.
+result, are left alone by `--redact-key` and `--redact-secrets`, for three reasons.
+
+- A name inside a schema is a type declaration rather than a value.
+- The name itself stays in the log either way.
+- Scrubbing the subschema under a property called `token` would take the tool's
+  own checks with it.
+
+The exemption is that position only, so an argument that happens to be called
+`inputSchema` is scrubbed like any other, and it stops at `default`, `const`,
+`examples` and `enum`, which hold data rather than structure. Use
+`--redact-path` to name something inside a schema, or `--redact-value`, which
+matches text wherever it sits except in the two keywords mcpsnoop parses, `type`
+and `x-mcp-header`.
 
 What each flag reaches differs, so check the result rather than assuming. All
 four scrub JSON-RPC payloads, and `--redact-key`, `--redact-path` and
 `--redact-secrets` reach only those. Only `--redact-value` also scrubs stderr,
 other non-JSON text, and the inside of a string. An `Mcp-Param-*` header is
-scrubbed alongside the body value it mirrors; the other envelope metadata,
+scrubbed alongside the body value it mirrors. The other envelope metadata,
 server labels, `Mcp-Name`, `Mcp-Method` and the HTTP status, is left as
 captured. Redaction is best effort, so use a separate output path and read the
 result before sharing it.
@@ -424,14 +429,20 @@ mcpsnoop diff old.jsonl new.jsonl
 The report shows tools that were added or removed, description and `inputSchema`
 changes, matching tool calls whose status changed, and notable duration shifts. Calls
 are matched by tool name and arguments, so reordered calls still compare correctly.
-By default, duration changes must differ by at least 100 ms and 2x; use
+By default, duration changes must differ by at least 100 ms and 2x. Use
 `--duration-threshold` and `--duration-ratio` to adjust those cutoffs.
 
-Pass `--exit-code` to gate CI on regressions: it exits non-zero when the after
-session drops a tool, changes a tool description, title, input schema, output
-schema or annotations, has a call whose status got worse, or slows down.
-Improvements (added tools, fixed calls, speedups) still exit zero, and so does an
-icon change, which alters how a tool looks without changing what it does.
+Pass `--exit-code` to gate CI on regressions. It exits non-zero when the after
+session:
+
+- drops a tool
+- changes a tool description, title, input schema, output schema or annotations
+- has a call whose status got worse
+- slows down
+
+An icon change does not, since it alters how a tool looks without changing what
+it does. Improvements, meaning added tools, fixed calls and speedups, still exit
+zero.
 
 ## Checking sessions in CI
 
@@ -472,9 +483,11 @@ check failed: error
 ```
 
 The dropped-frame count travels with the artifacts too, so a capture that
-understates itself says so wherever it is opened: `missing_frames` in the JSON
-export, `log.comment` in HAR, and the `mcpsnoop.session.missing_frames` resource
-attribute in OTLP.
+understates itself says so wherever it is opened:
+
+- `missing_frames` in the JSON export
+- `log.comment` in HAR
+- the `mcpsnoop.session.missing_frames` resource attribute in OTLP
 
 ```bash
 mcpsnoop check build-agent
@@ -489,12 +502,15 @@ path that is not there, a file that is not a session log, a state directory
 holding nothing, a flag that does not parse. Nothing is written to stdout on a 2,
 so a pipeline never uploads an empty report as though it were a verdict.
 
+### Assert what must and must not happen
+
 Beyond the signal counts, assert the shape of the run. These compose with each
-other and with `--fail-on`, and any failure exits non-zero.
+other and with `--fail-on`, and any failure exits 1, the code that means the
+check ran and found something.
 
 | Flag | Fails when |
 |---|---|
-| `--max-duration <dur>` | one or more completed tool calls exceeded the budget; reports their count and the worst call |
+| `--max-duration <dur>` | one or more completed tool calls exceeded the budget, reporting their count and the worst call |
 | `--expect-tool <name>` | the named tool was never called (repeatable) |
 | `--forbid-tool <name>` | the named tool was called (repeatable) |
 
@@ -529,11 +545,14 @@ reported at level `error` and one outside it at level `note`, so the report and
 the gate never disagree.
 
 A result points at the log the finding came from, and how depends on where the
-log was read from. A path inside the working directory becomes a relative one,
-which code scanning resolves against the repository root. Anything else, a path
-elsewhere on disk or a session id resolved out of the state directory, becomes an
-absolute `file://` URI. Reading from stdin gives a result no location at all,
-since there is no file to point at.
+log was read from.
+
+- A path inside the working directory becomes a relative one, which code
+  scanning resolves against the repository root.
+- A path elsewhere on disk, or a session id resolved out of the state
+  directory, becomes an absolute `file://` URI.
+- Reading from stdin gives a result no location at all, since there is no file
+  to point at.
 
 The alert renders with its surrounding lines only when that path is a file in the
 analysed commit, so a capture the workflow generated into `artifacts/` opens an
@@ -562,9 +581,9 @@ steps:
       session: artifacts/session.jsonl
 ```
 
-Pin a release, whichever one you want; the newest is on the
+Pin a release, whichever one you want. The newest is on the
 [releases page](https://github.com/kerlenton/mcpsnoop/releases). There is no
-floating `v1`, deliberately: the pinned release is also the binary the action
+floating `v1`, deliberately. The pinned release is also the binary the action
 installs, so the two can never disagree and there is no version default to go
 stale.
 
@@ -580,7 +599,7 @@ stale.
 | `install` | `false` when mcpsnoop is already on PATH, which is the way in on a platform no release is built for |
 
 Outputs are `outcome`, `sarif` and `exit-code`. `outcome` is `passed`,
-`findings`, or `error`, and the third is worth handling separately: it means
+`findings`, or `error`, and the third is worth handling separately. It means
 nothing was checked, which is not the same as nothing being found. **A run that
 could not check fails the job whatever `fail-on-findings` says**, because a
 pipeline that goes green having verified nothing is worse than one that fails.
@@ -658,7 +677,7 @@ itself is never reported as a disagreement.
 
 The routing headers above were the only ones a frame carried, so the rest of the
 Streamable HTTP transport's mandatory headers reached nothing that could check
-them. `Content-Type` was the sharpest case: the response side already read it to
+them. `Content-Type` was the sharpest case. The response side already read it to
 tell an SSE stream from a JSON body, then threw it away.
 
 An HTTP frame now carries the headers the transport states rules about, and two
@@ -666,12 +685,12 @@ of those rules are checkable.
 
 | Rule | Reported as |
 |---|---|
-| the client **MUST** send an `Accept` listing both `application/json` and `text/event-stream` | `warn` on the request |
-| a server answering a JSON-RPC request **MUST** return `Content-Type: application/json` or `text/event-stream` | `warn` on the response |
+| the client MUST send an `Accept` listing both `application/json` and `text/event-stream` | `warn` on the request |
+| a server answering a JSON-RPC request MUST return `Content-Type: application/json` or `text/event-stream` | `warn` on the response |
 
 Both sentences read the same in 2025-11-25 and 2026-07-28, so unlike the drift
 and extension checks these need no revision gate. `Origin` is recorded too, since
-servers **MUST** validate it and **MUST** answer `403` when it is invalid, but
+servers MUST validate it and MUST answer `403` when it is invalid, but
 mcpsnoop cannot know your allowed origins so it shows the value rather than
 judging it.
 
@@ -683,25 +702,34 @@ them at all.
 
 `Authorization` is deliberately not captured. Turning a challenge into token
 facts is its own problem and putting a bearer token on disk is not the answer to
-it. `Mcp-Session-Id` and `Last-Event-ID` are not captured either: 2026-07-28
-removed both and tells a server to ignore them, so there is no rule left to check.
+it. `Mcp-Session-Id` and `Last-Event-ID` are not captured either. The
+2026-07-28 revision removed both and tells a server to ignore them, so there is
+no rule left to check.
 
 ### Detect tool definition drift
 
 The first complete `tools/list` observed for a server label becomes its trusted
-baseline. Later sessions compare that baseline field by field: the description,
-the title, the input and output schemas, the annotations and the icons, plus
-tools that were added or removed. Annotations matter most, since a tool approved
-with `readOnlyHint` that later declares itself destructive is the rug-pull this
-check exists for, and the spec tells clients to treat annotations as untrusted.
-The title and the icons are tracked because they are what the user sees, and the
-spec ranks a tool's `title` above `annotations.title` and its name. The sessions
-table and tool summary flag drift without blocking or changing MCP traffic.
+baseline. Later sessions compare that baseline field by field:
+
+- the description
+- the title
+- the input and output schemas
+- the annotations and the icons
+
+Tools that were added or removed are compared too, which is a set comparison
+rather than a field one.
+
+Annotations matter most, since a tool approved with `readOnlyHint` that later
+declares itself destructive is the rug-pull this check exists for, and the spec
+tells clients to treat annotations as untrusted. The title and the icons are
+tracked because they are what the user sees, and the spec ranks a tool's `title`
+above `annotations.title` and its name. The sessions table and tool summary flag
+drift without blocking or changing MCP traffic.
 
 Annotations are compared through their spec defaults, so a server that starts
 spelling out a hint it was already relying on is not reported. A baseline
 recorded before mcpsnoop tracked a field keeps working for the fields it does
-record and says which ones it cannot answer for; re-record with
+record and says which ones it cannot answer for. Re-record with
 `mcpsnoop baseline --accept` once you trust the current definitions.
 
 Changing what redaction records changes what drift compares. A baseline taken
@@ -725,7 +753,7 @@ In ephemeral CI the state directory starts empty, so a run has nothing to
 compare against and records the baseline instead of verifying it. **A run that
 asked to fail on drift and then verified nothing does not pass**, and says which
 directory to persist. That is the only case where recording a baseline is a
-failure: without `drift` in `--fail-on`, recording one is business as usual and
+failure. Without `drift` in `--fail-on`, recording one is business as usual and
 changes no exit code.
 
 So the baseline has to survive between runs for a drift gate to mean anything.
@@ -741,7 +769,7 @@ check failed: drift
 mcpsnoop check --fail-on drift --baseline .mcpsnoop/baselines session.jsonl
 ```
 
-`drift` is opt-in for `check`; the default `error,invalid,warn` gate is unchanged.
+`drift` is opt-in for `check`. The default `error,invalid,warn` gate is unchanged.
 
 ### Catch a feature neither side negotiated
 
@@ -751,7 +779,7 @@ them, so on 2026-07-28 a `tasks/get`, a `notifications/tasks` or a `tools/call`
 answered with a task handle only means anything when the other side said it
 speaks Tasks.
 
-When it did not, the spec is explicit: the supporting party **MUST** either fall
+When it did not, the spec is explicit: the supporting party MUST either fall
 back to core behaviour or reject the request. Doing it anyway is why a feature
 appears to be wired up and then quietly does nothing, and what a reader gets
 instead is a `-32601` or a `-32021` several frames later, or a task that never
@@ -877,7 +905,7 @@ reject a header that disagrees with the body, so an edit that renames the tool
 would otherwise send the old name. The `Mcp-Param-*` headers mirror the captured
 arguments, so an edited replay sends none of them rather than asserting
 something about a body somebody rewrote. A capture can only set headers in that
-one family: a log is a file people hand around, and letting it name any header
+one family. A log is a file people hand around, and letting it name any header
 would let it overwrite the mandatory ones or add a credential nobody passed.
 
 A `Mcp-Param-*` a redaction rule scrubbed stops the replay with a reason. Sending
@@ -891,10 +919,12 @@ reports where the server wanted to send it and lets you decide whether to name
 that one instead.
 
 An answer arriving as a single JSON object and one arriving as an event stream
-are both read, and a failure is named rather than numbered: a 401 reports the
-scheme the server demanded, a `-32020` reports what it objected to, and a
-non-JSON-RPC 400 or 404 says the address is not a Streamable HTTP endpoint of
-this revision.
+are both read, and a failure is named rather than numbered:
+
+- a 401 reports the scheme the server demanded
+- a `-32020` reports what it objected to
+- a non-JSON-RPC 400 or 404 says the address is not a Streamable HTTP endpoint
+  of this revision
 
 ### Tell the server's latency from the user's
 
@@ -984,7 +1014,7 @@ declared. URL rows carry the address whole, which the spec makes a client show
 before consent, and name the host on its own, which it says to highlight against
 subdomain spoofing.
 
-**The ledger never carries a submitted value.** What a user typed stays in the
+The ledger never carries a submitted value. What a user typed stays in the
 capture for whoever needs it, and leaving it out of a summary surface built to
 be exported and pasted around is what keeps this out of the redaction story
 entirely. It matters most in url mode, where the spec puts credentials on
@@ -1002,7 +1032,7 @@ so a server cannot make one arbitrarily expensive. The limits are far above any
 real question and a truncated message says it was truncated.
 
 Nothing here warns and nothing here changes a `check` exit code. A ledger
-records what happened; it does not judge it.
+records what happened. It does not judge it.
 
 ### Find the tool that fails one run in four
 
@@ -1029,7 +1059,7 @@ flaky-demo   search_docs      52     0      0     0.0%       0/13      42ms     
 
 `ERR` and `PROTO` are separate columns because the specification makes them
 separate things. A tool answering `isError` is reporting something a model can
-act on and retry; a JSON-RPC error is the request or the server being wrong.
+act on and retry. A JSON-RPC error is the request or the server being wrong.
 `SESS` is the count of sessions that saw a failure over the sessions that called
 the tool, which is the "one run in ten" question a rate over calls cannot
 answer.
@@ -1097,7 +1127,7 @@ sentence for both would make mcpsnoop state something false.
 
 A command a `--redact` rule rewrote is printed as recorded and marked, rather
 than passed off as the command that ran. Two runs of one server, one scrubbed
-and one not, are two rows: mcpsnoop cannot know what the placeholder replaced,
+and one not, are two rows. mcpsnoop cannot know what the placeholder replaced,
 and merging them would mean guessing the hidden halves matched. One server run
 under two `--label` values is one row carrying both names, since the key is the
 command rather than the name.
@@ -1121,7 +1151,7 @@ against later.
 Two gaps are there by construction rather than by oversight. A run with
 `--trace-file` wrote outside the sessions directory and will not appear, and
 `prune` deletes logs, so first seen is only ever as old as what is still on
-disk. mcpsnoop reports what ran on this machine through it; it scans no network,
+disk. mcpsnoop reports what ran on this machine through it. It scans no network,
 reads no client config it was not pointed at, and judges nothing.
 
 ### Tell a broken server from a tool that says no
@@ -1155,8 +1185,8 @@ you actually captured.
 The `definitions` line is the fixed cost: what this server's `tools/list`
 weighs before a single call is made. The `DEF` column breaks that down per
 tool and `RESULT` is what each tool's answers have cost so far. The table stays
-sorted by errors and latency, so scan `DEF` to find the expensive definitions;
-the export lists them heaviest first. A line under the table names the single
+sorted by errors and latency, so scan `DEF` to find the expensive definitions.
+The export lists them heaviest first. A line under the table names the single
 heaviest result, which a total hides.
 
 Definition figures are the JSON with insignificant whitespace removed, so a
@@ -1172,10 +1202,10 @@ mcpsnoop export -T json | jq '.summary.definitions'
 The export carries the same figures, per tool and split into description and
 schema bytes, so a fat description and a fat schema stay separable and either
 can be tracked across captures. `mcpsnoop diff` tells you a description or
-schema changed between two sessions; the export is where the size of that
+schema changed between two sessions. The export is where the size of that
 change lives.
 
-These are **bytes, not tokens**. A token count depends on the model, so
+**These are bytes, not tokens.** A token count depends on the model, so
 measuring one would mean shipping a tokeniser and picking whose. Bytes are
 exact and you can apply your own ratio. An unfinished `tools/list` reports what
 it saw as a floor and says so, rather than passing a partial sum off as the
@@ -1216,7 +1246,7 @@ An abandoned exchange does not disturb the next one, and is not kept forever
 either. Sixty-four open exchanges is far more than any client has at once, so a
 session holding more is holding ones nobody will finish, and the oldest are
 retired because the spec tells servers to give that state a short expiry and
-reject it afterwards. Retiring is counted rather than silent: the stream footer
+reject it afterwards. Retiring is counted rather than silent. The stream footer
 shows `N unlinked` and the export carries `session.retired_exchanges`, because a
 retry that does arrive for a retired operation reads as its own call, and a
 reader comparing counts deserves to be told.
@@ -1308,6 +1338,12 @@ mcpsnoop runs the server command you wrap, so only wrap servers you trust, and
 run untrusted ones in a container. It never executes anything you didn't put in
 your client config.
 
+For remote workflows, use SSH tunnelling or SSH file transfer so transport auth,
+encryption, host verification, key rotation, and audit policy stay in your
+existing SSH setup.
+
+### Redacting what you capture
+
 Captured frames can include prompts, tool arguments, credentials, and tool
 results. If payloads can carry secrets, opt in to redaction to scrub the
 observed trace copies while the proxied bytes still pass through unchanged.
@@ -1365,10 +1401,6 @@ mcpsnoop --redact-value 'sk-[A-Za-z0-9]+' -- node build/index.js
 # combine the layers in http mode
 mcpsnoop http --target http://localhost:3000/mcp --redact-secrets --redact-value 'Bearer\s+\S+'
 ```
-
-For remote workflows, use SSH tunnelling or SSH file transfer so transport auth,
-encryption, host verification, key rotation, and audit policy stay in your
-existing SSH setup.
 
 ## Contributing
 
