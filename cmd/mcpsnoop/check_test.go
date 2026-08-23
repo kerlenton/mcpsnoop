@@ -206,8 +206,11 @@ func TestCheckRejectsUnknownOrEmptyFailOnValues(t *testing.T) {
 func TestCheckReportsMalformedInput(t *testing.T) {
 	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	code, stdout, stderr := executeCheck(t, []string{"-"}, "not-json\n")
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
+	// 2, the same as a bad flag, because both mean the check never happened.
+	// Sharing 1 with a real finding is what lets a wrapper report a checked run
+	// after checking nothing.
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2: input that will not load is not a finding", code)
 	}
 	if stdout != "" {
 		t.Fatalf("stdout = %q, want empty", stdout)
@@ -345,8 +348,11 @@ func TestCheckFailsOnToolDefinitionDriftWhenSelected(t *testing.T) {
 		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
 		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search docs","inputSchema":{"type":"object"}}]}}`),
 	)
+	// The first run has no baseline to compare against, and a run that selected
+	// the drift signal and then verified nothing does not pass. It records the
+	// baseline all the same, which is what lets the second run below verify.
 	code, _, stderr := executeCheck(t, []string{"--fail-on", "drift", "-"}, baseline)
-	if code != 0 || stderr != "" {
+	if code != 1 || stderr != "" {
 		t.Fatalf("baseline check = code %d, stderr %q", code, stderr)
 	}
 
@@ -378,9 +384,10 @@ func TestCheckBaselineFlagRecordsThenDetectsDrift(t *testing.T) {
 		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search docs","inputSchema":{"type":"object"}}]}}`),
 	)
 
-	// First run against an empty baseline dir records; it does not verify.
+	// First run against an empty baseline dir records; it does not verify, and a
+	// run gated on drift that verified nothing is not a pass.
 	code, stdout, stderr := executeCheck(t, []string{"--fail-on", "drift", "--baseline", dir, "-"}, baseline)
-	if code != 0 || stderr != "" {
+	if code != 1 || stderr != "" {
 		t.Fatalf("first run = code %d, stderr %q", code, stderr)
 	}
 	if !strings.Contains(stdout, "recorded first-seen tool baseline") {
@@ -963,5 +970,87 @@ func TestCheckRoundTripsCountsAnUnfinishedChain(t *testing.T) {
 	code, stdout, _ = executeCheck(t, []string{"--max-server-duration", "1ms", "-"}, log)
 	if code != 0 {
 		t.Fatalf("the server budget judged an operation that never completed, code %d: %s", code, stdout)
+	}
+}
+
+// TestCheckSeparatesAFindingFromNotHavingChecked pins the contract every CI
+// wrapper rests on, and the one this command had wrong.
+//
+// A wrapper has to decide what to do with a non-zero exit. On 1 it publishes the
+// findings and lets the gate decide the build. On anything else it must stop and
+// say the run did not happen. While a missing file and a real finding shared an
+// exit code, neither choice was right: treating 1 as findings made a typo in a
+// workflow path read as a checked run, and treating it as a hard error kept
+// genuine findings out of the report they exist to reach.
+//
+// The report side is the same promise. A run that did the work writes a whole
+// SARIF document to stdout and nothing to stderr; a run that could not writes
+// nothing to stdout, so a wrapper never uploads a truncated or empty report as
+// though it were a verdict.
+func TestCheckSeparatesAFindingFromNotHavingChecked(t *testing.T) {
+	dirty := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"boom"}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no such tool"}}`),
+	)
+
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		stdin    string
+		wantCode int
+		wantJSON bool
+	}{
+		{
+			name: "a clean session", args: []string{"--format", "sarif", "-"},
+			stdin: encodeCheckLog(t,
+				checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+				checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`),
+			),
+			wantCode: 0, wantJSON: true,
+		},
+		{
+			name: "a session with a finding", args: []string{"--format", "sarif", "-"},
+			stdin: dirty, wantCode: 1, wantJSON: true,
+		},
+		{
+			name: "a log that will not parse", args: []string{"--format", "sarif", "-"},
+			stdin: "not-json\n", wantCode: 2, wantJSON: false,
+		},
+		{
+			name: "a path that is not there", args: []string{"--format", "sarif", "no-such-file.jsonl"},
+			wantCode: 2, wantJSON: false,
+		},
+		{
+			name: "a state directory holding nothing", args: []string{"--format", "sarif"},
+			wantCode: 2, wantJSON: false,
+		},
+		{
+			name: "a signal that does not exist", args: []string{"--format", "sarif", "--fail-on", "nonsense", "-"},
+			stdin: dirty, wantCode: 2, wantJSON: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MCPSNOOP_HOME", t.TempDir())
+			code, stdout, stderr := executeCheck(t, tc.args, tc.stdin)
+			if code != tc.wantCode {
+				t.Fatalf("exit = %d, want %d\nstdout %q\nstderr %q", code, tc.wantCode, stdout, stderr)
+			}
+			if !tc.wantJSON {
+				if stdout != "" {
+					t.Errorf("wrote %d bytes to stdout for a run that did not happen, which a wrapper would upload as a report", len(stdout))
+				}
+				if stderr == "" {
+					t.Error("said nothing on stderr, so the reason is nowhere")
+				}
+				return
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want empty on a run that did the work", stderr)
+			}
+			report := decodeCheckSARIF(t, stdout)
+			if len(report.Runs) != 1 || report.Runs[0].Tool.Driver.Name != "mcpsnoop" {
+				t.Fatalf("stdout is not a mcpsnoop SARIF document:\n%s", stdout)
+			}
+		})
 	}
 }

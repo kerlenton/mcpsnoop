@@ -80,7 +80,14 @@ func newCheckCmd() *cobra.Command {
 			sessionLog, err := loadCheckSession(cmd, arg, format.needsLineIndex())
 			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
-				return exitCode(1)
+				// 2, not 1, and the difference is the whole contract a CI wrapper
+				// rests on. 1 means the check ran and something failed the gate, so
+				// a wrapper reports the findings and carries on. This is the other
+				// thing: a path that is not there, a file that is not a session log.
+				// Sharing an exit code with a real finding lets a typo in a workflow
+				// read as a checked run, which is the one outcome a gate must never
+				// produce.
+				return exitCode(2)
 			}
 			st := sessionLog.store
 
@@ -102,7 +109,9 @@ func newCheckCmd() *cobra.Command {
 			case checkFormatJUnit:
 				if err := writeCheckJUnit(cmd.OutOrStdout(), summaries, signals, assertionFailures); err != nil {
 					fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
-					return exitCode(1)
+					// The report never reached the reader, so no verdict was delivered
+					// whatever the traffic held. Same bucket as a log that would not load.
+					return exitCode(2)
 				}
 				if checkFailed(summaries, signals) {
 					anyFailed = true
@@ -110,7 +119,7 @@ func newCheckCmd() *cobra.Command {
 			case checkFormatSARIF:
 				if err := writeCheckSARIF(cmd.OutOrStdout(), sessionLog, summaries, signals, assertionFailures); err != nil {
 					fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
-					return exitCode(1)
+					return exitCode(2)
 				}
 				if checkFailed(summaries, signals) {
 					anyFailed = true
@@ -430,6 +439,28 @@ func checkFailed(summaries []checkSummary, selected map[checkSignal]bool) bool {
 	return false
 }
 
+// driftUnverified says why this run compared nothing against the tool baseline,
+// and is empty when it did compare. Two causes, one consequence. A baseline that
+// would not load is one. A baseline recorded for the first time is the other, and
+// it is the ordinary state of an ephemeral CI, where the state directory starts
+// empty on every run and every run is therefore a first run.
+//
+// The text and junit formats have always said so out loud. Saying so was not
+// enough: a run that asked to fail on drift and then verified nothing still
+// passed, which is exactly the reading the baseline mechanism exists to prevent.
+// So a selected drift signal fails on either cause. Nothing changes for a run
+// that did not select it.
+func (s checkSummary) driftUnverified() string {
+	if s.drift.BaselineError != "" {
+		return "tool baseline error: " + s.drift.BaselineError
+	}
+	if s.baselineCreated {
+		return "recorded first-seen tool baseline, so no tool definition was verified; " +
+			"point --baseline at a directory that survives between runs"
+	}
+	return ""
+}
+
 func (s checkSummary) count(signal checkSignal) int {
 	switch signal {
 	case checkError:
@@ -445,10 +476,10 @@ func (s checkSummary) count(signal checkSignal) int {
 	case checkLateResult:
 		return s.lateResults
 	case checkDrift:
-		// A baseline error is not drift, but it means drift could not be verified,
-		// so count it as a drift failure for a run that selected the drift signal.
+		// Not being able to verify is not the same as having verified and found
+		// nothing, so it counts for a run that selected the drift signal.
 		n := s.drift.Count()
-		if s.drift.BaselineError != "" {
+		if s.driftUnverified() != "" {
 			n++
 		}
 		return n

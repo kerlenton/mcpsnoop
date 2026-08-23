@@ -341,9 +341,12 @@ func TestCheckSARIFReportsAssertionFailures(t *testing.T) {
 	}
 }
 
-// TestCheckSARIFMarksTheFirstSeenBaseline. A run that recorded a baseline
-// verified nothing, and a log with no result at all would read as though it had.
-func TestCheckSARIFMarksTheFirstSeenBaseline(t *testing.T) {
+// TestCheckSARIFFilesNoAlertForACleanRunThatRecordedABaseline. A code-scanning
+// alert is something a person has to dismiss by hand and it outlives the run
+// that filed it. Recording a first-seen baseline is the ordinary state of an
+// ephemeral CI, where the state directory starts empty every time, so filing one
+// for it opened an alert on every clean run for ever.
+func TestCheckSARIFFilesNoAlertForACleanRunThatRecordedABaseline(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	log := encodeCheckLog(t,
@@ -353,18 +356,41 @@ func TestCheckSARIFMarksTheFirstSeenBaseline(t *testing.T) {
 
 	code, stdout, _ := executeCheck(t, []string{"--format", "sarif", "--baseline", dir, "-"}, log)
 	if code != 0 {
-		t.Fatalf("exit = %d, want 0: recording a baseline is not a failure", code)
+		t.Fatalf("exit = %d, want 0: recording a baseline is not a failure when drift is not gated", code)
+	}
+	report := decodeCheckSARIF(t, stdout)
+	if n := len(report.Runs[0].Results); n != 0 {
+		t.Fatalf("a clean session produced %d results, want none\n%s", n, stdout)
+	}
+}
+
+// TestCheckSARIFReportsAnUnverifiableBaselineWhenDriftIsGated. Where the gate
+// does care, the report says so, at the level the gate uses, the way every other
+// result here does. The message has to carry the way out, since the reader is
+// looking at an alert and not at the terminal that printed the text summary.
+func TestCheckSARIFReportsAnUnverifiableBaselineWhenDriftIsGated(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	log := encodeCheckLog(t,
+		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","inputSchema":{"type":"object"}}]}}`),
+	)
+
+	code, stdout, _ := executeCheck(t, []string{"--format", "sarif", "--fail-on", "drift", "--baseline", dir, "-"}, log)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1: a run gated on drift that verified nothing has not passed", code)
 	}
 	results := sarifResultsFor(decodeCheckSARIF(t, stdout), "mcpsnoop/drift")
 	if len(results) != 1 {
-		t.Fatalf("drift results = %d, want the baseline note\n%s", len(results), stdout)
+		t.Fatalf("drift results = %d, want one\n%s", len(results), stdout)
 	}
-	if !strings.Contains(results[0].Message.Text, "recorded first-seen tool baseline (trusted, not verified)") {
-		t.Fatalf("the baseline note must say what junit's <skipped> says: %q", results[0].Message.Text)
+	if results[0].Level != "error" {
+		t.Fatalf("level = %q, want error so the report and the gate agree", results[0].Level)
 	}
-	// A first-seen baseline is not drift, so its level never follows the gate.
-	if results[0].Level != "note" {
-		t.Fatalf("baseline level = %q, want note", results[0].Level)
+	for _, want := range []string{"recorded first-seen tool baseline", "--baseline"} {
+		if !strings.Contains(results[0].Message.Text, want) {
+			t.Errorf("the message does not mention %q: %q", want, results[0].Message.Text)
+		}
 	}
 }
 

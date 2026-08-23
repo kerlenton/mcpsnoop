@@ -459,6 +459,13 @@ mcpsnoop check --fail-on error,invalid artifacts/session.jsonl
 mcpsnoop check --fail-on mismatch gateway-run.jsonl
 ```
 
+The exit code says which of two things happened, and a CI wrapper needs the
+difference. **1 means the check ran and something failed the gate**, so the
+findings are real and worth publishing. **2 means the check never happened**: a
+path that is not there, a file that is not a session log, a state directory
+holding nothing, a flag that does not parse. Nothing is written to stdout on a 2,
+so a pipeline never uploads an empty report as though it were a verdict.
+
 Beyond the signal counts, assert the shape of the run. These compose with each
 other and with `--fail-on`, and any failure exits non-zero.
 
@@ -498,13 +505,17 @@ line of the log the frame was decoded from. A signal named in `--fail-on` is
 reported at level `error` and one outside it at level `note`, so the report and
 the gate never disagree.
 
-A result points at the log with a path relative to the working directory, which
-code scanning then resolves against the repository root. The alert renders with
-its surrounding lines only when that path is a file in the analysed commit, so a
-capture the workflow generated into `artifacts/` opens an alert carrying the
-message, the rule and the line number but no source view. Committing a capture
-you want rendered in full is the only way to get one. A log read from the state
-directory or from stdin gets no path at all.
+A result points at the log the finding came from, and how depends on where the
+log was read from. A path inside the working directory becomes a relative one,
+which code scanning resolves against the repository root. Anything else, a path
+elsewhere on disk or a session id resolved out of the state directory, becomes an
+absolute `file://` URI. Reading from stdin gives a result no location at all,
+since there is no file to point at.
+
+The alert renders with its surrounding lines only when that path is a file in the
+analysed commit, so a capture the workflow generated into `artifacts/` opens an
+alert carrying the message, the rule and the line number but no source view.
+Committing a capture you want rendered in full is the only way to get one.
 
 Code scanning rejects a file whose run holds more than 25,000 results and
 displays only the top 5,000 of what it accepts, so the report is capped at 5,000:
@@ -633,10 +644,21 @@ mcpsnoop baseline --accept session.jsonl  # trust a legitimate definition change
 mcpsnoop baseline --reset session.jsonl   # trust the next complete tools/list
 ```
 
-In ephemeral CI the state directory starts empty, so the first run only records
-the baseline and reports no drift. The baseline has to persist across runs for
-later runs to verify against it. Point `--baseline` at a checked-in or cached
-directory, or set `MCPSNOOP_HOME` to a persisted path.
+In ephemeral CI the state directory starts empty, so a run has nothing to
+compare against and records the baseline instead of verifying it. **A run that
+asked to fail on drift and then verified nothing does not pass**, and says which
+directory to persist. That is the only case where recording a baseline is a
+failure: without `drift` in `--fail-on`, recording one is business as usual and
+changes no exit code.
+
+So the baseline has to survive between runs for a drift gate to mean anything.
+Point `--baseline` at a checked-in or cached directory, or set `MCPSNOOP_HOME` to
+a persisted path.
+
+```
+recorded first-seen tool baseline (trusted, not verified)
+check failed: drift
+```
 
 ```bash
 mcpsnoop check --fail-on drift --baseline .mcpsnoop/baselines session.jsonl

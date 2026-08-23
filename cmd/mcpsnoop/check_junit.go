@@ -96,11 +96,13 @@ func buildCheckJUnit(summaries []checkSummary, selected map[checkSignal]bool, as
 			}
 			if selected[signal] && count > 0 {
 				reason := checkSignalFailureReason(summary.sessionID, signal, count)
-				// A baseline that could not be read is not a tool change, and telling a
-				// CI reader to go looking for one sends them after something that never
-				// happened. The text format already says which it is.
-				if signal == checkDrift && summary.drift.BaselineError != "" {
-					reason = "tool baseline error: " + summary.drift.BaselineError
+				// A baseline that could not be read, or one being written for the first
+				// time, is not a tool change, and telling a CI reader to go looking for
+				// one sends them after something that never happened.
+				if signal == checkDrift && summary.drift.Count() == 0 {
+					if why := summary.driftUnverified(); why != "" {
+						reason = why
+					}
 				}
 				testcase.Failure = &checkJUnitFailure{
 					Message: reason,
