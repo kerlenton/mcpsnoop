@@ -158,6 +158,20 @@ Run `mcpsnoop help` for the full list, or `mcpsnoop help <command>` for the flag
 
 ## Install
 
+### npm
+
+No Go toolchain needed. Most MCP servers are written in Node or Python, so this
+is the shortest way in.
+
+```bash
+npx mcpsnoop -- node build/index.js
+```
+
+The npm package ships no code of its own. Six platform packages each carry one
+build, and npm installs the single one that matches your machine, so there is
+nothing to download at install time and nothing to unblock in a proxy. To keep it
+around rather than fetching it each run, `npm i -g mcpsnoop`.
+
 ### Go
 
 ```bash

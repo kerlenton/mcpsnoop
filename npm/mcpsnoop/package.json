@@ -1,0 +1,40 @@
+{
+  "name": "mcpsnoop",
+  "version": "0.0.0",
+  "description": "Wireshark for MCP. A transparent proxy that shows every real tool call between your AI client and your MCP servers, live in your terminal.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "debugger",
+    "proxy",
+    "jsonrpc",
+    "tui"
+  ],
+  "homepage": "https://github.com/kerlenton/mcpsnoop#readme",
+  "bugs": "https://github.com/kerlenton/mcpsnoop/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kerlenton/mcpsnoop.git",
+    "directory": "npm/mcpsnoop"
+  },
+  "license": "MIT",
+  "author": "kerlenton",
+  "type": "commonjs",
+  "bin": {
+    "mcpsnoop": "bin/mcpsnoop.js"
+  },
+  "files": [
+    "bin/mcpsnoop.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@mcpsnoop/darwin-arm64": "0.0.0",
+    "@mcpsnoop/darwin-x64": "0.0.0",
+    "@mcpsnoop/linux-arm64": "0.0.0",
+    "@mcpsnoop/linux-x64": "0.0.0",
+    "@mcpsnoop/win32-arm64": "0.0.0",
+    "@mcpsnoop/win32-x64": "0.0.0"
+  }
+}
