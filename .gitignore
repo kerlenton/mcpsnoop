@@ -1,5 +1,6 @@
 # Binaries
 /mcpsnoop
+/.action-bin/
 /dist/
 *.exe
 *.out

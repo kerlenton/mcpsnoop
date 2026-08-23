@@ -123,6 +123,25 @@ gh release download vX.Y.Z --dir dist --pattern 'mcpsnoop_*' --pattern 'checksum
 go run ./cmd/npmpack -version vX.Y.Z -dist dist -out dist/npm
 ```
 
+## GitHub Marketplace
+
+The repository root carries `action.yml`, so each release can also be published
+to the Marketplace. That part is manual and stays manual: GoReleaser creates the
+release through the API, and the "Publish this Action to the GitHub Marketplace"
+checkbox only appears when a release is edited in the web UI. Publishing also
+asks for two-factor authentication.
+
+So after a release lands, open it on the releases page, tick the box, and publish
+again. Skipping it does not break anything, it only leaves the listing pointing
+at the previous release.
+
+The listing is keyed on the `name` field in `action.yml`, not on the repository,
+so that field must not change. Do not rename `action.yml` to `action.yaml`
+either, and do not create a floating major tag such as `v1`: Homebrew autobumps
+this project by reading raw git tags through `/\D*(.+)/`, which reads `v1` as
+version 1, above every 0.x release, and would bump every `brew install mcpsnoop`
+user to a tag that moves under them.
+
 Pick the version with [SemVer](https://semver.org), and see the full policy in
 [CONTRIBUTING](CONTRIBUTING.md#versioning). While on `0.x`, a `0.Y.0` bump may
 change behaviour and a `0.y.Z` bump is bug fixes only.
