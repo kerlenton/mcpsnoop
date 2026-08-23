@@ -1,13 +1,22 @@
 # Releasing
 
-A release is just a pushed tag. Tag a commit on `main` and GitHub Actions takes
-over from there.
+A release is a pushed tag, and one commit before it. GitHub Actions takes over
+from the tag.
 
 ```bash
 git switch main && git pull
+make release-prep TAG=vX.Y.Z
+git commit -am "docs: point at vX.Y.Z"
+git push
 git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
+
+The bump comes first so that the tagged tree documents the release it is. It
+rewrites the versions a reader is meant to copy, which is the `uses:` lines in
+the README and the example in `action.yml`, and prints what it changed. Between
+that push and the tag, `main` names a release that does not exist yet, which
+lasts a minute and breaks nothing.
 
 The [release workflow](.github/workflows/release.yml) runs GoReleaser. It
 cross-compiles the binaries, builds the archives and `checksums.txt`, and
@@ -145,9 +154,10 @@ The listing body is this repository's README, read from the default branch rathe
 than from the release, so a documentation fix reaches the page without
 republishing anything. The version beside it comes from the release, so the two
 drift: after a tag, the sidebar advertises the new version while the snippet in
-the text still pins the old one, and the reader copies the snippet. **Update the
-`uses:` versions in README.md before tagging**, which `action/tests/docs_test.sh`
-keeps consistent with each other but cannot keep current.
+the text still pins the old one, and the reader copies the snippet. `make release-prep` at the top of this file is what bumps them, which is why it
+comes before the tag rather than after. `action/tests/docs_test.sh` keeps the two
+`uses:` lines consistent with each other, but nothing can tell whether they are
+current, which is why this is a step and not a check.
 
 The listing is keyed on the `name` field in `action.yml`, not on the repository,
 so that field must not change. Do not rename `action.yml` to `action.yaml`
