@@ -1,0 +1,133 @@
+name: action
+
+# The shell in action/ is covered by CI. This is the half those tests cannot
+# reach: the composite wiring itself. Whether inputs arrive, whether the nested
+# upload runs on the right runs, whether any of it works on a Windows runner,
+# and whether a step that must fail actually does.
+on:
+  push:
+    branches: [main]
+    paths: ["action.yml", "action/**", ".github/workflows/action-selftest.yml", "cmd/mcpsnoop/**"]
+  pull_request:
+    paths: ["action.yml", "action/**", ".github/workflows/action-selftest.yml", "cmd/mcpsnoop/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      # Real captures, recorded by the binary under test against a real stdio
+      # server, rather than fixtures. *.jsonl is ignored in this repository, so a
+      # committed fixture would be silently untracked and every case below would
+      # pass against nothing.
+      - name: Record two captures
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin" captures
+          go build -o "$RUNNER_TEMP/bin/mcpsnoop" ./cmd/mcpsnoop
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          cat > server.js <<'JS'
+          let buf = ''
+          const fail = process.env.FAIL === '1'
+          process.stdin.on('data', d => {
+            buf += d
+            let i
+            while ((i = buf.indexOf('\n')) >= 0) {
+              const line = buf.slice(0, i); buf = buf.slice(i + 1)
+              if (!line.trim()) continue
+              const m = JSON.parse(line)
+              if (m.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{protocolVersion:'2026-07-28',capabilities:{tools:{}},serverInfo:{name:'selftest',version:'1'}}}) + '\n')
+              if (m.method === 'tools/call') process.stdout.write(fail
+                ? JSON.stringify({jsonrpc:'2.0',id:m.id,error:{code:-32601,message:'no such tool'}}) + '\n'
+                : JSON.stringify({jsonrpc:'2.0',id:m.id,result:{content:[{type:'text',text:'ok'}]}}) + '\n')
+            }
+          })
+          JS
+          # A state directory of its own per recording. Picking the newest log out
+          # of a shared one works until the second recording lands in the same
+          # second as the first, and then the two captures are the same file.
+          drive() {
+            export MCPSNOOP_HOME="$RUNNER_TEMP/home-$1"
+            printf '%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ping","arguments":{}}}' \
+              | mcpsnoop -- node server.js > /dev/null
+            find "$MCPSNOOP_HOME/sessions" -name '*.jsonl' | head -1
+          }
+          cp "$(drive clean)" captures/clean.jsonl
+          cp "$(FAIL=1 drive dirty)" captures/dirty.jsonl
+          wc -l captures/*.jsonl
+
+      # install: false, so this leg is about the wiring rather than the download.
+      # It also runs before any release carries this action, which is the state
+      # every pull request that touches it is in.
+      - name: A clean capture passes
+        uses: ./
+        with:
+          session: captures/clean.jsonl
+          install: false
+          category: mcpsnoop-selftest-clean-${{ matrix.os }}
+
+      - name: A finding is reported without failing when asked
+        id: findings
+        uses: ./
+        with:
+          session: captures/dirty.jsonl
+          install: false
+          fail-on-findings: false
+          # Not uploaded: this run has a real finding by construction, and the
+          # Security tab of this repository is not the place to file it.
+          upload-sarif: false
+      - name: ...and says so
+        shell: bash
+        run: |
+          [ "${{ steps.findings.outputs.outcome }}" = findings ] || {
+            echo "outcome was '${{ steps.findings.outputs.outcome }}', want findings"; exit 1; }
+          [ -s "${{ steps.findings.outputs.sarif }}" ] || { echo "no report was written"; exit 1; }
+
+      - name: A capture that is not there is an error, not a finding
+        id: missing
+        continue-on-error: true
+        uses: ./
+        with:
+          session: captures/does-not-exist.jsonl
+          install: false
+          # Even suppressed, this must fail. Nothing was checked.
+          fail-on-findings: false
+          upload-sarif: false
+      - name: ...and fails the step whatever fail-on-findings says
+        shell: bash
+        run: |
+          [ "${{ steps.missing.outcome }}" = failure ] || {
+            echo "the step succeeded on a capture that does not exist"; exit 1; }
+          [ "${{ steps.missing.outputs.outcome }}" = error ] || {
+            echo "outcome was '${{ steps.missing.outputs.outcome }}', want error"; exit 1; }
+
+      # The other half of install: false. This one downloads a published release
+      # and verifies it, which is the part that has to work on three operating
+      # systems and cannot be tested anywhere but here.
+      - name: Install a published release and check with it
+        uses: ./
+        with:
+          session: captures/clean.jsonl
+          version: v0.20.0
+          category: mcpsnoop-selftest-release-${{ matrix.os }}

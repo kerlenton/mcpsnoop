@@ -522,13 +522,54 @@ displays only the top 5,000 of what it accepts, so the report is capped at 5,000
 the findings the gate failed on first, then a `mcpsnoop/report-truncated` result
 saying how many were left out. The text and junit formats stay complete.
 
-To put the findings in the Security tab, hand the SARIF log to
-`upload-sarif`. The job needs `security-events: write`, or the upload answers
-403. `check` exits non-zero on a finding, so the upload step needs `if: always()`
-to run at all on the runs that have something to report; `continue-on-error`
-hands the verdict to the code scanning check, which fails on an `error`-level
-alert and can be made a required check. Drop it if you would rather the check
-step itself be what turns the job red.
+### The GitHub Action
+
+Everything below is what the action does for you. It installs mcpsnoop, checks
+the capture, files the findings in the Security tab, and fails the job on what
+you gated on.
+
+```yaml
+permissions:
+  security-events: write
+  contents: read
+
+steps:
+  - uses: kerlenton/mcpsnoop@v0.21.0
+    with:
+      session: artifacts/session.jsonl
+```
+
+Pin a release. There is no floating `v1`, deliberately: the pinned release is
+also the binary the action installs, so the two can never disagree and there is
+no version default to go stale.
+
+| Input | |
+|---|---|
+| `session` | the `.jsonl` capture to check, relative to the repository root. Required |
+| `fail-on` | as `--fail-on`, defaulting to what the CLI defaults to |
+| `args` | any other `check` flags, quoted as on a command line. `--format` is refused, since the action reads the report |
+| `upload-sarif` | send the report to code scanning. `true` |
+| `category` | the code scanning namespace. `mcpsnoop`. Vary it per leg of a matrix, or the legs overwrite each other |
+| `fail-on-findings` | fail the job on a finding. `true`. Set `false` to file the alerts and let code scanning's required check decide |
+| `version` | which mcpsnoop to install. Defaults to the release you pinned |
+| `install` | `false` when mcpsnoop is already on PATH, which is the way in on a platform no release is built for |
+
+Outputs are `outcome`, `sarif` and `exit-code`. `outcome` is `passed`,
+`findings`, or `error`, and the third is worth handling separately: it means
+nothing was checked, which is not the same as nothing being found. **A run that
+could not check fails the job whatever `fail-on-findings` says**, because a
+pipeline that goes green having verified nothing is worse than one that fails.
+
+The job needs `security-events: write`, or the upload answers 403. Set
+`upload-sarif: false` in a repository without code scanning.
+
+### Or wire it up yourself
+
+The action is four steps and no magic. Doing it by hand takes the same care it
+takes. The upload has to run on the runs that have a report, which are the ones
+that exited 0 or 1 and not the ones that exited 2, and the step that fails the
+job has to come after it, or the findings never reach the tab they exist to
+reach.
 
 ```yaml
 permissions:
@@ -540,14 +581,25 @@ permissions:
 
 steps:
 - name: Check captured MCP session
-  continue-on-error: true
-  run: mcpsnoop check --format sarif artifacts/session.jsonl > mcpsnoop.sarif
+  id: check
+  run: |
+    code=0
+    mcpsnoop check --format sarif artifacts/session.jsonl > mcpsnoop.sarif || code=$?
+    echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+    # 2 means the check never happened, so there is no report to publish and
+    # nothing was verified. Stop here rather than uploading an empty file.
+    [ "$code" -le 1 ] || exit 1
 - name: Upload mcpsnoop SARIF report
-  if: always()
+  if: ${{ !cancelled() }}
   uses: github/codeql-action/upload-sarif@v4
   with:
     sarif_file: mcpsnoop.sarif
     category: mcpsnoop
+- name: Fail on findings
+  # Separate, and after the upload, so the findings reach the Security tab on
+  # exactly the runs that have some.
+  if: ${{ !cancelled() && steps.check.outputs.exit-code == '1' }}
+  run: exit 1
 ```
 
 ### Catch a routing header that disagrees with the body

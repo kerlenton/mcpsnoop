@@ -17,7 +17,7 @@ STATICCHECK_VERSION ?= v0.8.0
 # zone-specific.
 CHECK_TZ ?= UTC
 
-.PHONY: all build test vet vet-cross staticcheck fmt fmt-check lint check clean
+.PHONY: all build test vet vet-cross staticcheck fmt fmt-check lint check clean action-test
 
 all: check build
 
@@ -61,13 +61,29 @@ fmt:
 fmt-check:
 	@out="$$(gofmt -s -l .)"; if [ -n "$$out" ]; then echo "gofmt -s needed:"; echo "$$out"; exit 1; fi
 
+# The GitHub Action is shell, so the Go gate above cannot see it, and it is the
+# one part of this repository that runs on other people's machines. Its tests
+# drive the real scripts against a stand-in releases page and a stand-in binary,
+# so they need mcpsnoop built but no network. shellcheck is run when it is here,
+# since a contributor working on Go has no reason to have installed it.
+action-test:
+	@$(GO) build -o "$(CURDIR)/.action-bin/mcpsnoop" ./cmd/mcpsnoop
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck action/*.sh action/tests/*.sh || exit 1; \
+	else \
+		echo "shellcheck not installed, skipping the shell lint"; \
+	fi
+	@PATH="$(CURDIR)/.action-bin:$$PATH" bash action/tests/install_test.sh
+	@PATH="$(CURDIR)/.action-bin:$$PATH" bash action/tests/check_test.sh
+	@rm -rf "$(CURDIR)/.action-bin"
+
 lint: vet vet-cross staticcheck
 
 # check is the pre-commit/CI gate, formatting, static analysis, and the full
 # test suite under the race detector (matching CI).
-check: fmt-check lint
+check: fmt-check lint action-test
 	TZ=$(CHECK_TZ) $(GO) test -race $(PKG)
 
 clean:
 	rm -f $(BIN)
-	rm -rf dist
+	rm -rf dist .action-bin

@@ -1,0 +1,124 @@
+# The mcpsnoop GitHub Action.
+#
+# This file is at the repository root because GitHub Marketplace lists an action
+# only when its metadata file is there, and only one per repository. Do not
+# rename it to action.yaml; the spelling is part of what the listing is keyed on.
+#
+# There is deliberately no floating `v1` tag. Homebrew autobumps this project by
+# reading raw git tags through /\D*(.+)/, which reads `v1` as version 1, above
+# every 0.x release, and would bump every `brew install mcpsnoop` user to a tag
+# that moves. Callers pin a release, which is also what makes the action install
+# the binary from that same release with no version default to go stale.
+name: mcpsnoop
+description: Fail CI on what an MCP server actually did on the wire, and file every finding as a code scanning alert.
+author: kerlenton
+
+branding:
+  icon: activity
+  color: blue
+
+inputs:
+  session:
+    description: |
+      Path to the .jsonl capture to check, relative to the repository root.
+      Record one by wrapping your server with mcpsnoop in an earlier step.
+    required: true
+  fail-on:
+    description: |
+      Comma-separated signals to fail on, any of error, invalid, warn, mismatch,
+      pending, late-result, drift, deprecated, incomplete, schema. Defaults to
+      what the CLI defaults to, which is error,invalid,warn.
+    default: ""
+  args:
+    description: |
+      Any other mcpsnoop check flags, quoted as they would be on a command line,
+      for example: --expect-tool search --max-server-duration 500ms
+      --format is not accepted: the action reads the report this step produces.
+    default: ""
+  upload-sarif:
+    description: |
+      Upload the report to code scanning. Needs security-events: write on the
+      job. Set to false in a repository without code scanning, or to keep the
+      report to yourself.
+    default: "true"
+  category:
+    description: |
+      The code scanning category the report is filed under. A category is a
+      namespace: two analyses sharing one overwrite each other, so give each tool
+      its own, and vary it per leg of a matrix.
+    default: mcpsnoop
+  fail-on-findings:
+    description: |
+      Fail the job when the check finds something. Set to false to file the
+      alerts and let code scanning's own required check decide the build. A run
+      that could not check at all fails either way, since nothing was verified.
+    default: "true"
+  version:
+    description: |
+      Which mcpsnoop to install, for example v0.21.0. Defaults to the release you
+      pinned the action to, so normally there is nothing to set. Needed only when
+      pinning a branch or a commit, which names no release.
+    default: ""
+  install:
+    description: |
+      Install the binary. Set to false when mcpsnoop is already on PATH, which is
+      the way in on a platform no release is built for.
+    default: "true"
+
+outputs:
+  outcome:
+    description: passed, findings, or error. error means nothing was checked, which is not the same as nothing being found.
+    value: ${{ steps.check.outputs.outcome }}
+  sarif:
+    description: Absolute path to the SARIF report, empty when there is none.
+    value: ${{ steps.check.outputs.sarif }}
+  exit-code:
+    description: The exit code mcpsnoop check returned.
+    value: ${{ steps.check.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    # $GITHUB_ACTION_PATH rather than ${{ github.action_path }} throughout. On
+    # Windows the expression carries backslashes into the script body, where bash
+    # reads them as escapes; the environment variable is expanded at runtime,
+    # where they survive.
+    - name: Install mcpsnoop
+      if: ${{ inputs.install != 'false' }}
+      shell: bash
+      env:
+        MCPSNOOP_VERSION: ${{ inputs.version }}
+      run: bash "$GITHUB_ACTION_PATH/action/install.sh"
+
+    # Records the verdict rather than failing on it, so the upload below runs on
+    # exactly the runs that have something to report.
+    - name: Run mcpsnoop check
+      id: check
+      shell: bash
+      env:
+        MCPSNOOP_SESSION: ${{ inputs.session }}
+        MCPSNOOP_FAIL_ON: ${{ inputs.fail-on }}
+        MCPSNOOP_ARGS: ${{ inputs.args }}
+        MCPSNOOP_UPLOAD: ${{ inputs.upload-sarif }}
+      run: bash "$GITHUB_ACTION_PATH/action/check.sh"
+
+    # Pinned by commit with the version beside it, so an organisation running an
+    # allowed-actions list can permit this nested action by hash.
+    - name: Upload the report to code scanning
+      if: ${{ !cancelled() && steps.check.outputs.upload == 'true' }}
+      uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+      with:
+        sarif_file: ${{ steps.check.outputs.sarif }}
+        category: ${{ inputs.category }}
+
+    # !cancelled() rather than a bare if:, so the verdict is still stated when
+    # the upload itself failed. Otherwise a 403 from code scanning would be the
+    # only annotation on a run that also had real findings.
+    - name: Report the verdict
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        MCPSNOOP_OUTCOME: ${{ steps.check.outputs.outcome }}
+        MCPSNOOP_SESSION: ${{ inputs.session }}
+        MCPSNOOP_FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+      run: bash "$GITHUB_ACTION_PATH/action/gate.sh"
