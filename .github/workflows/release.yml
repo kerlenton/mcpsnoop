@@ -133,11 +133,16 @@ jobs:
             exit 1
           fi
           echo "publishing $version under the $dist_tag tag"
+          # THROWAWAY PROBE BRANCH. Never merge this.
+          #
+          # The skip check is gone so the loop reaches npm publish, and
+          # --dry-run stops it uploading. npm's publish.js calls oidc()
+          # unconditionally and guards the upload with if (!dryRun), so this
+          # performs the real token exchange and sends no bytes. The dispatch
+          # runs at v0.20.0, where all seven versions already exist, so even if
+          # that reading were wrong the registry would refuse the write.
           for name in $(go run ./cmd/npmpack -print-order); do
-            if npm view "$name@$version" version >/dev/null 2>&1; then
-              echo "$name@$version is already on the registry, skipping"
-              continue
-            fi
-            echo "publishing $name@$version"
-            npm publish "dist/npm/$name" --provenance --access public --tag "$dist_tag"
+            echo "::group::$name"
+            npm publish "dist/npm/$name" --provenance --access public --tag "$dist_tag" --dry-run --loglevel verbose 2>&1 || echo "EXIT NON-ZERO for $name"
+            echo "::endgroup::"
           done
