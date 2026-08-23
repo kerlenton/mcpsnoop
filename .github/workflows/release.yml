@@ -110,13 +110,28 @@ jobs:
       # registry, and npm refuses to publish over an existing version, so a
       # plain retry would stop at the first one it had already done.
       #
-      # No --provenance and no token. Publishing this way attaches the
-      # attestation on its own, and the flag npm's own guidance calls
-      # unnecessary would only invite the question of why it is here.
+      # --provenance stays even though trusted publishing attaches the
+      # attestation on its own. It is the tripwire. npm generates provenance
+      # inside the success branch of the OIDC exchange and its own guidance says
+      # that exchange never throws, so a misconfigured trusted publisher fails
+      # silently. Asking for provenance outright turns that into a failed
+      # publish rather than a published version nobody can verify.
       - name: Publish
         run: |
           version="${TAG#v}"
           dist_tag="$(go run ./cmd/npmpack -print-dist-tag -version "$TAG")"
+
+          # The one mistake here that cannot be taken back is putting a
+          # prerelease on the `latest` tag, where every bare `npx mcpsnoop`
+          # would pick it up. It rests on one substitution, so check it.
+          case "$TAG" in
+            *-*) want=next ;;
+            *) want=latest ;;
+          esac
+          if [ "$dist_tag" != "$want" ]; then
+            echo "npmpack puts $TAG under '$dist_tag', this step expected '$want'."
+            exit 1
+          fi
           echo "publishing $version under the $dist_tag tag"
           for name in $(go run ./cmd/npmpack -print-order); do
             if npm view "$name@$version" version >/dev/null 2>&1; then
@@ -124,5 +139,5 @@ jobs:
               continue
             fi
             echo "publishing $name@$version"
-            npm publish "dist/npm/$name" --access public --tag "$dist_tag"
+            npm publish "dist/npm/$name" --provenance --access public --tag "$dist_tag"
           done

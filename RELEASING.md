@@ -25,8 +25,17 @@ leak, rotate, or let expire.
 
 That is why the job runs node 24 rather than the 22 that CI runs. Authenticating
 by OIDC needs npm 11.5.1 or later, and node 22 still carries npm 10. A step
-checks this before the publish, because an npm too old fails with a 401 that
-reads like a credential problem and is not one.
+checks the runner's npm before the publish, so that cause is ruled out up front.
+
+Which leaves the trusted publisher itself as what a 401 or 404 at the publish
+means. npm's OIDC exchange is documented never to throw, so a publisher pinned
+to the wrong workflow filename, or scoped to a GitHub environment this job never
+enters, or missing `npm publish` under allowed actions, produces silence and then
+an unhelpful status from the registry. Check the seven configurations on
+npmjs.com before suspecting anything in this repository. The publish keeps
+`--provenance` for the same reason: provenance is generated inside the success
+branch of that exchange, so asking for it outright turns a silent failure into a
+failed publish rather than a published version nobody can verify.
 
 The job downloads the archives the release just published, checks each one
 against the `checksums.txt` published beside it, and packs those exact bytes. So
@@ -51,11 +60,52 @@ is out, do not re-tag. Re-run the `npm` job on its own from the Actions tab with
 `workflow_dispatch`, giving it the same tag. It skips whatever is already on the
 registry, so a publish that died partway through picks up where it stopped.
 
-A prerelease goes out under the `next` tag rather than claiming `latest`, so a
-`vX.Y.Z-rc.1` does not reach everyone running `npx mcpsnoop`. Do not make the
-*first* release of a package a prerelease, though. npm's handling of `latest` on
-a package that has never been published is not documented, and the first release
-is the one time there is no existing `latest` to protect.
+## Prereleases
+
+A prerelease is a tag with a semver prerelease part, and it must be spelled
+`-rc.N`. Both halves of the release then keep it away from the people who did not
+ask for it. npm publishes it under the `next` dist-tag, so `npx mcpsnoop` stays
+on the last stable version, and the publish step refuses to run if those two
+disagree. GoReleaser flags the GitHub Release a prerelease, and GitHub will not
+give the Latest badge to one.
+
+The spelling is not cosmetic. mcpsnoop is in homebrew-core with autobump on and
+no `livecheck` block, so the only thing keeping a prerelease out of
+`brew install mcpsnoop` is Homebrew's list of unstable keywords, which contains
+`rc` but not `next`. A tag spelled `v1.0.0-next.1` would be bumped to every
+Homebrew user.
+
+Four more things are true of a prerelease and worth knowing before cutting one.
+
+**It is as permanent as a final release.** npm's 72 hour unpublish window only
+applies while nothing in the registry depends on the package, and the root
+package lists all six platform packages. The moment the seventh publish lands,
+the six each have a public dependent, so a withdrawal has to run in the reverse
+of the publish order, root first.
+
+**Do not put the final tag on the rc's commit.** `git:prerelease_suffix` in
+`.goreleaser.yaml` makes git sort the final above the rc, so this is handled, but
+the failure it prevents is quiet: GoReleaser would take the rc as the current tag
+and rebuild it, and the npm job would then look for a release that was never
+created.
+
+**The final release's notes will start from the rc, not from the last stable
+version**, because `github-native` generates them for the range since the nearest
+preceding tag. Set `GORELEASER_PREVIOUS_TAG` in the goreleaser job for that
+release, or fix the notes by hand afterwards.
+
+**Retire the `next` dist-tag** once the final version is out, or `npm i
+mcpsnoop@next` keeps installing a release candidate nobody supports.
+
+```bash
+for p in $(go run ./cmd/npmpack -print-order); do
+  npm dist-tag add "$p@X.Y.Z" next
+done
+```
+
+Do not make the *first* release of a package a prerelease. npm's handling of
+`latest` on a package that has never been published is not documented, and the
+first release is the one time there is no existing `latest` to protect.
 
 Adding a platform, or moving the workflow to another filename, means visiting
 all seven packages under Settings and Trusted publishing on npmjs.com. The
