@@ -11,8 +11,11 @@ own native file tools and you would see only the handshake.
 Put mcpsnoop on your PATH.
 
 ```bash
-go install github.com/kerlenton/mcpsnoop/cmd/mcpsnoop@latest
+npm i -g mcpsnoop
 ```
+
+Or `go install github.com/kerlenton/mcpsnoop/cmd/mcpsnoop@latest` if you have a
+Go toolchain, or `brew install mcpsnoop`.
 
 Wrap the server with mcpsnoop in your client. For Claude Code, one command does
 it.
@@ -20,6 +23,10 @@ it.
 ```bash
 claude mcp add everything -- mcpsnoop -- npx -y @modelcontextprotocol/server-everything
 ```
+
+Nothing here needs mcpsnoop installed globally. `npx mcpsnoop -- <server>` works
+the same way, which is worth knowing when you paste a wrap into someone else's
+setup instructions.
 
 For Claude Desktop, add the server to your `claude_desktop_config.json` as usual,
 then let mcpsnoop make the same wrap for you.

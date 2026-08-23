@@ -4,12 +4,21 @@ on:
   push:
     tags:
       - "v*"
+  # The npm half can be re-run on its own. A version cannot be replaced once it
+  # is on npm, so a release that failed partway through has to be finishable
+  # without rebuilding and re-publishing the GitHub release it already made.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "the tag to publish to npm, for example v0.19.0"
+        required: true
 
 permissions:
   contents: write
 
 jobs:
   goreleaser:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,3 +34,65 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  npm:
+    # Most of the MCP ecosystem is Node and Python, and nobody writing a server
+    # in TypeScript is going to install a Go toolchain to debug it. These seven
+    # packages make the quickstart npx mcpsnoop -- node build/index.js.
+    needs: [goreleaser]
+    # The push path waits for goreleaser. The dispatch path skips it, since the
+    # release it packages is already published.
+    if: always() && (needs.goreleaser.result == 'success' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets the runner mint the short-lived token npm signs the provenance
+      # attestation with, so anyone can check that these bytes were built here
+      # rather than uploaded from someone's laptop.
+      id-token: write
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      # The packages are built from what the release actually published, not
+      # from a build tree, and every archive is checked against the checksums
+      # file published beside it before anything is packed. That way the binary
+      # someone runs with npx is provably the binary on the releases page.
+      - name: Download the published archives
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist \
+            --pattern 'mcpsnoop_*' --pattern 'checksums.txt'
+          ls -l dist
+
+      - name: Build the npm packages
+        run: go run ./cmd/npmpack -version "$TAG" -dist dist -out dist/npm
+
+      # In the order npmpack prints, which puts the root package last. It
+      # resolves to the other six, so publishing it first would serve a broken
+      # install to anyone who asked for mcpsnoop in the window before they land.
+      #
+      # The dist-tag comes from npmpack too. npm hands whatever carries `latest`
+      # to a bare `npx mcpsnoop`, and a publish claims that tag unless told
+      # otherwise, so a v*-rc tag would reach every user with no way to take it
+      # back.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          dist_tag="$(go run ./cmd/npmpack -print-dist-tag -version "$TAG")"
+          echo "publishing $TAG under the $dist_tag tag"
+          for dir in $(go run ./cmd/npmpack -print-order); do
+            echo "publishing $dir"
+            npm publish "dist/npm/$dir" --provenance --access public --tag "$dist_tag"
+          done
