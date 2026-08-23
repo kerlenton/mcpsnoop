@@ -50,6 +50,16 @@ report="${RUNNER_TEMP:-}/mcpsnoop.sarif"
 	"session is a path to a .jsonl capture, relative to the repository root." \
 	"Record one by wrapping your server with mcpsnoop before this step."
 
+command -v mcpsnoop >/dev/null 2>&1 || refuse "mcpsnoop is not on PATH." \
+	"" \
+	"With install: false the binary has to be there already, and putting it on" \
+	"PATH in an earlier step needs GITHUB_PATH rather than an export, which" \
+	"lasts only as long as the step that ran it:" \
+	"" \
+	"  echo \"\$RUNNER_TEMP/bin\" >> \"\$GITHUB_PATH\"" \
+	"" \
+	"Or drop install: false and let the action fetch the release you pinned."
+
 flags=()
 if [ -n "${MCPSNOOP_FAIL_ON:-}" ]; then
 	flags+=(--fail-on "$MCPSNOOP_FAIL_ON")

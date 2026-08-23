@@ -167,6 +167,28 @@ run "-"
 grep -q "session cannot be -" "$root/log" ||
 	bad "refusing stdin did not say why a report needs a file" "$(cat "$root/log")"
 
+# install: false with nothing installed. Left alone this is a bare "command not
+# found" from the shell, which reads as a broken action rather than as the one
+# mistake it almost always is.
+# Every directory holding a mcpsnoop taken out of PATH, rather than PATH
+# replaced, since the harness itself needs the ordinary tools to run at all.
+# Every one, not the first: a machine can carry an installed copy as well as the
+# build this suite put there, and leaving either behind proves nothing.
+without_mcpsnoop="$PATH"
+for _ in 1 2 3 4 5; do
+	found="$(PATH="$without_mcpsnoop" bash -c 'command -v mcpsnoop' 2>/dev/null)" || break
+	[ -n "$found" ] || break
+	without_mcpsnoop="$(printf '%s' "$without_mcpsnoop" | tr ':' '\n' | grep -vFx "$(dirname "$found")" | paste -sd: -)"
+done
+if PATH="$without_mcpsnoop" bash -c 'command -v mcpsnoop' >/dev/null 2>&1; then
+	bad "could not build a PATH without mcpsnoop on it, so the case below would prove nothing"
+else
+	PATH="$without_mcpsnoop" run "$root/clean.jsonl"
+	expect "a missing binary is an error, not a finding" error false 1
+	grep -q "GITHUB_PATH" "$root/log" ||
+		bad "the missing-binary message does not say how to put it on PATH" "$(cat "$root/log")"
+fi
+
 # A verdict that was never written is the same as an error: a check step that
 # died before writing one has approved nothing.
 if env MCPSNOOP_SESSION=x bash "$gate_sh" >/dev/null 2>&1; then

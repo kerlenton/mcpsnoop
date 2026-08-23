@@ -44,6 +44,9 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bin" captures
           go build -o "$RUNNER_TEMP/bin/mcpsnoop" ./cmd/mcpsnoop
+          # GITHUB_PATH, not export. An export lasts as long as this step, and
+          # the steps that use `install: false` below are later ones.
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
           export PATH="$RUNNER_TEMP/bin:$PATH"
           cat > server.js <<'JS'
           let buf = ''
