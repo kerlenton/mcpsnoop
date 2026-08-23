@@ -46,9 +46,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Lets the runner mint the short-lived token npm signs the provenance
-      # attestation with, so anyone can check that these bytes were built here
-      # rather than uploaded from someone's laptop.
+      # This is the whole of the credential. npm is set up to trust this
+      # workflow in this repository, so the runner mints a short-lived OIDC
+      # token for the publish and signs the provenance attestation with it.
+      # There is no long-lived npm token anywhere, and anyone can check that
+      # these bytes were built here rather than uploaded from someone's laptop.
       id-token: write
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -58,10 +60,25 @@ jobs:
         with:
           go-version: stable
           check-latest: true
+      # 24 rather than the 22 that CI runs. Trusted publishing needs npm 11.5.1
+      # or later to authenticate by OIDC, and node 22 still carries npm 10.
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
+
+      # Without this, an npm too old to speak OIDC fails at the publish with a
+      # 401, which reads like a credential problem and is not one.
+      - name: Check the runner's npm can authenticate by OIDC
+        run: |
+          need=11.5.1
+          have="$(npm --version)"
+          if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+            echo "npm $have cannot do trusted publishing, which needs $need or later."
+            echo "Raise node-version for this job. Node 24 carries npm 11."
+            exit 1
+          fi
+          echo "npm $have"
 
       # The packages are built from what the release actually published, not
       # from a build tree, and every archive is checked against the checksums
@@ -82,17 +99,21 @@ jobs:
       # resolves to the other six, so publishing it first would serve a broken
       # install to anyone who asked for mcpsnoop in the window before they land.
       #
+      #
       # The dist-tag comes from npmpack too. npm hands whatever carries `latest`
       # to a bare `npx mcpsnoop`, and a publish claims that tag unless told
       # otherwise, so a v*-rc tag would reach every user with no way to take it
       # back.
+      #
       # Skipping what is already there is what makes re-running this job a real
       # recovery. A publish that died partway leaves some of the seven on the
       # registry, and npm refuses to publish over an existing version, so a
       # plain retry would stop at the first one it had already done.
+      #
+      # No --provenance and no token. Publishing this way attaches the
+      # attestation on its own, and the flag npm's own guidance calls
+      # unnecessary would only invite the question of why it is here.
       - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           version="${TAG#v}"
           dist_tag="$(go run ./cmd/npmpack -print-dist-tag -version "$TAG")"
@@ -103,5 +124,5 @@ jobs:
               continue
             fi
             echo "publishing $name@$version"
-            npm publish "dist/npm/$name" --provenance --access public --tag "$dist_tag"
+            npm publish "dist/npm/$name" --access public --tag "$dist_tag"
           done

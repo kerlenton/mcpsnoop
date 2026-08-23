@@ -16,15 +16,23 @@ publishes a GitHub Release. That half needs only the default `GITHUB_TOKEN`.
 ## npm
 
 A second job then publishes the same release to npm, so that
-`npx mcpsnoop -- node build/index.js` works without a Go toolchain. This one
-needs an `NPM_TOKEN` secret, a granular automation token with publish rights on
-`mcpsnoop` and on the `@mcpsnoop` scope.
+`npx mcpsnoop -- node build/index.js` works without a Go toolchain. It needs no
+secret either. Each of the seven packages names this workflow in this repository
+as its [trusted publisher](https://docs.npmjs.com/trusted-publishers), so the
+runner mints a short-lived OIDC token for the publish and npm attaches the
+provenance attestation on its own. There is no long-lived npm credential to
+leak, rotate, or let expire.
 
-It downloads the archives the release just published, checks each one against the
-`checksums.txt` published beside it, and packs those exact bytes. So the binary
-someone gets from npm is provably the binary on the releases page, and
-`--provenance` records that it was built by this workflow rather than uploaded
-from somebody's laptop.
+That is why the job runs node 24 rather than the 22 that CI runs. Authenticating
+by OIDC needs npm 11.5.1 or later, and node 22 still carries npm 10. A step
+checks this before the publish, because an npm too old fails with a 401 that
+reads like a credential problem and is not one.
+
+The job downloads the archives the release just published, checks each one
+against the `checksums.txt` published beside it, and packs those exact bytes. So
+the binary someone gets from npm is provably the binary on the releases page,
+and the attestation records that it was built by this workflow rather than
+uploaded from somebody's laptop.
 
 Seven packages go out. Six carry one binary each and name the machine they are
 for through npm's `os` and `cpu` fields, and the seventh is the thin `mcpsnoop`
@@ -49,11 +57,13 @@ A prerelease goes out under the `next` tag rather than claiming `latest`, so a
 a package that has never been published is not documented, and the first release
 is the one time there is no existing `latest` to protect.
 
-The first release of a package has to go through the token, because npm's
-[trusted publishing](https://docs.npmjs.com/trusted-publishers) is configured in
-an existing package's settings. Once all seven exist, each can be switched to
-trusted publishing on npmjs.com and the `NPM_TOKEN` secret deleted, which drops
-the long-lived credential entirely. That needs npm 11.5.1 or later on the runner.
+Adding a platform, or moving the workflow to another filename, means visiting
+all seven packages under Settings and Trusted publishing on npmjs.com. The
+trusted publisher is pinned to `release.yml` in `kerlenton/mcpsnoop` by name, so
+a rename that looks harmless in the repository stops every publish. A new
+package also has to be given its trusted publisher, and that is only possible
+once it exists, so the very first publish of one needs a granular token with
+publish rights, deleted again straight after.
 
 To see what would be published without publishing it, build the packages from a
 downloaded release.
