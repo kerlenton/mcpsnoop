@@ -205,14 +205,17 @@ type sarifBuilder struct {
 // over the same log produce byte-identical output.
 func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 	sessionID := summary.sessionID
-	if summary.baselineCreated {
-		// A first-seen baseline is recorded, not verified, which the text and junit
-		// formats both say out loud. SARIF has no equivalent of junit's <skipped>,
-		// so it is a note: the run is not failing, but it verified nothing either,
-		// and a log carrying no result at all would read as though it had.
-		b.add(sessionID, sarifRuleID(checkDrift), sarifLevelNote,
-			fmt.Sprintf("session %s: recorded first-seen tool baseline (trusted, not verified)", sessionID),
-			"baseline-recorded", 0)
+	if why := summary.driftUnverified(); why != "" && b.selected[checkDrift] {
+		// Only when the run asked to be gated on drift. A code-scanning alert is a
+		// thing somebody has to dismiss by hand, and it outlives the run that filed
+		// it; a first-seen baseline is the ordinary state of an ephemeral CI, so
+		// filing one unconditionally opened an alert on every clean run for ever.
+		// It is also a fact about the run rather than about the traffic, which is
+		// what a text summary is for. Where the gate does care, the level follows
+		// the gate, the way every other result here does.
+		b.add(sessionID, sarifRuleID(checkDrift), b.level(checkDrift),
+			fmt.Sprintf("session %s: %s", sessionID, why),
+			"baseline-unverified", 0)
 	}
 
 	var toolListSeq uint64
