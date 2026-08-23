@@ -86,13 +86,22 @@ jobs:
       # to a bare `npx mcpsnoop`, and a publish claims that tag unless told
       # otherwise, so a v*-rc tag would reach every user with no way to take it
       # back.
+      # Skipping what is already there is what makes re-running this job a real
+      # recovery. A publish that died partway leaves some of the seven on the
+      # registry, and npm refuses to publish over an existing version, so a
+      # plain retry would stop at the first one it had already done.
       - name: Publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          version="${TAG#v}"
           dist_tag="$(go run ./cmd/npmpack -print-dist-tag -version "$TAG")"
-          echo "publishing $TAG under the $dist_tag tag"
-          for dir in $(go run ./cmd/npmpack -print-order); do
-            echo "publishing $dir"
-            npm publish "dist/npm/$dir" --provenance --access public --tag "$dist_tag"
+          echo "publishing $version under the $dist_tag tag"
+          for name in $(go run ./cmd/npmpack -print-order); do
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already on the registry, skipping"
+              continue
+            fi
+            echo "publishing $name@$version"
+            npm publish "dist/npm/$name" --provenance --access public --tag "$dist_tag"
           done

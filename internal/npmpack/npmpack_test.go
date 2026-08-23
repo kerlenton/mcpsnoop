@@ -413,9 +413,9 @@ func TestPublishOrderPutsTheRootPackageLast(t *testing.T) {
 	if got := order[len(order)-1]; got != "mcpsnoop" {
 		t.Errorf("the last package published is %s, want mcpsnoop", got)
 	}
-	for _, dir := range order[:len(order)-1] {
-		if !strings.HasPrefix(dir, "@mcpsnoop"+string(filepath.Separator)) {
-			t.Errorf("%s is published before the root package but is not a platform package", dir)
+	for _, name := range order[:len(order)-1] {
+		if !strings.HasPrefix(name, "@mcpsnoop/") {
+			t.Errorf("%s is published before the root package but is not a platform package", name)
 		}
 	}
 }
@@ -425,11 +425,16 @@ func TestPublishOrderNamesADirectoryThatBuildWrote(t *testing.T) {
 	if err := build(t, release(t), out); err != nil {
 		t.Fatal(err)
 	}
-	for _, dir := range PublishOrder() {
-		// The release workflow publishes exactly these paths, so a name that
-		// does not exist on disk is a release that fails halfway through.
-		if _, err := os.Stat(filepath.Join(out, dir, "package.json")); err != nil {
-			t.Errorf("the publish order names %s, which was not written: %v", dir, err)
+	for _, name := range PublishOrder() {
+		// The workflow asks the registry about a name and then publishes the
+		// directory of that same name, so the two have to be the one string.
+		// A name with nothing behind it is a release that fails halfway.
+		dir := filepath.Join(out, filepath.FromSlash(name))
+		if _, err := os.Stat(filepath.Join(dir, "package.json")); err != nil {
+			t.Errorf("the publish order names %s, which was not written: %v", name, err)
+		}
+		if got := readManifest(t, filepath.Join(dir, "package.json"))["name"]; got != name {
+			t.Errorf("the directory %s holds the package %v, so the workflow would ask the registry about the wrong name", name, got)
 		}
 	}
 }

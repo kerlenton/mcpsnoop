@@ -98,6 +98,8 @@ func Targets() []Target {
 const (
 	// checksumsFile is what the release calls its checksums file.
 	checksumsFile = "checksums.txt"
+	// rootPackage is the thin package a user asks for by name.
+	rootPackage = "mcpsnoop"
 	// placeholder is the version the checked-in root manifest carries. It is
 	// never a real release, so a run that forgot to stamp it is caught rather
 	// than published.
@@ -350,7 +352,7 @@ MIT licensed.
 // writeRoot copies the checked-in root package and stamps the release version
 // into its manifest, pinning every platform package to the same version.
 func writeRoot(src, out, version string) error {
-	dir := filepath.Join(out, "mcpsnoop")
+	dir := filepath.Join(out, rootPackage)
 	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
 		return err
 	}
@@ -423,8 +425,13 @@ func DistTag(version string) string {
 	return "latest"
 }
 
-// PublishOrder lists the seven package directories a run produces, relative to
-// the output directory, in the order they must be published in.
+// PublishOrder names the seven packages a run produces, in the order they must
+// be published in.
+//
+// A name doubles as the directory Build wrote that package to, relative to the
+// output directory, because npm spells a scoped name with the same separator a
+// path uses. That lets the release workflow check a name against the registry
+// and publish the directory of the same name without carrying two lists.
 //
 // The root package resolves to the other six, so it goes last. A run that
 // stopped halfway then leaves platform packages that nothing yet points at,
@@ -432,10 +439,10 @@ func DistTag(version string) string {
 // exist, which is broken for everyone and cannot be taken back: npm does not
 // let a published version be replaced.
 func PublishOrder() []string {
-	dirs := make([]string, 0, len(Targets())+1)
+	names := make([]string, 0, len(Targets())+1)
 	for _, t := range Targets() {
-		dirs = append(dirs, filepath.Join("@mcpsnoop", t.Dir()))
+		names = append(names, t.Package())
 	}
-	sort.Strings(dirs)
-	return append(dirs, "mcpsnoop")
+	sort.Strings(names)
+	return append(names, rootPackage)
 }
