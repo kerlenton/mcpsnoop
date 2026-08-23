@@ -24,7 +24,7 @@ CHECK_TZ ?= UTC
 # staticcheck is run through `go run` at a fixed version.
 SHELLCHECK_VERSION ?= v0.11.0
 
-.PHONY: all build test vet vet-cross staticcheck fmt fmt-check lint check clean action-test shellcheck-bin
+.PHONY: all build test vet vet-cross staticcheck fmt fmt-check lint check clean action-test shellcheck-bin release-prep
 
 all: check build
 
@@ -67,6 +67,37 @@ fmt:
 # fmt-check fails (for CI) if any file is not simplified/gofmt'd.
 fmt-check:
 	@out="$$(gofmt -s -l .)"; if [ -n "$$out" ]; then echo "gofmt -s needed:"; echo "$$out"; exit 1; fi
+
+# Bump every release version a reader is meant to copy, before tagging.
+#
+# The README's `uses:` lines are what somebody arriving from the Marketplace
+# listing copies, and the listing renders the README from the default branch
+# while the version beside it comes from the published release. Leaving them
+# behind makes the page recommend one release in its sidebar and hand out an
+# older one in its snippet. The selftest's own pin is deliberately not touched,
+# since that leg exists to prove install.sh against a known archive.
+#
+# TAG reaches the recipe through the environment rather than through make's own
+# substitution, and that is not style. Substituted, the value becomes part of the
+# recipe text before any line of it runs, so a semicolon in it is a second
+# command and no check written below could ever see it. This target was written
+# the other way first, and `TAG='v1.0.0; rm -rf /'` sailed past a case pattern
+# that looked strict: a shell glob is not a regex, and its * matches a semicolon
+# and a space as happily as a digit.
+release-prep: export MCPSNOOP_RELEASE_TAG = $(TAG)
+release-prep:
+	@if [ -z "$$MCPSNOOP_RELEASE_TAG" ]; then \
+		echo "usage: make release-prep TAG=v0.22.0" >&2; exit 1; \
+	fi
+	@printf '%s' "$$MCPSNOOP_RELEASE_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$$' || { \
+		printf 'TAG must be a full release tag such as v0.22.0, got "%s"\n' "$$MCPSNOOP_RELEASE_TAG" >&2; \
+		exit 1; \
+	}
+	@sed -i.bak -E "s|(kerlenton/mcpsnoop@)v[0-9]+\.[0-9]+\.[0-9]+|\1$$MCPSNOOP_RELEASE_TAG|g" README.md
+	@sed -i.bak -E "s|(for example )v[0-9]+\.[0-9]+\.[0-9]+|\1$$MCPSNOOP_RELEASE_TAG|" action.yml
+	@rm -f README.md.bak action.yml.bak
+	@bash action/tests/docs_test.sh
+	@git --no-pager diff --stat README.md action.yml
 
 # The GitHub Action is shell, so the Go gate above cannot see it, and it is the
 # one part of this repository that runs on other people's machines. Its tests
