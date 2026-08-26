@@ -113,7 +113,8 @@ or 5xx counts as an error, so a default `mcpsnoop check` run fails on it.
 
 ### Prometheus metrics
 
-Start the hub with an explicit metrics address to expose live tool-call metrics:
+Start a headless hub with an explicit metrics address to expose live tool-call
+metrics (use bare `mcpsnoop` when you want the interactive TUI):
 
 ```bash
 mcpsnoop --metrics-listen 127.0.0.1:9464
@@ -177,7 +178,7 @@ Explicit command-line flags override values from the config file.
 |---|---|
 | `mcpsnoop -- <server>` | wrap a stdio server as a transparent shim |
 | `mcpsnoop` | open the live TUI |
-| `mcpsnoop --metrics-listen <addr>` | open the TUI and expose live Prometheus metrics |
+| `mcpsnoop --metrics-listen <addr>` | run a headless hub and expose live Prometheus metrics |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, har, or otlp |
 | `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, hung calls, late results, or a latency budget |

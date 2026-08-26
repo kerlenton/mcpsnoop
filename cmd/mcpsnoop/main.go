@@ -32,6 +32,7 @@ import (
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
 	"github.com/kerlenton/mcpsnoop/internal/hub"
+	"github.com/kerlenton/mcpsnoop/internal/metrics"
 	"github.com/kerlenton/mcpsnoop/internal/otlpsink"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
@@ -815,12 +816,18 @@ func newHTTPCmd() *cobra.Command {
 	return cmd
 }
 
-// runHub runs the live TUI, collecting traffic from all shims and past sessions.
+// runHub runs the live TUI, or a headless metrics hub when requested.
 func runHub(historyLimit int, metricsListen string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := tui.RunWithHistoryLimitAndMetrics(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit, metricsListen); err != nil {
+	var err error
+	if metricsListen != "" {
+		err = metrics.RunHeadless(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit, metricsListen)
+	} else {
+		err = tui.RunWithHistoryLimit(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)
 		return 1
 	}

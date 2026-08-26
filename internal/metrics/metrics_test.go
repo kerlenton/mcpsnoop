@@ -1,9 +1,13 @@
 package metrics
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +32,20 @@ func toolRequest(session, label string, seq uint64, at time.Time, id, tool strin
 func toolResponse(session, label string, seq uint64, at time.Time, id, answer string) proxy.Envelope {
 	return envelope(session, label, seq, at, proxy.ServerToClient,
 		`{"jsonrpc":"2.0","id":`+strconv.Quote(id)+`,`+answer+`}`)
+}
+
+func toolRequestOnConn(session, label string, seq uint64, at time.Time, conn, id, tool string) proxy.Envelope {
+	e := toolRequest(session, label, seq, at, id, tool)
+	e.Transport = proxy.TransportHTTP
+	e.ConnID = conn
+	return e
+}
+
+func toolResponseOnConn(session, label string, seq uint64, at time.Time, conn, id, answer string) proxy.Envelope {
+	e := toolResponse(session, label, seq, at, id, answer)
+	e.Transport = proxy.TransportHTTP
+	e.ConnID = conn
+	return e
 }
 
 func TestCollectorWritesCountersHistogramAndEscapedLabels(t *testing.T) {
@@ -127,6 +145,101 @@ func TestCollectorDropsSupersededOperationState(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `",tool="echo"} 2`) || !strings.Contains(out.String(), `mcpsnoop_tool_call_duration_seconds_count{server="server",server_id="`) || !strings.Contains(out.String(), `",tool="echo"} 1`) {
 		t.Fatalf("superseded call accounting is wrong:\n%s", out.String())
+	}
+}
+
+func TestCollectorDropsToolWhenSameRequestIdentityIsReusedByNonTool(t *testing.T) {
+	c := New()
+	start := time.Unix(1_700_000_000, 0)
+	c.Observe(toolRequest("s1", "server", 1, start, "same", "echo"))
+	c.Observe(envelope("s1", "server", 2, start.Add(time.Second), proxy.ClientToServer,
+		`{"jsonrpc":"2.0","id":"same","method":"ping"}`))
+	c.Observe(toolResponse("s1", "server", 3, start.Add(2*time.Second), "same", `"result":{"content":[]}`))
+
+	var out strings.Builder
+	if err := c.Write(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `",tool="echo"} 1`) || !strings.Contains(out.String(), `mcpsnoop_tool_call_duration_seconds_count{server="server",server_id="`) || !strings.Contains(out.String(), `",tool="echo"} 0`) {
+		t.Fatalf("superseded tool operation remained active:\n%s", out.String())
+	}
+}
+
+func TestCollectorCorrelatesSameHTTPIDByConnID(t *testing.T) {
+	c := New()
+	start := time.Unix(1_700_000_000, 0)
+	c.Observe(toolRequestOnConn("s1", "server", 1, start, "client-a", "1", "echo"))
+	c.Observe(toolRequestOnConn("s1", "server", 2, start.Add(time.Second), "client-b", "1", "echo"))
+	c.Observe(toolResponseOnConn("s1", "server", 3, start.Add(1100*time.Millisecond), "client-a", "1", `"result":{"content":[]}`))
+	c.Observe(toolResponseOnConn("s1", "server", 4, start.Add(3*time.Second), "client-b", "1", `"error":{"code":-32603,"message":"boom"}`))
+
+	var out strings.Builder
+	if err := c.Write(&out); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, `",tool="echo"} 2`) {
+		t.Fatalf("same-id HTTP calls were not both counted:\n%s", got)
+	}
+	if !strings.Contains(got, `",tool="echo",error_type="protocol"} 1`) {
+		t.Fatalf("same-id HTTP protocol error was not retained:\n%s", got)
+	}
+	if !strings.Contains(got, `mcpsnoop_tool_call_duration_seconds_sum{server="server",server_id="`) || !strings.Contains(got, `",tool="echo"} 3.1`) {
+		t.Fatalf("same-id HTTP durations were not both observed:\n%s", got)
+	}
+}
+
+func TestCollectorPrimeExcludesBackfillMetrics(t *testing.T) {
+	c := New()
+	start := time.Unix(1_700_000_000, 0)
+	c.Prime(toolRequest("s1", "server", 1, start, "1", "echo"))
+	c.Prime(toolResponse("s1", "server", 2, start.Add(time.Second), "1", `"result":{"content":[]}`))
+
+	var out strings.Builder
+	if err := c.Write(&out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), `",tool="echo"} 1`) {
+		t.Fatalf("backfill produced live metrics:\n%s", out.String())
+	}
+}
+
+func TestRunHeadlessMetricsDoesNotStartTUI(t *testing.T) {
+	if _, err := net.Listen("unix", filepath.Join(t.TempDir(), "probe.sock")); err != nil {
+		t.Skipf("unix sockets unavailable: %v", err)
+	}
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "hub.sock")
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	probe.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- RunHeadless(ctx, socket, dir, 0, addr) }()
+
+	var resp *http.Response
+	for range 50 {
+		resp, err = http.Get("http://" + addr + "/metrics")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		cancel()
+		t.Fatalf("headless metrics listener did not start: %v", err)
+	}
+	cancel()
+	if err := <-runErr; err != nil {
+		t.Fatalf("headless metrics run = %v", err)
+	}
+	if _, err := os.Stat(socket); !os.IsNotExist(err) {
+		t.Fatalf("headless hub socket still exists, stat error = %v", err)
 	}
 }
 

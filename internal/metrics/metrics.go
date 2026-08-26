@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kerlenton/mcpsnoop/internal/hub"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
 )
@@ -55,11 +56,13 @@ type operationKey struct {
 type requestKey struct {
 	session string
 	id      string
+	conn    string
 }
 
 type operation struct {
 	series    seriesKey
 	id        string
+	conn      string
 	cancelled bool
 }
 
@@ -83,6 +86,15 @@ func New() *Collector {
 	}
 }
 
+// Prime adds historical state without producing live metrics. It is used during
+// hub startup so a reconnect can retain the session identity and correlation
+// context learned from the log.
+func (c *Collector) Prime(env proxy.Envelope) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.store.Ingest(env)
+}
+
 // Observe adds one deduplicated live envelope. It does no network or disk work.
 func (c *Collector) Observe(env proxy.Envelope) {
 	c.mu.Lock()
@@ -95,18 +107,23 @@ func (c *Collector) Observe(env proxy.Envelope) {
 	}
 	server := labelsForSession(c.store, env.SessionID, header)
 
-	if event.Kind == store.EventRequest && event.Call != nil && event.MRTRRoot == "" &&
-		event.Call.IsTool && event.Call.ToolName != "" {
+	if event.Kind == store.EventRequest && event.Call != nil && event.MRTRRoot == "" {
 		key := operationKey{session: env.SessionID, seq: event.Call.RequestSeq}
-		if _, exists := c.operations[key]; !exists {
-			request := requestKey{session: env.SessionID, id: event.Call.ID}
-			if previous, exists := c.inflight[request]; exists && previous != key {
-				delete(c.operations, previous)
+		request := requestKey{session: env.SessionID, id: event.Call.ID, conn: env.ConnID}
+		if previous, exists := c.inflight[request]; exists && previous != key {
+			if op := c.operations[previous]; op != nil {
+				c.finish(previous, op)
+			} else {
+				delete(c.inflight, request)
 			}
-			series := seriesKey{server: server.label, serverID: server.id, tool: event.Call.ToolName}
-			c.operations[key] = &operation{series: series, id: event.Call.ID}
-			c.inflight[request] = key
-			c.seriesFor(series).calls++
+		}
+		if event.Call.IsTool && event.Call.ToolName != "" {
+			if _, exists := c.operations[key]; !exists {
+				series := seriesKey{server: server.label, serverID: server.id, tool: event.Call.ToolName}
+				c.operations[key] = &operation{series: series, id: event.Call.ID, conn: env.ConnID}
+				c.inflight[request] = key
+				c.seriesFor(series).calls++
+			}
 		}
 	}
 
@@ -159,7 +176,7 @@ func (c *Collector) Observe(env proxy.Envelope) {
 
 func (c *Collector) finish(key operationKey, op *operation) {
 	delete(c.operations, key)
-	request := requestKey{session: key.session, id: op.id}
+	request := requestKey{session: key.session, id: op.id, conn: op.conn}
 	if current, ok := c.inflight[request]; ok && current == key {
 		delete(c.inflight, request)
 	}
@@ -372,4 +389,63 @@ func (s *Server) Close() error {
 		return err
 	}
 	return nil
+}
+
+// RunHeadless runs the hub and metrics listener without starting a TUI. History
+// primes the collector's correlation store, but only envelopes received after
+// backfill are observed as live metrics.
+func RunHeadless(ctx context.Context, socketPath, sessionsDir string, historyLimit int, listen string) error {
+	if listen == "" {
+		return errors.New("metrics: empty listen address")
+	}
+	collector := New()
+	server, err := NewServer(listen, collector)
+	if err != nil {
+		return err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve() }()
+
+	h := hub.NewWithOptions(socketPath, sessionsDir, func(proxy.Envelope) {}, hub.Options{
+		BackfillLimit:      historyLimit,
+		OnBackfillEnvelope: collector.Prime,
+		OnLive:             collector.Observe,
+	})
+	hubErr := make(chan error, 1)
+	go func() { hubErr <- h.Run(runCtx) }()
+
+	select {
+	case err := <-hubErr:
+		closeErr := server.Close()
+		metricsErr := <-serveErr
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return fmt.Errorf("metrics listener shutdown: %w", closeErr)
+		}
+		return metricsErr
+	case err := <-serveErr:
+		cancel()
+		<-hubErr
+		if err != nil {
+			return fmt.Errorf("metrics listener stopped: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		cancel()
+		closeErr := server.Close()
+		hubErr := <-hubErr
+		metricsErr := <-serveErr
+		if closeErr != nil {
+			return fmt.Errorf("metrics listener shutdown: %w", closeErr)
+		}
+		if hubErr != nil {
+			return hubErr
+		}
+		return metricsErr
+	}
 }

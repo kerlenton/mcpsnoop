@@ -31,15 +31,17 @@ type Handler func(proxy.Envelope)
 
 // Hub collects envelopes from shims (socket) and past sessions (files).
 type Hub struct {
-	socketPath    string
-	sessionsDir   string
-	handler       Handler
-	backfillLimit int
-	onBackfill    func(BackfillReport)
-	onLive        Handler
+	socketPath         string
+	sessionsDir        string
+	handler            Handler
+	backfillLimit      int
+	onBackfill         func(BackfillReport)
+	onBackfillEnvelope Handler
+	onLive             Handler
 
-	mu   sync.Mutex
-	seen map[string]seenEntry // session id -> dedup high-water mark, with last touch
+	mu          sync.Mutex
+	seen        map[string]seenEntry // session id -> dedup high-water mark, with last touch
+	lastTouched time.Time
 }
 
 // seenEntry is one session's dedup high-water mark plus the last time it was
@@ -60,6 +62,10 @@ const seenCap = 10 * DefaultBackfillLimit
 type Options struct {
 	BackfillLimit int
 	OnBackfill    func(BackfillReport)
+	// OnBackfillEnvelope receives each unique envelope replayed from a session
+	// log. It is separate from OnLive so a consumer can prime state without
+	// treating historical traffic as new activity.
+	OnBackfillEnvelope Handler
 	// OnLive receives each unique envelope arriving from a connected shim. It is
 	// deliberately separate from handler so startup replay cannot look like new
 	// traffic to consumers such as live metrics.
@@ -82,13 +88,14 @@ func New(socketPath, sessionsDir string, handler Handler) *Hub {
 // NewWithOptions creates a hub with explicit startup behavior.
 func NewWithOptions(socketPath, sessionsDir string, handler Handler, opts Options) *Hub {
 	return &Hub{
-		socketPath:    socketPath,
-		sessionsDir:   sessionsDir,
-		handler:       handler,
-		backfillLimit: opts.BackfillLimit,
-		onBackfill:    opts.OnBackfill,
-		onLive:        opts.OnLive,
-		seen:          make(map[string]seenEntry),
+		socketPath:         socketPath,
+		sessionsDir:        sessionsDir,
+		handler:            handler,
+		backfillLimit:      opts.BackfillLimit,
+		onBackfill:         opts.OnBackfill,
+		onBackfillEnvelope: opts.OnBackfillEnvelope,
+		onLive:             opts.OnLive,
+		seen:               make(map[string]seenEntry),
 	}
 }
 
@@ -252,14 +259,23 @@ func (h *Hub) emitFrom(env proxy.Envelope, live bool) {
 		h.mu.Unlock()
 		return
 	}
-	h.seen[env.SessionID] = seenEntry{seq: env.Seq, touched: time.Now()}
+	touched := time.Now()
+	if !touched.After(h.lastTouched) {
+		touched = h.lastTouched.Add(time.Nanosecond)
+	}
+	h.lastTouched = touched
+	h.seen[env.SessionID] = seenEntry{seq: env.Seq, touched: touched}
 	if len(h.seen) > seenCap {
 		h.sweepSeen()
 	}
 	h.mu.Unlock()
 	h.handler(env)
-	if live && h.onLive != nil {
-		h.onLive(env)
+	if live {
+		if h.onLive != nil {
+			h.onLive(env)
+		}
+	} else if h.onBackfillEnvelope != nil {
+		h.onBackfillEnvelope(env)
 	}
 }
 

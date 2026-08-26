@@ -7,11 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/kerlenton/mcpsnoop/internal/metrics"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
 
@@ -112,11 +110,11 @@ func TestHubOnLiveExcludesBackfill(t *testing.T) {
 	writeLog(t, sessionsDir, "s1", historyRequest, historyResponse)
 
 	var live []proxy.Envelope
-	collector := metrics.New()
+	backfilled := 0
 	h := NewWithOptions("", sessionsDir, func(proxy.Envelope) {}, Options{
+		OnBackfillEnvelope: func(proxy.Envelope) { backfilled++ },
 		OnLive: func(e proxy.Envelope) {
 			live = append(live, e)
-			collector.Observe(e)
 		},
 	})
 	h.backfill(context.Background())
@@ -128,15 +126,11 @@ func TestHubOnLiveExcludesBackfill(t *testing.T) {
 	h.emitLive(liveRequest)
 	h.emitLive(liveResponse)
 
+	if backfilled != 2 {
+		t.Fatalf("backfill callback count = %d, want 2", backfilled)
+	}
 	if len(live) != 2 || live[0].Seq != 3 || live[1].Seq != 4 {
 		t.Fatalf("live callback = %+v, want only seq 3 and 4", live)
-	}
-	var exposition strings.Builder
-	if err := collector.Write(&exposition); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(exposition.String(), `",tool="echo"} 1`) {
-		t.Fatalf("backfill was counted as live traffic:\n%s", exposition.String())
 	}
 }
 
