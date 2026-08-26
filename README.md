@@ -111,6 +111,37 @@ since it names the auth scheme and the resource metadata to go to next. Filter b
 status with `status:401` in the TUI, or by any failure with `status:err`. A 4xx
 or 5xx counts as an error, so a default `mcpsnoop check` run fails on it.
 
+### Prometheus metrics
+
+Start the hub with an explicit metrics address to expose live tool-call metrics:
+
+```bash
+mcpsnoop --metrics-listen 127.0.0.1:9464
+curl http://127.0.0.1:9464/metrics
+```
+
+The listener is separate from the MCP proxy listener and is disabled unless
+`--metrics-listen` is provided. Startup history replay is not counted as new live
+traffic. Every series has `server`, `server_id`, and `tool` labels;
+`server_id` is a stable short fingerprint of the recorded server identity, so
+two servers with the same label remain separate without exposing commands,
+paths, endpoints, or session IDs. Error counters also have `error_type`, either
+`tool` for `result.isError` or `protocol` for a JSON-RPC or other protocol-level
+failure.
+
+The public metrics are:
+
+| Metric | Meaning |
+|---|---|
+| `mcpsnoop_tool_calls_total` | live tool-call requests observed |
+| `mcpsnoop_tool_errors_total` | live tool errors, split by `error_type` |
+| `mcpsnoop_tool_call_duration_seconds` | request-to-response latency histogram |
+
+The histogram exports the standard `_bucket`, `_sum`, and `_count` series with
+`0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`,
+and `+Inf` second buckets. Pending, superseded, and calls cancelled without a
+result do not add latency observations.
+
 No server of your own? [Try it for real](docs/TRY_IT.md) against a published
 test server, driven by your own client. To inspect a session after it happened,
 see [review past sessions from logs](docs/POST_MORTEM.md).
@@ -146,6 +177,7 @@ Explicit command-line flags override values from the config file.
 |---|---|
 | `mcpsnoop -- <server>` | wrap a stdio server as a transparent shim |
 | `mcpsnoop` | open the live TUI |
+| `mcpsnoop --metrics-listen <addr>` | open the TUI and expose live Prometheus metrics |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, har, or otlp |
 | `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, hung calls, late results, or a latency budget |

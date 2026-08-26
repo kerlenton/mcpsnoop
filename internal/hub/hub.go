@@ -36,6 +36,7 @@ type Hub struct {
 	handler       Handler
 	backfillLimit int
 	onBackfill    func(BackfillReport)
+	onLive        Handler
 
 	mu   sync.Mutex
 	seen map[string]seenEntry // session id -> dedup high-water mark, with last touch
@@ -59,6 +60,10 @@ const seenCap = 10 * DefaultBackfillLimit
 type Options struct {
 	BackfillLimit int
 	OnBackfill    func(BackfillReport)
+	// OnLive receives each unique envelope arriving from a connected shim. It is
+	// deliberately separate from handler so startup replay cannot look like new
+	// traffic to consumers such as live metrics.
+	OnLive Handler
 }
 
 // BackfillReport describes how much saved history was replayed at startup.
@@ -82,6 +87,7 @@ func NewWithOptions(socketPath, sessionsDir string, handler Handler, opts Option
 		handler:       handler,
 		backfillLimit: opts.BackfillLimit,
 		onBackfill:    opts.OnBackfill,
+		onLive:        opts.OnLive,
 		seen:          make(map[string]seenEntry),
 	}
 }
@@ -161,7 +167,7 @@ func (h *Hub) handleConn(conn net.Conn) {
 			}
 			return // malformed stream, drop the connection
 		}
-		h.emit(env)
+		h.emitLive(env)
 	}
 }
 
@@ -233,6 +239,14 @@ func (h *Hub) replayFile(path string) {
 // second would restart at Seq 1 and be discarded whole, which is why the shim
 // mints a unique id per run rather than trusting the PID to be unique.
 func (h *Hub) emit(env proxy.Envelope) {
+	h.emitFrom(env, false)
+}
+
+func (h *Hub) emitLive(env proxy.Envelope) {
+	h.emitFrom(env, true)
+}
+
+func (h *Hub) emitFrom(env proxy.Envelope, live bool) {
 	h.mu.Lock()
 	if env.Seq <= h.seen[env.SessionID].seq {
 		h.mu.Unlock()
@@ -244,6 +258,9 @@ func (h *Hub) emit(env proxy.Envelope) {
 	}
 	h.mu.Unlock()
 	h.handler(env)
+	if live && h.onLive != nil {
+		h.onLive(env)
+	}
 }
 
 // sweepSeen drops the least-recently-touched quarter of the dedup map, keeping it

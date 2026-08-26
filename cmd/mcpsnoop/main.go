@@ -247,6 +247,7 @@ func newRootCmd() *cobra.Command {
 	var (
 		label, traceFile       string
 		otlpEndpoint           string
+		metricsListen          string
 		noTrace, redactSecrets bool
 		redactKeys             redactKeysFlag
 		redactValues           redactValuesFlag
@@ -272,7 +273,10 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 				if historyLimit < 0 {
 					return errors.New("--history-limit must be non-negative")
 				}
-				return codeOf(runHubFn(historyLimit))
+				return codeOf(runHubFn(historyLimit, metricsListen))
+			}
+			if metricsListen != "" {
+				return errors.New("--metrics-listen is only available when running the hub without a wrapped command")
 			}
 			cfg, ok, err := loadConfig()
 			if err != nil {
@@ -299,6 +303,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 	flags.StringVar(&traceFile, "trace-file", "", "override the JSONL trace path, defaults to the well-known session log")
 	flags.StringVar(&otlpEndpoint, "otlp-endpoint", "", "stream completed calls to an OTLP/HTTP JSON traces endpoint")
 	flags.Var(&otlpHeaders, "otlp-header", "HTTP header for OTLP delivery as Name=Value, repeatable")
+	flags.StringVar(&metricsListen, "metrics-listen", "", "listen on this address for Prometheus metrics in hub mode")
 	flags.BoolVar(&noTrace, "no-trace", false, "disable tracing, pure passthrough")
 	flags.BoolVar(&redactSecrets, "redact-secrets", false, "scrub common secret JSON keys in trace payloads")
 	flags.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")
@@ -811,11 +816,11 @@ func newHTTPCmd() *cobra.Command {
 }
 
 // runHub runs the live TUI, collecting traffic from all shims and past sessions.
-func runHub(historyLimit int) int {
+func runHub(historyLimit int, metricsListen string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := tui.RunWithHistoryLimit(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit); err != nil {
+	if err := tui.RunWithHistoryLimitAndMetrics(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit, metricsListen); err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)
 		return 1
 	}

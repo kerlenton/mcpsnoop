@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/kerlenton/mcpsnoop/internal/hub"
+	"github.com/kerlenton/mcpsnoop/internal/metrics"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
@@ -37,12 +38,42 @@ func liveStore() *store.Store {
 // RunWithHistoryLimit starts the live TUI with a bounded history replay.
 // A historyLimit of 0 loads every session log.
 func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, historyLimit int) error {
+	return runWithHistoryLimitAndMetrics(ctx, socketPath, sessionsDir, historyLimit, "")
+}
+
+// RunWithHistoryLimitAndMetrics starts the live TUI and, when metricsListen is
+// non-empty, an independent Prometheus listener. Metrics observe only live hub
+// envelopes; history replay remains a UI concern.
+func RunWithHistoryLimitAndMetrics(ctx context.Context, socketPath, sessionsDir string, historyLimit int, metricsListen string) error {
+	return runWithHistoryLimitAndMetrics(ctx, socketPath, sessionsDir, historyLimit, metricsListen)
+}
+
+func runWithHistoryLimitAndMetrics(ctx context.Context, socketPath, sessionsDir string, historyLimit int, metricsListen string) error {
 	st := liveStore()
 	baselines := toolbaseline.New(paths.ToolBaselinesDir())
-	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx))
-
 	hubCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(hubCtx))
+	var metricServer *metrics.Server
+	var metricErr chan error
+	var collector *metrics.Collector
+	if metricsListen != "" {
+		collector = metrics.New()
+		var err error
+		metricServer, err = metrics.NewServer(metricsListen, collector)
+		if err != nil {
+			return fmt.Errorf("cannot listen for Prometheus metrics on %s: %w", metricsListen, err)
+		}
+		defer metricServer.Close()
+		metricErr = make(chan error, 1)
+		go func() {
+			err := metricServer.Serve()
+			metricErr <- err
+			if err != nil && hubCtx.Err() == nil {
+				cancel()
+			}
+		}()
+	}
 
 	// Baseline observation reads and sometimes writes files, so keep it off the
 	// frame-delivery goroutine. A single worker observes the sessions handed to it
@@ -61,7 +92,7 @@ func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, hi
 		}
 	}()
 
-	h := hub.NewWithOptions(socketPath, sessionsDir, func(e proxy.Envelope) {
+	handler := func(e proxy.Envelope) {
 		event := st.Ingest(e)
 		if event.Kind == store.EventResponse && event.Call != nil && event.Call.Method == "tools/list" {
 			if _, complete := st.ToolDefinitions(e.SessionID); complete {
@@ -74,14 +105,19 @@ func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, hi
 			}
 		}
 		p.Send(frameMsg{})
-	}, hub.Options{
+	}
+	options := hub.Options{
 		BackfillLimit: historyLimit,
 		OnBackfill: func(report hub.BackfillReport) {
 			if report.Loaded < report.Total {
 				p.Send(historyTruncatedMsg{loaded: report.Loaded, total: report.Total})
 			}
 		},
-	})
+	}
+	if collector != nil {
+		options.OnLive = collector.Observe
+	}
+	h := hub.NewWithOptions(socketPath, sessionsDir, handler, options)
 
 	// A second hub on one MCPSNOOP_HOME cannot take the socket, and Run returns
 	// before it backfills, so swallowing the error left the user staring at an
@@ -106,6 +142,14 @@ func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, hi
 
 	_, err := p.Run()
 	cancel() // stop the hub and the observation worker once the UI exits
+	if metricServer != nil {
+		if closeErr := metricServer.Close(); closeErr != nil {
+			return fmt.Errorf("metrics listener shutdown: %w", closeErr)
+		}
+		if serveErr := <-metricErr; serveErr != nil {
+			return fmt.Errorf("metrics listener stopped: %w", serveErr)
+		}
+	}
 	if errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, context.Canceled) {
 		return nil
 	}

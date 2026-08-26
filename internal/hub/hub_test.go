@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/kerlenton/mcpsnoop/internal/metrics"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 )
 
@@ -97,6 +99,44 @@ func TestHubBackfillLiveDedup(t *testing.T) {
 	case e := <-got:
 		t.Fatalf("unexpected extra frame: %+v", e)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestHubOnLiveExcludesBackfill(t *testing.T) {
+	sessionsDir := t.TempDir()
+	historyRequest := env("s1", 1, "tools/call")
+	historyRequest.Raw = json.RawMessage(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"echo"}}`)
+	historyResponse := env("s1", 2, "response")
+	historyResponse.Direction = proxy.ServerToClient
+	historyResponse.Raw = json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"content":[]}}`)
+	writeLog(t, sessionsDir, "s1", historyRequest, historyResponse)
+
+	var live []proxy.Envelope
+	collector := metrics.New()
+	h := NewWithOptions("", sessionsDir, func(proxy.Envelope) {}, Options{
+		OnLive: func(e proxy.Envelope) {
+			live = append(live, e)
+			collector.Observe(e)
+		},
+	})
+	h.backfill(context.Background())
+	liveRequest := env("s1", 3, "tools/call")
+	liveRequest.Raw = json.RawMessage(`{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":"echo"}}`)
+	liveResponse := env("s1", 4, "response")
+	liveResponse.Direction = proxy.ServerToClient
+	liveResponse.Raw = json.RawMessage(`{"jsonrpc":"2.0","id":"2","result":{"content":[]}}`)
+	h.emitLive(liveRequest)
+	h.emitLive(liveResponse)
+
+	if len(live) != 2 || live[0].Seq != 3 || live[1].Seq != 4 {
+		t.Fatalf("live callback = %+v, want only seq 3 and 4", live)
+	}
+	var exposition strings.Builder
+	if err := collector.Write(&exposition); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(exposition.String(), `",tool="echo"} 1`) {
+		t.Fatalf("backfill was counted as live traffic:\n%s", exposition.String())
 	}
 }
 
