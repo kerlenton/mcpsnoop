@@ -123,12 +123,13 @@ curl http://127.0.0.1:9464/metrics
 
 The listener is separate from the MCP proxy listener and is disabled unless
 `--metrics-listen` is provided. Startup history replay is not counted as new live
-traffic. Every series has `server`, `server_id`, and `tool` labels;
-`server_id` is a stable short fingerprint of the recorded server identity, so
-two servers with the same label remain separate without exposing commands,
-paths, endpoints, or session IDs. Error counters also have `error_type`, either
-`tool` for `result.isError` or `protocol` for a JSON-RPC or other protocol-level
-failure.
+traffic.
+
+Every series has `server`, `server_id` and `tool` labels. `server_id` is a stable
+short fingerprint of the recorded server identity, so two servers with the same
+label remain separate without exposing commands, paths, endpoints or session IDs.
+Error counters also have `error_type`, either `tool` for `result.isError` or
+`protocol` for a JSON-RPC or other protocol-level failure.
 
 The public metrics are:
 
@@ -137,11 +138,35 @@ The public metrics are:
 | `mcpsnoop_tool_calls_total` | live tool-call requests observed |
 | `mcpsnoop_tool_errors_total` | live tool errors, split by `error_type` |
 | `mcpsnoop_tool_call_duration_seconds` | request-to-response latency histogram |
+| `mcpsnoop_transport_errors_total` | live transport failures that carried no JSON-RPC message, by `status` |
 
-The histogram exports the standard `_bucket`, `_sum`, and `_count` series with
-`0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`,
-and `+Inf` second buckets. Pending, superseded, and calls cancelled without a
-result do not add latency observations.
+The histogram exports the standard `_bucket`, `_sum` and `_count` series with
+`0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`
+and `+Inf` second buckets. Pending and superseded calls, and calls cancelled
+without a result, add no latency observation.
+
+**The endpoint has no authentication.** Anything that can reach the address gets
+the tool names of every server this hub is watching. The `127.0.0.1` above is
+the example for a reason. Binding `:9464` publishes those names to the network.
+
+The `tool` label comes off the wire, so it is bounded on the way in. A name over
+128 bytes is truncated, and past two thousand distinct series per hub the rest
+are counted together under `tool="(over-series-cap)"`. The totals stay right
+either way. Without those bounds a peer choosing tool names decides how much
+memory the hub uses and how large a scrape is, and one 4 MiB name measured out
+at a 71 MB response, which Prometheus drops whole.
+
+`mcpsnoop_tool_errors_total` counts errors that arrive as a JSON-RPC error or as
+`result.isError`. A failure that never became a JSON-RPC message, such as a 502
+from a gateway or a 401 challenge, cannot be attributed to a tool, because
+nothing in the response says which request it answered. Those go to
+`mcpsnoop_transport_errors_total` with the status, and the family is exported
+even when it is empty, so a graph of it on a healthy hub is flat rather than
+absent.
+
+The endpoint reports what this hub has seen since it started. It is not a store
+of record, and a hub restart starts the counters again, which Prometheus reads
+as a counter reset.
 
 No server of your own? [Try it for real](docs/TRY_IT.md) against a published
 test server, driven by your own client. To inspect a session after it happened,

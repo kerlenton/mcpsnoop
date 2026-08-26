@@ -371,3 +371,182 @@ func TestMetricsServerOnlyServesMetricsOnItsOwnListener(t *testing.T) {
 		t.Fatalf("non-metrics path status = %d, want 404", resp.StatusCode)
 	}
 }
+
+// TestCollectorBoundsALabelTakenOffTheWire. A tool label is whatever a peer put
+// in params.name, a frame may carry 16 MiB of it, and Write repeats it on
+// seventeen lines per series. One request measured out at a 71 MB scrape body,
+// which Prometheus drops whole against body_size_limit, taking every real series
+// for that target with it.
+func TestCollectorBoundsALabelTakenOffTheWire(t *testing.T) {
+	c := New()
+	at := time.Unix(1_700_000_000, 0)
+	huge := strings.Repeat("A", 4<<20)
+	c.Observe(toolRequest("s1", "srv", 1, at, "1", huge))
+	c.Observe(toolResponse("s1", "srv", 2, at.Add(time.Millisecond), "1", `"result":{"content":[]}`))
+
+	var out strings.Builder
+	if err := c.Write(&out); err != nil {
+		t.Fatal(err)
+	}
+	if n := out.Len(); n > 64<<10 {
+		t.Errorf("one 4 MiB tool name rendered %d bytes of exposition, want a bounded body", n)
+	}
+	if strings.Contains(out.String(), strings.Repeat("A", maxLabelBytes+1)) {
+		t.Error("the label reached the exposition at more than its cap")
+	}
+	if !strings.Contains(out.String(), labelElision) {
+		t.Error("the label was cut without saying so, so a reader cannot tell truncation from a real name")
+	}
+}
+
+// TestCollectorFoldsTooManyToolNamesRatherThanGrowingForever. Nothing on the
+// wire constrains how many tool names a peer uses, and neither peer has to
+// cooperate: the store recognises a tools/call by its method, so a server
+// writing them on its own stdout mints one series each. Past the cap the calls
+// still have to be counted, or the cap would discard the traffic it exists to
+// keep measuring.
+func TestCollectorFoldsTooManyToolNamesRatherThanGrowingForever(t *testing.T) {
+	c := New()
+	at := time.Unix(1_700_000_000, 0)
+	const flood = maxSeries * 3
+	for i := range flood {
+		id := strconv.Itoa(i)
+		c.Observe(toolRequest("s1", "srv", uint64(2*i+1), at, id, "tool-"+id))
+		c.Observe(toolResponse("s1", "srv", uint64(2*i+2), at.Add(time.Millisecond), id, `"result":{"content":[]}`))
+	}
+	c.mu.RLock()
+	held := len(c.series)
+	c.mu.RUnlock()
+	if held > maxSeries+1 {
+		t.Errorf("held %d series for %d tool names, want no more than the cap plus the overflow bucket", held, flood)
+	}
+
+	var out strings.Builder
+	if err := c.Write(&out); err != nil {
+		t.Fatal(err)
+	}
+	// Every call is still counted somewhere, so a dashboard's total stays true.
+	var total float64
+	for _, line := range strings.Split(out.String(), "\n") {
+		if !strings.HasPrefix(line, toolCallsMetric+"{") {
+			continue
+		}
+		// The value is after the last space, since a label may hold one.
+		cut := strings.LastIndex(line, " ")
+		if cut < 0 {
+			t.Fatalf("no value in %q", line)
+		}
+		value := line[cut+1:]
+		n, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			t.Fatalf("unparseable count in %q", line)
+		}
+		total += n
+	}
+	if int(total) != flood {
+		t.Errorf("counted %d calls across every series, want %d: folding must not lose the totals", int(total), flood)
+	}
+	if !strings.Contains(out.String(), overflowTool) {
+		t.Error("nothing in the exposition says the series list was capped")
+	}
+}
+
+// TestCollectorKeepsAToolCallASeverInitiatedRequestReuses. JSON-RPC scopes id
+// uniqueness to the sender, so a server may legally issue a request carrying the
+// id of a tool call that is still in flight. Keying the in-flight map without
+// the direction made that look like a retry, and the live call was finished
+// before its answer arrived, losing its error and its latency.
+func TestCollectorKeepsAToolCallASeverInitiatedRequestReuses(t *testing.T) {
+	c := New()
+	at := time.Unix(1_700_000_000, 0)
+	c.Observe(toolRequest("s1", "srv", 1, at, "7", "search"))
+	// The server asks the client something of its own, reusing id 7.
+	c.Observe(envelope("s1", "srv", 2, at.Add(5*time.Millisecond), proxy.ServerToClient,
+		`{"jsonrpc":"2.0","id":"7","method":"roots/list"}`))
+	c.Observe(toolResponse("s1", "srv", 3, at.Add(20*time.Millisecond), "7",
+		`"result":{"content":[],"isError":true}`))
+
+	var out strings.Builder
+	if err := c.Write(&out); err != nil {
+		t.Fatal(err)
+	}
+	body := out.String()
+	// The values, not the substrings. Every metric name appears in a HELP and a
+	// TYPE line whether or not anything was counted, and the tool keeps its
+	// calls_total series either way, so presence proves nothing here.
+	if got := seriesValue(t, body, toolErrorsMetric, `tool="search"`); got != 1 {
+		t.Errorf("errors for the tool = %v, want 1: a server request reusing its id must not finish it\n%s", got, body)
+	}
+	if got := seriesValue(t, body, toolDurationMetric+"_count", `tool="search"`); got != 1 {
+		t.Errorf("latency observations for the tool = %v, want 1\n%s", got, body)
+	}
+}
+
+// seriesValue totals every sample of metric whose line contains match.
+//
+// Every one, not the first. A tool carries two error series, one per
+// error_type, so reading the first would let a count land in the other slot and
+// go unnoticed. The value is after the last space, since a label may hold one.
+func seriesValue(t *testing.T, body, metric, match string) float64 {
+	t.Helper()
+	var total float64
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, metric+"{") || !strings.Contains(line, match) {
+			continue
+		}
+		cut := strings.LastIndex(line, " ")
+		if cut < 0 {
+			t.Fatalf("no value in %q", line)
+		}
+		v, err := strconv.ParseFloat(line[cut+1:], 64)
+		if err != nil {
+			t.Fatalf("unparseable value in %q", line)
+		}
+		total += v
+	}
+	return total
+}
+
+// TestCollectorCountsATransportFailureThatHasNoTool. A gateway answering 502, or
+// a 401 challenge, arrives as a status and a body that is not JSON-RPC. Nothing
+// in it says which request it answered, so it can never be attributed to a tool.
+// Left uncounted, a gateway outage read as traffic stopping rather than traffic
+// failing, while `mcpsnoop check` over the same capture failed on it.
+func TestCollectorCountsATransportFailureThatHasNoTool(t *testing.T) {
+	c := New()
+	at := time.Unix(1_700_000_000, 0)
+	c.Observe(toolRequestOnConn("s1", "srv", 1, at, "c1", "1", "echo"))
+	c.Observe(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: at.Add(30 * time.Millisecond),
+		Direction: proxy.ServerToClient, Transport: proxy.TransportHTTP, ConnID: "c1", Status: 502,
+	})
+
+	var out strings.Builder
+	if err := c.Write(&out); err != nil {
+		t.Fatal(err)
+	}
+	body := out.String()
+	if got := seriesValue(t, body, transportErrorsMetric, `status="502"`); got != 1 {
+		t.Errorf("transport errors = %v, want 1\n%s", got, body)
+	}
+	// And it is not invented onto the tool, since nothing said it was that call's.
+	if got := seriesValue(t, body, toolErrorsMetric, `tool="echo"`); got != 0 {
+		t.Errorf("the 502 was attributed to a tool it cannot be known to belong to, got %v", got)
+	}
+	if !strings.Contains(body, "# TYPE "+transportErrorsMetric+" counter") {
+		t.Error("the family is missing its TYPE line")
+	}
+}
+
+// TestCollectorAlwaysDeclaresTheTransportFamily. A dashboard that graphs a
+// metric which only appears once something has failed cannot tell a healthy hub
+// from a broken query.
+func TestCollectorAlwaysDeclaresTheTransportFamily(t *testing.T) {
+	var out strings.Builder
+	if err := New().Write(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "# TYPE "+transportErrorsMetric+" counter") {
+		t.Errorf("an idle collector does not declare %s:\n%s", transportErrorsMetric, out.String())
+	}
+}

@@ -304,7 +304,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 	flags.StringVar(&traceFile, "trace-file", "", "override the JSONL trace path, defaults to the well-known session log")
 	flags.StringVar(&otlpEndpoint, "otlp-endpoint", "", "stream completed calls to an OTLP/HTTP JSON traces endpoint")
 	flags.Var(&otlpHeaders, "otlp-header", "HTTP header for OTLP delivery as Name=Value, repeatable")
-	flags.StringVar(&metricsListen, "metrics-listen", "", "listen on this address for Prometheus metrics in hub mode")
+	flags.StringVar(&metricsListen, "metrics-listen", "", "run the hub headlessly and serve Prometheus metrics on this address, instead of starting the TUI (e.g. 127.0.0.1:9464)")
 	flags.BoolVar(&noTrace, "no-trace", false, "disable tracing, pure passthrough")
 	flags.BoolVar(&redactSecrets, "redact-secrets", false, "scrub common secret JSON keys in trace payloads")
 	flags.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")

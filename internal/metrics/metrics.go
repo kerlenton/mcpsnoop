@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kerlenton/mcpsnoop/internal/hub"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
@@ -25,10 +26,67 @@ const (
 	toolCallsMetric    = "mcpsnoop_tool_calls_total"
 	toolErrorsMetric   = "mcpsnoop_tool_errors_total"
 	toolDurationMetric = "mcpsnoop_tool_call_duration_seconds"
+	// transportErrorsMetric counts failures that never became a JSON-RPC message,
+	// so they can never be attributed to a tool.
+	//
+	// A gateway answering 502, or a 401 challenge, arrives as a status and a body
+	// that is not JSON-RPC. The store counts it against the session and attaches
+	// no call, deliberately, because nothing in the response says which request
+	// it answered: the connection id is the client's address, and a client may
+	// have several requests in flight on it. Without this series a gateway outage
+	// showed as a fall in mcpsnoop_tool_calls_total and a flat error line, which
+	// reads like traffic stopping rather than traffic failing, while a default
+	// `mcpsnoop check` run over the same capture failed.
+	transportErrorsMetric = "mcpsnoop_transport_errors_total"
 )
 
 // Buckets are the conventional Prometheus defaults, expressed in seconds.
 var buckets = [...]float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+
+const (
+	// maxLabelBytes bounds a label value taken off the wire.
+	//
+	// A tool label is whatever a peer put in params.name, and Write repeats it on
+	// seventeen lines per series. A frame may carry 16 MiB of it, so one request
+	// measured out at a 71 MB scrape body from a 4 MiB name, which Prometheus
+	// drops whole against body_size_limit, taking every real series for that
+	// target with it. Truncating happens before the cardinality cap below, so a
+	// thousand long names that share a prefix fold into one series rather than
+	// each minting its own.
+	maxLabelBytes = 128
+	// labelElision marks a value this cut. It is longer than it needs to be so
+	// that a reader who meets it in a dashboard is not left guessing.
+	labelElision = "...(truncated by mcpsnoop)"
+	// maxSeries bounds distinct series, which is the other half of the same
+	// problem. Nothing on the wire constrains how many tool names a peer uses,
+	// and neither peer has to cooperate: a server writing unsolicited tools/call
+	// lines on its own stdout mints one series each. Past the cap, calls are
+	// still counted, under overflowTool, so the totals stay right and the flood
+	// is visible rather than fatal.
+	//
+	// Folding rather than evicting is deliberate. Evicting a series resets a
+	// counter, and Prometheus reads a counter that went backwards as a target
+	// restart, which fabricates traffic that never happened.
+	maxSeries = 2000
+	// overflowTool is where everything past the cap is counted. A real tool of
+	// this name would land in the same bucket, which is a collision folding
+	// makes possible and cannot avoid, since folding is lossy by construction.
+	overflowTool = "(over-series-cap)"
+)
+
+// clampLabel bounds one wire-supplied label value.
+func clampLabel(value string) string {
+	if len(value) <= maxLabelBytes {
+		return value
+	}
+	// Cut on a rune boundary so the result is still valid UTF-8, which the
+	// exposition format requires of a label value.
+	cut := maxLabelBytes - len(labelElision)
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut] + labelElision
+}
 
 // Collector is the hub-side live metrics aggregate. Its small bounded store is
 // only a correlator: counters and histogram observations are retained here,
@@ -37,15 +95,30 @@ type Collector struct {
 	mu         sync.RWMutex
 	store      *store.Store
 	series     map[seriesKey]*toolSeries
+	transport  map[transportKey]uint64
 	operations map[operationKey]*operation
 	inflight   map[requestKey]operationKey
 	cancelled  []operationKey
+	// identities memoises the labels for a session. Deriving them walks every
+	// session the store has ever seen, allocating a full header for each, and it
+	// ran once per observed envelope while the write lock was held. A session's
+	// identity is fixed once its first frames land, so the walk only has to
+	// happen the first time one is seen.
+	identities map[string]serverIdentityLabels
 }
 
 type seriesKey struct {
 	server   string
 	serverID string
 	tool     string
+}
+
+// transportKey is a failure with no tool to hang it on. status is bounded by
+// what an HTTP status line can hold, so unlike a tool name it needs no cap.
+type transportKey struct {
+	server   string
+	serverID string
+	status   int
 }
 
 type operationKey struct {
@@ -55,12 +128,19 @@ type operationKey struct {
 
 type requestKey struct {
 	session string
-	id      string
-	conn    string
+	// dir, for the reason store.callKey carries it. JSON-RPC scopes id
+	// uniqueness to the sender, so a server-initiated request may legally reuse
+	// the id of a tool call that is still in flight. Without it, the supersede
+	// branch in Observe treats that as a retry and finishes the live call, and
+	// its error and its latency are never recorded.
+	dir  proxy.Direction
+	id   string
+	conn string
 }
 
 type operation struct {
 	series    seriesKey
+	dir       proxy.Direction
 	id        string
 	conn      string
 	cancelled bool
@@ -81,8 +161,10 @@ func New() *Collector {
 	return &Collector{
 		store:      store.NewBounded(1, 1),
 		series:     make(map[seriesKey]*toolSeries),
+		transport:  make(map[transportKey]uint64),
 		operations: make(map[operationKey]*operation),
 		inflight:   make(map[requestKey]operationKey),
+		identities: make(map[string]serverIdentityLabels),
 	}
 }
 
@@ -105,11 +187,19 @@ func (c *Collector) Observe(env proxy.Envelope) {
 	if !ok {
 		return
 	}
-	server := labelsForSession(c.store, env.SessionID, header)
+	server, known := c.identities[env.SessionID]
+	if !known {
+		server = labelsForSession(c.store, env.SessionID, header)
+		c.identities[env.SessionID] = server
+	}
+
+	if event.Kind == store.EventTransport && event.Errored {
+		c.transport[transportKey{server: server.label, serverID: server.id, status: event.HTTPStatus}]++
+	}
 
 	if event.Kind == store.EventRequest && event.Call != nil && event.MRTRRoot == "" {
 		key := operationKey{session: env.SessionID, seq: event.Call.RequestSeq}
-		request := requestKey{session: env.SessionID, id: event.Call.ID, conn: env.ConnID}
+		request := requestKey{session: env.SessionID, dir: env.Direction, id: event.Call.ID, conn: env.ConnID}
 		if previous, exists := c.inflight[request]; exists && previous != key {
 			if op := c.operations[previous]; op != nil {
 				c.finish(previous, op)
@@ -119,8 +209,8 @@ func (c *Collector) Observe(env proxy.Envelope) {
 		}
 		if event.Call.IsTool && event.Call.ToolName != "" {
 			if _, exists := c.operations[key]; !exists {
-				series := seriesKey{server: server.label, serverID: server.id, tool: event.Call.ToolName}
-				c.operations[key] = &operation{series: series, id: event.Call.ID, conn: env.ConnID}
+				series := seriesKey{server: server.label, serverID: server.id, tool: clampLabel(event.Call.ToolName)}
+				c.operations[key] = &operation{series: series, dir: env.Direction, id: event.Call.ID, conn: env.ConnID}
 				c.inflight[request] = key
 				c.seriesFor(series).calls++
 			}
@@ -176,7 +266,7 @@ func (c *Collector) Observe(env proxy.Envelope) {
 
 func (c *Collector) finish(key operationKey, op *operation) {
 	delete(c.operations, key)
-	request := requestKey{session: key.session, id: op.id, conn: op.conn}
+	request := requestKey{session: key.session, dir: op.dir, id: op.id, conn: op.conn}
 	if current, ok := c.inflight[request]; ok && current == key {
 		delete(c.inflight, request)
 	}
@@ -194,12 +284,27 @@ func (c *Collector) trimCancelled() {
 	c.cancelled = c.cancelled[1:]
 }
 
+// seriesFor returns the series for key, creating it while there is room. Past
+// the cap the call is counted against overflowTool for the same server, so a
+// flood of names costs one series rather than one each and the totals still add
+// up. Caller holds c.mu for writing.
 func (c *Collector) seriesFor(key seriesKey) *toolSeries {
-	series := c.series[key]
-	if series == nil {
-		series = &toolSeries{}
-		c.series[key] = series
+	if series := c.series[key]; series != nil {
+		return series
 	}
+	if len(c.series) >= maxSeries {
+		overflow := seriesKey{server: key.server, serverID: key.serverID, tool: overflowTool}
+		if series := c.series[overflow]; series != nil {
+			return series
+		}
+		// The overflow series itself must always fit, or the cap would silently
+		// discard the calls it is meant to keep counting.
+		series := &toolSeries{}
+		c.series[overflow] = series
+		return series
+	}
+	series := &toolSeries{}
+	c.series[key] = series
 	return series
 }
 
@@ -251,7 +356,22 @@ func (c *Collector) Write(w io.Writer) error {
 		seriesByKey[key] = *series
 		keys = append(keys, key)
 	}
+	transportByKey := make(map[transportKey]uint64, len(c.transport))
+	transportKeys := make([]transportKey, 0, len(c.transport))
+	for key, count := range c.transport {
+		transportByKey[key] = count
+		transportKeys = append(transportKeys, key)
+	}
 	c.mu.RUnlock()
+	slices.SortFunc(transportKeys, func(a, b transportKey) int {
+		if c := strings.Compare(a.server, b.server); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.serverID, b.serverID); c != 0 {
+			return c
+		}
+		return a.status - b.status
+	})
 	slices.SortFunc(keys, func(a, b seriesKey) int {
 		if c := strings.Compare(a.server, b.server); c != 0 {
 			return c
@@ -303,6 +423,23 @@ func (c *Collector) Write(w io.Writer) error {
 			return err
 		}
 		if _, err := fmt.Fprintf(w, "%s_count{%s} %d\n", toolDurationMetric, labels, series.count); err != nil {
+			return err
+		}
+	}
+
+	// Emitted whether or not anything failed, so a dashboard that graphs it does
+	// not go blank on a healthy hub and leave the reader wondering which of the
+	// two it is looking at.
+	if _, err := fmt.Fprintln(w, "# HELP "+transportErrorsMetric+" Total number of observed transport failures that carried no JSON-RPC message."); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "# TYPE "+transportErrorsMetric+" counter"); err != nil {
+		return err
+	}
+	for _, key := range transportKeys {
+		if _, err := fmt.Fprintf(w, "%s{server=\"%s\",server_id=\"%s\",status=\"%d\"} %d\n",
+			transportErrorsMetric, escapeLabel(key.server), escapeLabel(key.serverID), key.status,
+			transportByKey[key]); err != nil {
 			return err
 		}
 	}
@@ -437,15 +574,23 @@ func RunHeadless(ctx context.Context, socketPath, sessionsDir string, historyLim
 		return nil
 	case <-ctx.Done():
 		cancel()
-		closeErr := server.Close()
+		// The hub first, and its error before the listener's. A scrape in flight
+		// keeps Shutdown polling to its deadline, so on an ordinary SIGTERM
+		// during a scrape the listener reports a timeout it already recovered
+		// from by closing the connections, and reporting that would exit 1 on a
+		// clean stop and hide whatever the hub had to say.
 		hubErr := <-hubErr
+		closeErr := server.Close()
 		metricsErr := <-serveErr
-		if closeErr != nil {
-			return fmt.Errorf("metrics listener shutdown: %w", closeErr)
-		}
 		if hubErr != nil {
 			return hubErr
 		}
-		return metricsErr
+		if metricsErr != nil {
+			return metricsErr
+		}
+		if closeErr != nil && !errors.Is(closeErr, context.DeadlineExceeded) {
+			return fmt.Errorf("metrics listener shutdown: %w", closeErr)
+		}
+		return nil
 	}
 }

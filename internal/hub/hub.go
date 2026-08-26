@@ -120,10 +120,28 @@ func (h *Hub) Run(ctx context.Context) error {
 		h.onBackfill(report)
 	}
 
-	// Stop accepting when the context is done.
+	// Stop accepting when the context is done, and hang up on whoever is already
+	// connected.
+	//
+	// Closing the listener alone is not enough. handleConn parks in Decode until
+	// its shim disconnects, so wg.Wait below would sit there for as long as the
+	// shim lives, which is forever for a shim wrapping a long-running server. The
+	// TUI never noticed because it does not wait for Run to return, but a
+	// headless hub is a process somebody sends SIGTERM to and expects to stop.
+	var (
+		connMu sync.Mutex
+		conns  = map[net.Conn]struct{}{}
+		closed bool
+	)
 	go func() {
 		<-ctx.Done()
 		ln.Close()
+		connMu.Lock()
+		closed = true
+		for conn := range conns {
+			conn.Close()
+		}
+		connMu.Unlock()
 	}()
 
 	var wg sync.WaitGroup
@@ -135,9 +153,24 @@ func (h *Hub) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		connMu.Lock()
+		if closed {
+			// Cancellation landed between Accept and here, so nobody is left to
+			// close this one.
+			connMu.Unlock()
+			conn.Close()
+			break
+		}
+		conns[conn] = struct{}{}
+		connMu.Unlock()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				connMu.Lock()
+				delete(conns, conn)
+				connMu.Unlock()
+			}()
 			h.handleConn(conn)
 		}()
 	}
