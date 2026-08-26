@@ -32,6 +32,7 @@ import (
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
 	"github.com/kerlenton/mcpsnoop/internal/hub"
+	"github.com/kerlenton/mcpsnoop/internal/metrics"
 	"github.com/kerlenton/mcpsnoop/internal/otlpsink"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
@@ -247,6 +248,7 @@ func newRootCmd() *cobra.Command {
 	var (
 		label, traceFile       string
 		otlpEndpoint           string
+		metricsListen          string
 		noTrace, redactSecrets bool
 		redactKeys             redactKeysFlag
 		redactValues           redactValuesFlag
@@ -272,7 +274,10 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 				if historyLimit < 0 {
 					return errors.New("--history-limit must be non-negative")
 				}
-				return codeOf(runHubFn(historyLimit))
+				return codeOf(runHubFn(historyLimit, metricsListen))
+			}
+			if metricsListen != "" {
+				return errors.New("--metrics-listen is only available when running the hub without a wrapped command")
 			}
 			cfg, ok, err := loadConfig()
 			if err != nil {
@@ -299,6 +304,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 	flags.StringVar(&traceFile, "trace-file", "", "override the JSONL trace path, defaults to the well-known session log")
 	flags.StringVar(&otlpEndpoint, "otlp-endpoint", "", "stream completed calls to an OTLP/HTTP JSON traces endpoint")
 	flags.Var(&otlpHeaders, "otlp-header", "HTTP header for OTLP delivery as Name=Value, repeatable")
+	flags.StringVar(&metricsListen, "metrics-listen", "", "run the hub headlessly and serve Prometheus metrics on this address, instead of starting the TUI (e.g. 127.0.0.1:9464)")
 	flags.BoolVar(&noTrace, "no-trace", false, "disable tracing, pure passthrough")
 	flags.BoolVar(&redactSecrets, "redact-secrets", false, "scrub common secret JSON keys in trace payloads")
 	flags.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")
@@ -810,12 +816,18 @@ func newHTTPCmd() *cobra.Command {
 	return cmd
 }
 
-// runHub runs the live TUI, collecting traffic from all shims and past sessions.
-func runHub(historyLimit int) int {
+// runHub runs the live TUI, or a headless metrics hub when requested.
+func runHub(historyLimit int, metricsListen string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := tui.RunWithHistoryLimit(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit); err != nil {
+	var err error
+	if metricsListen != "" {
+		err = metrics.RunHeadless(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit, metricsListen)
+	} else {
+		err = tui.RunWithHistoryLimit(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)
 		return 1
 	}

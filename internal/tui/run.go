@@ -37,12 +37,15 @@ func liveStore() *store.Store {
 // RunWithHistoryLimit starts the live TUI with a bounded history replay.
 // A historyLimit of 0 loads every session log.
 func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, historyLimit int) error {
+	return runWithHistoryLimit(ctx, socketPath, sessionsDir, historyLimit)
+}
+
+func runWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, historyLimit int) error {
 	st := liveStore()
 	baselines := toolbaseline.New(paths.ToolBaselinesDir())
-	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(ctx))
-
 	hubCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(hubCtx))
 
 	// Baseline observation reads and sometimes writes files, so keep it off the
 	// frame-delivery goroutine. A single worker observes the sessions handed to it
@@ -61,7 +64,7 @@ func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, hi
 		}
 	}()
 
-	h := hub.NewWithOptions(socketPath, sessionsDir, func(e proxy.Envelope) {
+	handler := func(e proxy.Envelope) {
 		event := st.Ingest(e)
 		if event.Kind == store.EventResponse && event.Call != nil && event.Call.Method == "tools/list" {
 			if _, complete := st.ToolDefinitions(e.SessionID); complete {
@@ -74,14 +77,16 @@ func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, hi
 			}
 		}
 		p.Send(frameMsg{})
-	}, hub.Options{
+	}
+	options := hub.Options{
 		BackfillLimit: historyLimit,
 		OnBackfill: func(report hub.BackfillReport) {
 			if report.Loaded < report.Total {
 				p.Send(historyTruncatedMsg{loaded: report.Loaded, total: report.Total})
 			}
 		},
-	})
+	}
+	h := hub.NewWithOptions(socketPath, sessionsDir, handler, options)
 
 	// A second hub on one MCPSNOOP_HOME cannot take the socket, and Run returns
 	// before it backfills, so swallowing the error left the user staring at an

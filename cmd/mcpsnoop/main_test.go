@@ -244,10 +244,12 @@ func stubHTTP(ran *bool) func() {
 func TestRootNoArgsRunsHubNotShim(t *testing.T) {
 	hub := false
 	gotLimit := -1
+	gotMetrics := "unset"
 	origHub := runHubFn
-	runHubFn = func(limit int) int {
+	runHubFn = func(limit int, metrics string) int {
 		hub = true
 		gotLimit = limit
+		gotMetrics = metrics
 		return 0
 	}
 	defer func() { runHubFn = origHub }()
@@ -268,12 +270,15 @@ func TestRootNoArgsRunsHubNotShim(t *testing.T) {
 	if gotLimit != hubpkg.DefaultBackfillLimit {
 		t.Fatalf("history limit = %d, want default %d", gotLimit, hubpkg.DefaultBackfillLimit)
 	}
+	if gotMetrics != "" {
+		t.Fatalf("default metrics listener = %q, want disabled", gotMetrics)
+	}
 }
 
 func TestRootHistoryLimitConfiguresHub(t *testing.T) {
 	gotLimit := -1
 	origHub := runHubFn
-	runHubFn = func(limit int) int {
+	runHubFn = func(limit int, _ string) int {
 		gotLimit = limit
 		return 0
 	}
@@ -284,6 +289,37 @@ func TestRootHistoryLimitConfiguresHub(t *testing.T) {
 	}
 	if gotLimit != 7 {
 		t.Fatalf("history limit = %d, want 7", gotLimit)
+	}
+}
+
+func TestRootMetricsListenIsHubOnlyAndOptIn(t *testing.T) {
+	var got string
+	orig := runHubFn
+	runHubFn = func(_ int, listen string) int {
+		got = listen
+		return 0
+	}
+	defer func() { runHubFn = orig }()
+
+	if code := execute([]string{"--metrics-listen", "127.0.0.1:9464"}); code != 0 {
+		t.Fatalf("hub with metrics listener exit = %d, want 0", code)
+	}
+	if got != "127.0.0.1:9464" {
+		t.Fatalf("metrics listener = %q, want explicit address", got)
+	}
+
+	var ran bool
+	origShim := runShimFn
+	runShimFn = func([]string, string, string, bool, proxy.RedactConfig, traceOptions) int {
+		ran = true
+		return 0
+	}
+	defer func() { runShimFn = origShim }()
+	if code := execute([]string{"--metrics-listen", "127.0.0.1:9464", "--", "server"}); code != 2 {
+		t.Fatalf("shim with metrics listener exit = %d, want 2", code)
+	}
+	if ran {
+		t.Fatal("metrics listener must not instantiate the shim path")
 	}
 }
 

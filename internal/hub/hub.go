@@ -31,14 +31,17 @@ type Handler func(proxy.Envelope)
 
 // Hub collects envelopes from shims (socket) and past sessions (files).
 type Hub struct {
-	socketPath    string
-	sessionsDir   string
-	handler       Handler
-	backfillLimit int
-	onBackfill    func(BackfillReport)
+	socketPath         string
+	sessionsDir        string
+	handler            Handler
+	backfillLimit      int
+	onBackfill         func(BackfillReport)
+	onBackfillEnvelope Handler
+	onLive             Handler
 
-	mu   sync.Mutex
-	seen map[string]seenEntry // session id -> dedup high-water mark, with last touch
+	mu          sync.Mutex
+	seen        map[string]seenEntry // session id -> dedup high-water mark, with last touch
+	lastTouched time.Time
 }
 
 // seenEntry is one session's dedup high-water mark plus the last time it was
@@ -59,6 +62,14 @@ const seenCap = 10 * DefaultBackfillLimit
 type Options struct {
 	BackfillLimit int
 	OnBackfill    func(BackfillReport)
+	// OnBackfillEnvelope receives each unique envelope replayed from a session
+	// log. It is separate from OnLive so a consumer can prime state without
+	// treating historical traffic as new activity.
+	OnBackfillEnvelope Handler
+	// OnLive receives each unique envelope arriving from a connected shim. It is
+	// deliberately separate from handler so startup replay cannot look like new
+	// traffic to consumers such as live metrics.
+	OnLive Handler
 }
 
 // BackfillReport describes how much saved history was replayed at startup.
@@ -77,12 +88,14 @@ func New(socketPath, sessionsDir string, handler Handler) *Hub {
 // NewWithOptions creates a hub with explicit startup behavior.
 func NewWithOptions(socketPath, sessionsDir string, handler Handler, opts Options) *Hub {
 	return &Hub{
-		socketPath:    socketPath,
-		sessionsDir:   sessionsDir,
-		handler:       handler,
-		backfillLimit: opts.BackfillLimit,
-		onBackfill:    opts.OnBackfill,
-		seen:          make(map[string]seenEntry),
+		socketPath:         socketPath,
+		sessionsDir:        sessionsDir,
+		handler:            handler,
+		backfillLimit:      opts.BackfillLimit,
+		onBackfill:         opts.OnBackfill,
+		onBackfillEnvelope: opts.OnBackfillEnvelope,
+		onLive:             opts.OnLive,
+		seen:               make(map[string]seenEntry),
 	}
 }
 
@@ -107,10 +120,28 @@ func (h *Hub) Run(ctx context.Context) error {
 		h.onBackfill(report)
 	}
 
-	// Stop accepting when the context is done.
+	// Stop accepting when the context is done, and hang up on whoever is already
+	// connected.
+	//
+	// Closing the listener alone is not enough. handleConn parks in Decode until
+	// its shim disconnects, so wg.Wait below would sit there for as long as the
+	// shim lives, which is forever for a shim wrapping a long-running server. The
+	// TUI never noticed because it does not wait for Run to return, but a
+	// headless hub is a process somebody sends SIGTERM to and expects to stop.
+	var (
+		connMu sync.Mutex
+		conns  = map[net.Conn]struct{}{}
+		closed bool
+	)
 	go func() {
 		<-ctx.Done()
 		ln.Close()
+		connMu.Lock()
+		closed = true
+		for conn := range conns {
+			conn.Close()
+		}
+		connMu.Unlock()
 	}()
 
 	var wg sync.WaitGroup
@@ -122,9 +153,24 @@ func (h *Hub) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		connMu.Lock()
+		if closed {
+			// Cancellation landed between Accept and here, so nobody is left to
+			// close this one.
+			connMu.Unlock()
+			conn.Close()
+			break
+		}
+		conns[conn] = struct{}{}
+		connMu.Unlock()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				connMu.Lock()
+				delete(conns, conn)
+				connMu.Unlock()
+			}()
 			h.handleConn(conn)
 		}()
 	}
@@ -161,7 +207,7 @@ func (h *Hub) handleConn(conn net.Conn) {
 			}
 			return // malformed stream, drop the connection
 		}
-		h.emit(env)
+		h.emitLive(env)
 	}
 }
 
@@ -233,17 +279,37 @@ func (h *Hub) replayFile(path string) {
 // second would restart at Seq 1 and be discarded whole, which is why the shim
 // mints a unique id per run rather than trusting the PID to be unique.
 func (h *Hub) emit(env proxy.Envelope) {
+	h.emitFrom(env, false)
+}
+
+func (h *Hub) emitLive(env proxy.Envelope) {
+	h.emitFrom(env, true)
+}
+
+func (h *Hub) emitFrom(env proxy.Envelope, live bool) {
 	h.mu.Lock()
 	if env.Seq <= h.seen[env.SessionID].seq {
 		h.mu.Unlock()
 		return
 	}
-	h.seen[env.SessionID] = seenEntry{seq: env.Seq, touched: time.Now()}
+	touched := time.Now()
+	if !touched.After(h.lastTouched) {
+		touched = h.lastTouched.Add(time.Nanosecond)
+	}
+	h.lastTouched = touched
+	h.seen[env.SessionID] = seenEntry{seq: env.Seq, touched: touched}
 	if len(h.seen) > seenCap {
 		h.sweepSeen()
 	}
 	h.mu.Unlock()
 	h.handler(env)
+	if live {
+		if h.onLive != nil {
+			h.onLive(env)
+		}
+	} else if h.onBackfillEnvelope != nil {
+		h.onBackfillEnvelope(env)
+	}
 }
 
 // sweepSeen drops the least-recently-touched quarter of the dedup map, keeping it

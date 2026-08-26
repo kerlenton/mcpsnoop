@@ -100,6 +100,40 @@ func TestHubBackfillLiveDedup(t *testing.T) {
 	}
 }
 
+func TestHubOnLiveExcludesBackfill(t *testing.T) {
+	sessionsDir := t.TempDir()
+	historyRequest := env("s1", 1, "tools/call")
+	historyRequest.Raw = json.RawMessage(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"echo"}}`)
+	historyResponse := env("s1", 2, "response")
+	historyResponse.Direction = proxy.ServerToClient
+	historyResponse.Raw = json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"content":[]}}`)
+	writeLog(t, sessionsDir, "s1", historyRequest, historyResponse)
+
+	var live []proxy.Envelope
+	backfilled := 0
+	h := NewWithOptions("", sessionsDir, func(proxy.Envelope) {}, Options{
+		OnBackfillEnvelope: func(proxy.Envelope) { backfilled++ },
+		OnLive: func(e proxy.Envelope) {
+			live = append(live, e)
+		},
+	})
+	h.backfill(context.Background())
+	liveRequest := env("s1", 3, "tools/call")
+	liveRequest.Raw = json.RawMessage(`{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":"echo"}}`)
+	liveResponse := env("s1", 4, "response")
+	liveResponse.Direction = proxy.ServerToClient
+	liveResponse.Raw = json.RawMessage(`{"jsonrpc":"2.0","id":"2","result":{"content":[]}}`)
+	h.emitLive(liveRequest)
+	h.emitLive(liveResponse)
+
+	if backfilled != 2 {
+		t.Fatalf("backfill callback count = %d, want 2", backfilled)
+	}
+	if len(live) != 2 || live[0].Seq != 3 || live[1].Seq != 4 {
+		t.Fatalf("live callback = %+v, want only seq 3 and 4", live)
+	}
+}
+
 // touchLog writes a session log and stamps it, so recency is set by the
 // modification time rather than by the file name.
 func touchLog(t *testing.T, dir, session string, modTime time.Time, envs ...proxy.Envelope) {
