@@ -255,6 +255,7 @@ func newRootCmd() *cobra.Command {
 		redactPaths            redactPathsFlag
 		otlpHeaders            otlpHeadersFlag
 		historyLimit           int
+		youcomAPIKey           string
 	)
 	cmd := &cobra.Command{
 		Use:   "mcpsnoop [flags] -- <server command> [args...]",
@@ -274,7 +275,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 				if historyLimit < 0 {
 					return errors.New("--history-limit must be non-negative")
 				}
-				return codeOf(runHubFn(historyLimit, metricsListen))
+				return codeOf(runHubFn(historyLimit, metricsListen, youcomAPIKey))
 			}
 			if metricsListen != "" {
 				return errors.New("--metrics-listen is only available when running the hub without a wrapped command")
@@ -284,7 +285,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 				fmt.Fprintln(os.Stderr, "mcpsnoop:", err)
 				return exitCode(1)
 			}
-			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths)
+			applyConfig(cmd.Flags(), cfg, ok, &label, &traceFile, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths, &youcomAPIKey)
 			// After applyConfig, so a label from a shared .mcpsnoop.toml is held
 			// to the same rule as the flag.
 			if err := paths.CheckLabel(label); err != nil {
@@ -310,6 +311,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 	flags.Var(&redactKeys, "redact-key", "JSON key name to scrub in saved trace payloads, repeat or comma-separated")
 	flags.Var(&redactValues, "redact-value", "regular expression to scrub inside observed string values, stderr, and non-JSON text, repeatable")
 	flags.Var(&redactPaths, "redact-path", "JSONPath selecting values to scrub in saved trace payloads, repeatable")
+	flags.StringVar(&youcomAPIKey, "youcom-api-key", "", "You.com API key for web search integration (also reads YOUCOM_API_KEY env var)")
 	flags.IntVar(&historyLimit, "history-limit", hub.DefaultBackfillLimit, "maximum session logs to load in the TUI, 0 loads all")
 	// Stop parsing at the first positional so the wrapped command keeps its flags.
 	flags.SetInterspersed(false)
@@ -751,7 +753,7 @@ func newHTTPCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "mcpsnoop http:", err)
 				return exitCode(1)
 			}
-			applyConfig(cmd.Flags(), cfg, ok, &label, nil, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths)
+			applyConfig(cmd.Flags(), cfg, ok, &label, nil, &noTrace, &redactSecrets, &redactKeys, &redactValues, &redactPaths, nil)
 			if err := paths.CheckLabel(label); err != nil {
 				fmt.Fprintln(os.Stderr, "mcpsnoop http:", err)
 				return exitCode(2)
@@ -817,7 +819,7 @@ func newHTTPCmd() *cobra.Command {
 }
 
 // runHub runs the live TUI, or a headless metrics hub when requested.
-func runHub(historyLimit int, metricsListen string) int {
+func runHub(historyLimit int, metricsListen, youcomAPIKey string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -825,7 +827,7 @@ func runHub(historyLimit int, metricsListen string) int {
 	if metricsListen != "" {
 		err = metrics.RunHeadless(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit, metricsListen)
 	} else {
-		err = tui.RunWithHistoryLimit(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit)
+		err = tui.RunWithOptions(ctx, paths.SocketPath(), paths.SessionsDir(), historyLimit, youcomAPIKey)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mcpsnoop: %v\n", err)

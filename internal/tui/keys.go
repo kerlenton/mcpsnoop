@@ -30,6 +30,7 @@ type keyMap struct {
 	Copy       key.Binding
 	Export     key.Binding
 	Delete     key.Binding
+	Search     key.Binding
 
 	Quit key.Binding
 }
@@ -60,6 +61,7 @@ func defaultKeys() keyMap {
 		Copy:       key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy JSON")),
 		Export:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "export HTML")),
 		Delete:     key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl-d", "delete session")),
+		Search:     key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "web search")),
 
 		Quit: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp(":q", "quit")),
 	}

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -65,6 +66,7 @@ const (
 	overlayElicit
 	overlayInteract
 	overlayReplay
+	overlaySearch
 )
 
 // inputMode is the active bottom prompt ("/" filter and ":" command).
@@ -189,6 +191,11 @@ type Model struct {
 	ready         bool
 	spin          int  // shared spinner frame, advanced by tickMsg
 	dirty         bool // a frame arrived since the last refresh, set by frameMsg
+
+	// You.com search client (optional)
+	searchClient interface {
+		Search(ctx context.Context, query string) (interface{ FormatResults() string }, error)
+	}
 }
 
 // ask puts a yes-or-no question in the status bar and holds the action until it
@@ -245,6 +252,15 @@ type Option func(*Model)
 // endpoint stripped of anything credential-shaped and is not an address to dial.
 func WithHTTPReplay(target replay.HTTPTarget) Option {
 	return func(m *Model) { m.httpReplay = target }
+}
+
+// WithSearchClient attaches an optional web search client (You.com). Without it
+// the search key binding and :search/:web commands report that search is not
+// configured instead of making a call.
+func WithSearchClient(searchClient interface {
+	Search(ctx context.Context, query string) (interface{ FormatResults() string }, error)
+}) Option {
+	return func(m *Model) { m.searchClient = searchClient }
 }
 
 func New(st *store.Store, opts ...Option) Model {
@@ -341,6 +357,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.replaying = false
 		m.openOverlay(overlayReplay, m.replayContent(msg))
 		m.vp.GotoTop()
+		return m, nil
+
+	case searchMsg:
+		m.handleSearchMsg(msg)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -501,6 +521,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 				return nil
 			})
 		}
+	case key.Matches(msg, m.keys.Search):
+		m.promptForSearch()
 
 	case key.Matches(msg, m.keys.Up):
 		m.step(-1)
@@ -600,6 +622,13 @@ func (m Model) runCommand(cmd string) (Model, tea.Cmd) {
 			m.openOverlay(overlayInteract, m.interactContent())
 		}
 		return m, nil
+	case "search", "web":
+		// Only a query-bearing :search/:web is a web search; a bare one may be a
+		// session-name jump (for example a session labeled "search-api"), so it
+		// falls through to the jump loop below.
+		if len(fields) > 1 {
+			return m, m.performSearch(strings.Join(fields[1:], " "))
+		}
 	case "export":
 		format, out := "", ""
 		if len(fields) > 1 {
@@ -1704,4 +1733,61 @@ func clamp(v, lo, hi int) int {
 		return lo
 	}
 	return min(max(v, lo), hi)
+}
+
+// promptForSearch opens a prompt asking for a search query.
+func (m *Model) promptForSearch() {
+	if m.searchClient == nil {
+		m.setFlash("web search not configured — set YOUCOM_API_KEY or youcom-api-key in .mcpsnoop.toml")
+		return
+	}
+	m.ask("web search query:", func(model *Model) tea.Cmd {
+		return model.performSearch(model.input.Value())
+	})
+}
+
+// searchMsg carries the result of an async You.com search.
+type searchMsg struct {
+	query  string
+	result string
+	err    error
+}
+
+// performSearch executes a You.com web search asynchronously.
+func (m *Model) performSearch(query string) tea.Cmd {
+	if m.searchClient == nil {
+		m.setFlash("web search not configured")
+		return nil
+	}
+
+	if query == "" {
+		m.setFlash("empty search query")
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		result, err := m.searchClient.Search(ctx, query)
+		if err != nil {
+			return searchMsg{query: query, err: err}
+		}
+
+		return searchMsg{
+			query:  query,
+			result: result.FormatResults(),
+		}
+	}
+}
+
+// handleSearchMsg processes the result of a web search.
+func (m *Model) handleSearchMsg(msg searchMsg) {
+	if msg.err != nil {
+		m.setFlash(fmt.Sprintf("search failed: %v", msg.err))
+		return
+	}
+
+	m.openOverlay(overlaySearch, msg.result)
+	m.setFlash(fmt.Sprintf("searched: %s", msg.query))
 }

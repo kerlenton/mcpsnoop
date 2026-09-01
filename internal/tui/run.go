@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,6 +15,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
 	"github.com/kerlenton/mcpsnoop/internal/toolbaseline"
+	"github.com/kerlenton/mcpsnoop/internal/youcom"
 )
 
 // Run starts the hub and the live TUI. It blocks until the user quits or ctx is
@@ -40,12 +42,36 @@ func RunWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, hi
 	return runWithHistoryLimit(ctx, socketPath, sessionsDir, historyLimit)
 }
 
-func runWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, historyLimit int) error {
+// RunWithOptions starts the live TUI with the optional You.com web search
+// integration. An empty youcomAPIKey falls back to the YOUCOM_API_KEY
+// environment variable; with neither, search is reported as unconfigured.
+func RunWithOptions(ctx context.Context, socketPath, sessionsDir string, historyLimit int, youcomAPIKey string) error {
+	if youcomAPIKey == "" {
+		youcomAPIKey = os.Getenv("YOUCOM_API_KEY")
+	}
+	var searchOpt Option
+	if client := youcom.NewClient(youcomAPIKey); client != nil {
+		searchOpt = WithSearchClient(searchAdapter{client: client})
+	}
+	return runWithHistoryLimit(ctx, socketPath, sessionsDir, historyLimit, searchOpt)
+}
+
+// searchAdapter fits *youcom.Client to the Model's searchClient interface so
+// the model stays decoupled from the youcom package.
+type searchAdapter struct {
+	client *youcom.Client
+}
+
+func (a searchAdapter) Search(ctx context.Context, query string) (interface{ FormatResults() string }, error) {
+	return a.client.Search(ctx, query)
+}
+
+func runWithHistoryLimit(ctx context.Context, socketPath, sessionsDir string, historyLimit int, opts ...Option) error {
 	st := liveStore()
 	baselines := toolbaseline.New(paths.ToolBaselinesDir())
 	hubCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	p := tea.NewProgram(New(st), tea.WithAltScreen(), tea.WithContext(hubCtx))
+	p := tea.NewProgram(New(st, opts...), tea.WithAltScreen(), tea.WithContext(hubCtx))
 
 	// Baseline observation reads and sometimes writes files, so keep it off the
 	// frame-delivery goroutine. A single worker observes the sessions handed to it
