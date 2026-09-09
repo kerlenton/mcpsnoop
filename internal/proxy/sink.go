@@ -41,6 +41,8 @@ type AsyncSink struct {
 	quit    chan struct{}
 	done    chan struct{}
 	once    sync.Once
+	mu      sync.RWMutex
+	closed  bool
 	dropped atomic.Uint64
 }
 
@@ -89,6 +91,16 @@ func (s *AsyncSink) loop() {
 
 // Emit queues env, dropping it if the buffer is full.
 func (s *AsyncSink) Emit(env Envelope) {
+	if !s.mu.TryRLock() {
+		s.dropped.Add(1)
+		return
+	}
+	defer s.mu.RUnlock()
+	if s.closed {
+		s.dropped.Add(1)
+		return
+	}
+
 	select {
 	case s.ch <- env:
 	default:
@@ -96,14 +108,20 @@ func (s *AsyncSink) Emit(env Envelope) {
 	}
 }
 
-// Dropped reports how many envelopes were dropped due to a full buffer.
+// Dropped reports how many envelopes were dropped due to a full buffer or
+// because the sink was already closed.
 func (s *AsyncSink) Dropped() uint64 { return s.dropped.Load() }
 
 // Close flushes the queue and releases the underlying writer. It signals the
 // loop via quit rather than closing s.ch, so a late Emit after Close drops
 // instead of panicking.
 func (s *AsyncSink) Close() error {
-	s.once.Do(func() { close(s.quit) })
+	s.once.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		close(s.quit)
+		s.mu.Unlock()
+	})
 	<-s.done
 	if s.closer != nil {
 		return s.closer.Close()

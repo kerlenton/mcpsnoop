@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"testing"
+	"time"
 )
 
 // TestAsyncSinkEmitAfterCloseDoesNotPanic guards the shutdown race where a proxy
@@ -19,6 +20,44 @@ func TestAsyncSinkEmitAfterCloseDoesNotPanic(t *testing.T) {
 	}
 	if s.Dropped() == 0 {
 		t.Fatal("post-close emits beyond the buffer should be counted as dropped")
+	}
+}
+
+func TestAsyncSinkCountsFirstEmitAfterCloseAsDropped(t *testing.T) {
+	s := NewAsyncSink(&bytes.Buffer{}, 1)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s.Emit(Envelope{SessionID: "s", Seq: 1})
+
+	if got := s.Dropped(); got != 1 {
+		t.Fatalf("post-close dropped count = %d, want 1", got)
+	}
+}
+
+func TestAsyncSinkEmitDoesNotWaitForLifecycleLock(t *testing.T) {
+	s := NewAsyncSink(&bytes.Buffer{}, 1)
+	s.mu.Lock()
+	emitted := make(chan struct{})
+	go func() {
+		s.Emit(Envelope{SessionID: "s", Seq: 1})
+		close(emitted)
+	}()
+
+	select {
+	case <-emitted:
+	case <-time.After(time.Second):
+		s.mu.Unlock()
+		t.Fatal("Emit blocked on the lifecycle lock")
+	}
+	s.mu.Unlock()
+
+	if got := s.Dropped(); got != 1 {
+		t.Fatalf("contended dropped count = %d, want 1", got)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
