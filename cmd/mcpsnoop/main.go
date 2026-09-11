@@ -657,7 +657,7 @@ func runShim(command []string, label, traceFile string, noTrace bool, redaction 
 		// spent the one signal that means the capture cannot be trusted.
 		if file != nil {
 			if n := file.Dropped(); n > 0 {
-				fmt.Fprintf(os.Stderr, "mcpsnoop: dropped %d envelope(s) under load, the saved trace is incomplete\n", n)
+				fmt.Fprintf(os.Stderr, "mcpsnoop: dropped %d envelope(s), the saved trace is incomplete\n", n)
 			}
 		}
 	}()
@@ -779,7 +779,7 @@ func newHTTPCmd() *cobra.Command {
 				_ = sink.Close()
 				if file != nil {
 					if n := file.Dropped(); n > 0 {
-						fmt.Fprintf(os.Stderr, "mcpsnoop: dropped %d envelope(s) under load, the saved trace is incomplete\n", n)
+						fmt.Fprintf(os.Stderr, "mcpsnoop: dropped %d envelope(s), the saved trace is incomplete\n", n)
 					}
 				}
 			}()
