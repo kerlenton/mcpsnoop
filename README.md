@@ -210,6 +210,7 @@ Explicit command-line flags override values from the config file.
 | `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
+| `mcpsnoop mock <session>` | serve a captured session back as a stdio MCP server |
 | `mcpsnoop inventory` | list every server that has run through mcpsnoop on this machine |
 | `mcpsnoop stats` | fold every stored capture into one row per server and tool |
 | `mcpsnoop prune` | delete saved session logs older than a cutoff |
