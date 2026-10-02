@@ -189,6 +189,98 @@ func ready(t *testing.T, st *store.Store) Model {
 	return drive(t, m, frameMsg{})
 }
 
+// TestMultilineToolErrorCannotPushSelectionBelowThePanel recreates the failure
+// where one frame's tool-error text contained newlines. renderStreamTable counts
+// frames, while panelBox counts physical lines; before the row was sanitized the
+// two disagreed, panelBox printed "… N more lines", and the selected frame could
+// be below that clipping point even though window() had selected it.
+func TestMultilineToolErrorCannotPushSelectionBelowThePanel(t *testing.T) {
+	st := store.New()
+	seed(st)
+	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"broken"}}`))
+	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"failure\nstdout_tail:\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8"}],"isError":true}}`))
+	st.Ingest(env(7, proxy.ClientToServer, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"after"}}`))
+	st.Ingest(env(8, proxy.ServerToClient, `{"jsonrpc":"2.0","id":4,"result":{"content":[]}}`))
+
+	m := ready(t, st)
+	m = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 12})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // enter the stream, following the newest frame
+	if m.selEvent != len(m.timeline)-1 {
+		t.Fatalf("precondition: selected event = %d, want newest %d", m.selEvent, len(m.timeline)-1)
+	}
+	multilineAt := -1
+	for i, e := range m.timeline {
+		if strings.Contains(m.streamCells(e).detail, "\n") {
+			multilineAt = i
+			break
+		}
+	}
+	if multilineAt < 0 {
+		t.Fatal("precondition: fixture did not produce multiline stream detail")
+	}
+	innerH := max(m.bodyHeight()-2, 1)
+	rows := innerH - 1
+	start, end := window(m.selEvent, len(m.timeline), rows)
+	if multilineAt < start || multilineAt >= end {
+		t.Fatalf("precondition: multiline frame %d is outside visible window [%d,%d)", multilineAt, start, end)
+	}
+	table := ansi.Strip(m.renderStreamTable(max(m.width-2, 1), innerH))
+	wantLines := 1 + end - start // column header + one physical row per visible frame
+	if got := len(strings.Split(strings.TrimSuffix(table, "\n"), "\n")); got != wantLines {
+		t.Fatalf("stream table rendered %d physical lines, want %d logical rows:\n%s", got, wantLines, table)
+	}
+
+	out := ansi.Strip(m.View())
+	if strings.Contains(out, "more lines") {
+		t.Fatalf("a multiline frame expanded the logical table and forced panel clipping:\n%s", out)
+	}
+	if got := strings.Count(out, "▌"); got != 1 {
+		t.Fatalf("selected stream row should remain visible exactly once, marker count = %d:\n%s", got, out)
+	}
+}
+
+func TestInspectorHeaderQuotesWireControlsButBodyStaysMultiline(t *testing.T) {
+	m := New(store.New())
+	m.full = []store.EventView{{
+		Kind:               store.EventResponse,
+		Raw:                json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+		MCPMethod:          "tools/call\nroute",
+		MCPName:            "echo\x1b[31m",
+		MCPProtocolVersion: "2026\n07",
+		MCPParamHeaders: []proxy.MCPParamHeader{{
+			Name: "Mcp-Param-X\nName", Value: "us\nwest",
+		}},
+		AuthChallenge: "Bearer\nchallenge",
+		Call: &store.CallView{
+			ID: "1\n2", Method: "tools/call\nmethod", TaskID: "task-1",
+			TaskStatus: "working\nbad", State: store.Pending,
+		},
+	}}
+	m.inspect = 0
+
+	header := ansi.Strip(m.inspectorHeader(400))
+	lines := strings.Split(header, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("inspector chrome = %d lines, want exactly 2:\n%s", len(lines), header)
+	}
+	for i, line := range lines {
+		if strings.ContainsAny(line, "\r\t\x1b") {
+			t.Fatalf("inspector chrome line %d still contains a terminal control: %q", i, line)
+		}
+	}
+	for _, want := range []string{
+		`tools/call\nmethod`, `1\n2`, `working\nbad`, `tools/call\nroute`, `echo\x1b[31m`,
+		`2026\n07`, `Mcp-Param-X\nName`, `us\nwest`, `Bearer\nchallenge`,
+	} {
+		if !strings.Contains(header, want) {
+			t.Fatalf("inspector header should preserve %q as visible escapes:\n%s", want, header)
+		}
+	}
+	if body := m.inspectorBody(); !strings.Contains(body, "\n") {
+		t.Fatalf("inspector body should remain multiline, got %q", body)
+	}
+}
+
 func TestSessionsTableDriftMarkerKeepsLabel(t *testing.T) {
 	st := store.New()
 	// A label long enough that the old wide "! drift " marker truncated its tail
@@ -635,8 +727,11 @@ func TestClearStreamHidesHistoryWithoutResettingSession(t *testing.T) {
 		t.Fatal("clear changed whole-session health or latency statistics")
 	}
 	view := m.View()
-	if !strings.Contains(view, "stream cleared; waiting for new frames") || !strings.Contains(view, "since clear") {
+	if !strings.Contains(view, "stream cleared, waiting for new frames") {
 		t.Fatalf("cleared stream is not disclosed:\n%s", view)
+	}
+	if !strings.Contains(view, "4 hidden by clear") {
+		t.Fatalf("cleared stream does not say how much it is holding back:\n%s", view)
 	}
 	if strings.Contains(view, "no frames yet") {
 		t.Fatalf("cleared stream claims the session never had frames:\n%s", view)
@@ -647,8 +742,192 @@ func TestClearStreamHidesHistoryWithoutResettingSession(t *testing.T) {
 	if len(m.full) != 1 || len(m.timeline) != 1 || m.timeline[0].Seq != 5 {
 		t.Fatalf("new frame after clear not shown alone: full=%d timeline=%+v", len(m.full), m.timeline)
 	}
-	if !strings.Contains(m.View(), "since clear") {
+	if !strings.Contains(m.View(), "4 hidden by clear") {
 		t.Fatal("clear marker disappeared once new traffic arrived")
+	}
+}
+
+// TestClearOnASessionWithNoFramesDoesNotPanic covers the guard in
+// clearCurrentStream. A session that carries only its meta frame shows up in the
+// list with an empty timeline, so this is reachable by drilling into one and
+// pressing the key, and without the guard the cutoff read indexes an empty slice.
+func TestClearOnASessionWithNoFramesDoesNotPanic(t *testing.T) {
+	st := store.New()
+	st.Ingest(metaEnv("s1", []string{"true"}))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.view != viewStream || len(m.full) != 0 {
+		t.Fatalf("this test needs an empty stream, view=%v full=%d", m.view, len(m.full))
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	if !m.flashActive() || !strings.Contains(m.flash, "nothing to clear") {
+		t.Fatalf("clearing an empty stream should say so, flash=%q", m.flash)
+	}
+	if _, cleared := m.streamClearedThrough["s1"]; cleared {
+		t.Fatal("clearing an empty stream should not record a cutoff")
+	}
+}
+
+// TestClearIsIgnoredInTheSessionsList covers the view guard. The key reaches the
+// same switch in both views, and streamSessionID keeps whichever session was
+// drilled into last, so without the guard the key would quietly clear a stream
+// the user is not looking at.
+func TestClearIsIgnoredInTheSessionsList(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})   // and back out
+	if m.view != viewSessions || m.streamSessionID == "" {
+		t.Fatalf("this test needs a remembered session id in the list view, view=%v id=%q", m.view, m.streamSessionID)
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	if _, cleared := m.streamClearedThrough["s1"]; cleared {
+		t.Fatal("ctrl-l in the sessions list cleared the last visited stream")
+	}
+}
+
+// TestDeletingASessionForgetsItsClear covers the cleanup on delete. A session id
+// comes out of the log's own session_id field rather than being a name mcpsnoop
+// chose, so a re-run can present the same id again. A cutoff left behind would
+// then hide the new session's first frames with no marker and no way to guess why.
+func TestDeletingASessionForgetsItsClear(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	if _, cleared := m.streamClearedThrough["s1"]; !cleared {
+		t.Fatal("this test needs a cutoff recorded first")
+	}
+
+	// Delete from inside the cleared stream. Leaving it by esc would lift the clear
+	// first, which is the one route that cannot reach this.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if _, cleared := m.streamClearedThrough["s1"]; cleared {
+		t.Fatal("deleting a session left its clear cutoff behind")
+	}
+
+	// The id comes back on a fresh capture and must start unclear.
+	seed(st)
+	m.refresh()
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.full) == 0 {
+		t.Fatalf("a reused session id inherited the deleted session's clear, full=%d", len(m.full))
+	}
+}
+
+// TestClearedFooterKeepsOneScope is the footer's own rule. The signal counts are
+// deliberately over the whole session, so that a filter cannot hide a session's
+// health, and TestStreamFooterCountsSpanWholeSessionUnderFilter pins that. A clear
+// has to answer to the same rule, or the footer reads as a session with no
+// frames in it and an error in it at the same time.
+func TestClearedFooterKeepsOneScope(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"a"}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"boom"}}`))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+
+	footer := ansi.Strip(m.footerCounters())
+	if !strings.Contains(footer, "0/2 frames") {
+		t.Errorf("the footer should still say what the session holds, got %q", footer)
+	}
+	if !strings.Contains(footer, "2 hidden by clear") {
+		t.Errorf("the footer should say how many frames the clear holds back, got %q", footer)
+	}
+	if !strings.Contains(footer, "1 err") {
+		t.Errorf("session health must survive a clear the way it survives a filter, got %q", footer)
+	}
+}
+
+// TestEscRestoresAClearedStream keeps the clear reversible. It hides frames the
+// store is still holding, so there has to be a way back to them, and esc is
+// already the key that lifts the other thing which narrows this view.
+func TestEscRestoresAClearedStream(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	if len(m.full) != 0 {
+		t.Fatalf("clear left %d frames visible", len(m.full))
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.view != viewStream {
+		t.Fatal("esc should lift the clear before it leaves the stream")
+	}
+	if len(m.full) != 4 || len(m.timeline) != 4 {
+		t.Fatalf("esc did not bring the frames back: full=%d timeline=%d", len(m.full), len(m.timeline))
+	}
+	if _, cleared := m.streamClearedThrough["s1"]; cleared {
+		t.Fatal("the cutoff should be gone, not merely bypassed")
+	}
+
+	// With nothing left narrowing the view, esc does what esc always did.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.view != viewSessions {
+		t.Fatal("esc on an unnarrowed stream should go back to the sessions list")
+	}
+}
+
+// TestPairJumpSaysWhenTheOtherHalfIsCleared covers the one navigation a clear
+// breaks. The store still correlates the exchange and the inspector header still
+// prints the request's method and id, so x doing nothing at all reads as a broken
+// key rather than as a frame the user chose to hide.
+func TestPairJumpSaysWhenTheOtherHalfIsCleared(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL}) // hides the request
+
+	// With the clear active, a request that arrived after it and has no response
+	// yet also has no pair to reach, and that is not the clear's doing. Checking
+	// this while the clear is active is the only way to tell a half the clear is
+	// hiding from a half that was never captured.
+	st.Ingest(env(2, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"later"}}`))
+	m.refresh()
+	mi := drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	mi = typeRunes(t, mi, "x")
+	if strings.Contains(mi.flash, "cleared view") {
+		t.Fatalf("a request still awaiting its response blamed the clear, flash=%q", mi.flash)
+	}
+
+	// The response to the hidden request lands on the visible side of the cutoff.
+	st.Ingest(env(3, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
+	m.refresh()
+	m.selEvent = -1
+	for i, e := range m.timeline {
+		if e.Seq == 3 {
+			m.selEvent = i
+		}
+	}
+	if m.selEvent < 0 {
+		t.Fatal("the response that answers the hidden request should be visible")
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspect the response
+	if m.overlay != overlayInspector {
+		t.Fatalf("this test needs the inspector open, overlay %d", m.overlay)
+	}
+	if _, ok := m.pairIndex(m.inspect); ok {
+		t.Fatal("the request has to be outside the cleared window for this test to mean anything")
+	}
+
+	before := m.inspect
+	m = typeRunes(t, m, "x")
+	if m.inspect != before {
+		t.Fatal("x moved the inspector onto a frame the clear is hiding")
+	}
+	if !m.flashActive() || !strings.Contains(m.flash, "hidden by the cleared view") {
+		t.Fatalf("x should explain why it cannot move, flash=%q", m.flash)
 	}
 }
 
@@ -1010,20 +1289,209 @@ func TestPairJump(t *testing.T) {
 	if m.inspect == before {
 		t.Fatal("x should move the inspector to the paired frame")
 	}
-	// A refresh under follow must not disturb the inspected frame.
+	// A real dirty refresh under follow must not disturb the inspected frame.
 	jumped := m.inspect
+	jumpedSeq := m.full[jumped].Seq
+	body := m.overlayRaw
 	if !m.follow {
 		t.Fatal("this test needs follow on to cover the regression")
 	}
+	st.Ingest(env(5, proxy.ServerToClient, `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}`))
+	m = drive(t, m, frameMsg{})
 	for range refreshEvery {
 		m = drive(t, m, tickMsg(time.Now()))
 	}
 	if m.inspect != jumped {
 		t.Fatalf("follow refresh moved the inspected frame, inspect %d want %d", m.inspect, jumped)
 	}
+	if got := m.full[m.inspect].Seq; got != jumpedSeq {
+		t.Fatalf("follow refresh changed inspected seq to %d, want %d", got, jumpedSeq)
+	}
+	if m.overlayRaw != body {
+		t.Fatal("follow refresh replaced the inspector body")
+	}
 	m = typeRunes(t, m, "x") // and back again
 	if m.inspect != before {
 		t.Fatalf("x again should jump back to the original frame, got %d want %d", m.inspect, before)
+	}
+}
+
+// An unbounded store only appends, so no index moves here. This pins the
+// weaker half of the contract, that a dirty refresh never redraws the open
+// inspector from newer traffic. TestInspectorTracksFrameAcrossLiveWindowEviction
+// covers the half where the live window shifts underneath it.
+func TestInspectorDoesNotRenderNewFrameAfterDirtyRefresh(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"marker":"INSPECTED_FRAME"}}`))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream, following seq 2
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspect seq 2
+
+	before := ansi.Strip(m.View())
+	if !strings.Contains(before, "INSPECTED_FRAME") {
+		t.Fatalf("inspector fixture is missing its marker:\n%s", before)
+	}
+
+	st.Ingest(env(3, proxy.ServerToClient, `{"jsonrpc":"2.0","method":"notifications/progress","params":{"marker":"NEW_BACKGROUND_FRAME"}}`))
+	m = drive(t, m, frameMsg{})
+	for range refreshEvery {
+		m = drive(t, m, tickMsg(time.Now()))
+	}
+
+	after := ansi.Strip(m.View())
+	if m.overlay != overlayInspector {
+		t.Fatalf("dirty refresh closed the inspector, overlay %d", m.overlay)
+	}
+	if !strings.Contains(after, "INSPECTED_FRAME") {
+		t.Fatalf("dirty refresh replaced the inspected frame:\n%s", after)
+	}
+	if strings.Contains(after, "NEW_BACKGROUND_FRAME") {
+		t.Fatalf("new background frame leaked into the open inspector:\n%s", after)
+	}
+}
+
+func TestInspectorTracksFrameAcrossLiveWindowEviction(t *testing.T) {
+	st := store.NewBounded(0, 4)
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream, following seq 4
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspect seq 4
+
+	if m.overlay != overlayInspector {
+		t.Fatalf("enter should open the inspector, got overlay %d", m.overlay)
+	}
+	seq := m.full[m.inspect].Seq
+	if seq != 4 || m.inspectSeq != seq {
+		t.Fatalf("inspector identity = index %d seq %d stable %d, want seq 4", m.inspect, seq, m.inspectSeq)
+	}
+	body := m.overlayRaw
+
+	// Adding seq 5 pushes seq 1 out of the four-frame live window. Seq 4 moves
+	// from index 3 to index 2; keeping only the old numeric index would now point
+	// the inspector at the new seq 5 frame.
+	st.Ingest(env(5, proxy.ServerToClient, `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":5}}`))
+	m = drive(t, m, frameMsg{})
+	for range refreshEvery {
+		m = drive(t, m, tickMsg(time.Now()))
+	}
+
+	if m.overlay != overlayInspector {
+		t.Fatalf("window shift closed the inspector, overlay %d", m.overlay)
+	}
+	if got := m.full[m.inspect].Seq; got != seq {
+		t.Fatalf("window shift retargeted inspector to seq %d, want %d", got, seq)
+	}
+	if m.inspect != 2 {
+		t.Fatalf("inspected seq should have moved to index 2, got %d", m.inspect)
+	}
+	if m.overlayRaw != body {
+		t.Fatal("window shift replaced the inspector body")
+	}
+	// The body is a snapshot taken at open, but the meta line above it is redrawn
+	// from m.full[m.inspect] on every draw. A drifting index therefore used to put
+	// one frame's header over another frame's JSON, with no sign that the two no
+	// longer belonged together. The header must still describe seq 4, the response
+	// to tools/call id 2, now third of four.
+	var head string
+	for _, ln := range strings.Split(ansi.Strip(m.View()), "\n") {
+		if strings.Contains(ln, "FRAME ") {
+			head = ln
+			break
+		}
+	}
+	if !strings.Contains(head, "FRAME 3/4") {
+		t.Fatalf("inspector header did not follow the frame to index 2, got %q", head)
+	}
+	if !strings.Contains(head, "tools/call") {
+		t.Fatalf("header describes a different frame than the body it sits above, got %q", head)
+	}
+
+	// Once seq 4 itself leaves the live window, the inspector must close instead of
+	// silently retargeting to the frame that happens to inherit its old index.
+	for i := 6; i <= 8; i++ {
+		st.Ingest(env(uint64(i), proxy.ServerToClient, `{"jsonrpc":"2.0","method":"notifications/progress"}`))
+	}
+	m = drive(t, m, frameMsg{})
+	for range refreshEvery {
+		m = drive(t, m, tickMsg(time.Now()))
+	}
+	if m.overlay != overlayNone {
+		t.Fatalf("evicted inspected frame should close the inspector, overlay %d", m.overlay)
+	}
+	if !m.flashActive() || !strings.Contains(m.flash, "inspected frame left live memory") {
+		t.Fatalf("eviction should explain why the inspector closed, flash=%q", m.flash)
+	}
+}
+
+func TestInspectorEvictionCancelsReplayConfirmation(t *testing.T) {
+	st := store.NewBounded(0, 4)
+	seed(st)
+	st.Ingest(metaEnv("s1", []string{"true"}))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream, following seq 4
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspect response seq 4
+	m = typeRunes(t, m, "x")                        // request seq 3
+	m = typeRunes(t, m, "r")                        // confirmation only
+
+	if m.confirm == "" || m.confirmAction == nil {
+		t.Fatal("replay must be waiting for confirmation before eviction")
+	}
+	if m.replaying {
+		t.Fatal("replay started before confirmation")
+	}
+
+	for i := 5; i <= 7; i++ {
+		st.Ingest(env(uint64(i), proxy.ServerToClient, `{"jsonrpc":"2.0","method":"notifications/progress"}`))
+	}
+	m = drive(t, m, frameMsg{})
+	for range refreshEvery {
+		m = drive(t, m, tickMsg(time.Now()))
+	}
+
+	if m.overlay != overlayNone {
+		t.Fatalf("evicted inspected frame should close the inspector, overlay %d", m.overlay)
+	}
+	if m.confirm != "" || m.confirmAction != nil {
+		t.Fatalf("eviction left replay confirmation active: confirm=%q action_nil=%v", m.confirm, m.confirmAction == nil)
+	}
+	if !m.flashActive() || !strings.Contains(m.flash, "inspected frame left live memory") {
+		t.Fatalf("eviction should explain why the inspector closed, flash=%q", m.flash)
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.replaying {
+		t.Fatal("enter after eviction started the cancelled replay")
+	}
+}
+
+func TestInspectorFrameIdentityDoesNotOutliveTheOverlay(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream, following seq 4
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspect seq 4
+	if m.inspectSeq != 4 {
+		t.Fatalf("opening the inspector should pin seq 4, got %d", m.inspectSeq)
+	}
+
+	// Closing forgets the frame. A retained seq would let some later open path
+	// that forgets to pin inherit this frame and inspect it silently, which is the
+	// exact failure the seq exists to prevent. The proxy numbers frames from 1, so
+	// 0 is a sentinel no real frame can collide with.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.overlay != overlayNone {
+		t.Fatalf("esc should close the inspector, overlay %d", m.overlay)
+	}
+	if m.inspectSeq != 0 {
+		t.Fatalf("closed inspector kept frame identity %d", m.inspectSeq)
+	}
+
+	// Reopening pins whatever is selected now, never what was there before.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.inspectSeq != 3 || m.full[m.inspect].Seq != 3 {
+		t.Fatalf("reopen pinned seq %d at index %d, want seq 3", m.inspectSeq, m.inspect)
 	}
 }
 
@@ -2048,6 +2516,28 @@ func TestStreamRowKeepsATransportBodyOnOneLine(t *testing.T) {
 	}
 	if !strings.Contains(c.detail, "502 Bad Gateway") {
 		t.Fatalf("the readable part of the page should survive, got %q", c.detail)
+	}
+}
+
+// TestStreamRowKeepsToolErrorTextOnOneLine covers tool errors whose text content
+// contains real line breaks. Pagination counts one event as one row, so letting
+// those breaks reach the terminal makes that row overwrite the rows below it.
+func TestStreamRowKeepsToolErrorTextOnOneLine(t *testing.T) {
+	m := New(store.New())
+	e := store.EventView{
+		Kind: store.EventResponse,
+		Call: &store.CallView{
+			ToolErr: true,
+			Result:  json.RawMessage(`{"content":[{"type":"text","text":"first line\nsecond line"}],"isError":true}`),
+		},
+	}
+	lay := streamLayout{timeW: streamTimeW, timeFmt: "15:04:05.000", detailW: 40, showDetail: true}
+	row := m.rowLine(m.streamRow(e, lay), 120, false)
+	if strings.ContainsAny(row, "\n\r") {
+		t.Fatalf("a stream event must render as one terminal row, got %q", row)
+	}
+	if !strings.Contains(row, "first line second line") {
+		t.Fatalf("flattened tool error text should remain readable, got %q", row)
 	}
 }
 

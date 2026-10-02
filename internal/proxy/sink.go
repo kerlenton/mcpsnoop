@@ -17,8 +17,13 @@ type Sink interface {
 }
 
 // DropCounter is an optional interface a Sink may implement to report how many
-// envelopes it dropped on a full buffer. Callers type-assert for it, so a sink
+// envelopes it took and did not record. Callers type-assert for it, so a sink
 // that never drops need not implement it. MultiSink totals it across children.
+//
+// Why not "on a full buffer": that was already narrower than what the sinks did.
+// SocketSink also drops when no hub is listening, and both it and AsyncSink drop
+// what arrives after Close. A reader who takes the count for a queue-depth
+// problem goes looking for load that is not there.
 type DropCounter interface {
 	Dropped() uint64
 }
@@ -41,6 +46,8 @@ type AsyncSink struct {
 	quit    chan struct{}
 	done    chan struct{}
 	once    sync.Once
+	mu      sync.RWMutex
+	closed  bool
 	dropped atomic.Uint64
 }
 
@@ -87,8 +94,32 @@ func (s *AsyncSink) loop() {
 	}
 }
 
-// Emit queues env, dropping it if the buffer is full.
+// Emit queues env, dropping it if the sink is closed or the buffer is full.
+//
+// The lock pairs with Close, which takes it for writing before it sets closed.
+// Without it the channel outlives the goroutine draining it, so a late emit
+// queued an envelope nobody would ever read and the count said nothing was lost.
+// Holding it across the send is what makes that exact rather than merely
+// unlikely: Close cannot publish closed while a send is in flight, and no send
+// starts once it has.
+//
+// TryRLock rather than RLock, which is what internal/otlpsink uses for the same
+// shape. This sink sits on the proxied path, where the interface contract above
+// forbids waiting, and RWMutex parks a reader as soon as a writer is pending. A
+// failure here is only ever Close holding that write lock, so the envelope is
+// counted for the same reason the closed branch counts one, just observed a few
+// nanoseconds earlier.
 func (s *AsyncSink) Emit(env Envelope) {
+	if !s.mu.TryRLock() {
+		s.dropped.Add(1)
+		return
+	}
+	defer s.mu.RUnlock()
+	if s.closed {
+		s.dropped.Add(1)
+		return
+	}
+
 	select {
 	case s.ch <- env:
 	default:
@@ -96,14 +127,20 @@ func (s *AsyncSink) Emit(env Envelope) {
 	}
 }
 
-// Dropped reports how many envelopes were dropped due to a full buffer.
+// Dropped reports how many envelopes were taken and not recorded, whether the
+// buffer was full or the sink was already closed.
 func (s *AsyncSink) Dropped() uint64 { return s.dropped.Load() }
 
 // Close flushes the queue and releases the underlying writer. It signals the
 // loop via quit rather than closing s.ch, so a late Emit after Close drops
 // instead of panicking.
 func (s *AsyncSink) Close() error {
-	s.once.Do(func() { close(s.quit) })
+	s.once.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		close(s.quit)
+		s.mu.Unlock()
+	})
 	<-s.done
 	if s.closer != nil {
 		return s.closer.Close()

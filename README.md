@@ -335,14 +335,14 @@ server is written in.
 | Key | Action | | Key | Action |
 |---|---|---|---|---|
 | `enter` | inspect / drill in | | `/` | filter |
-| `esc` | back | | `:` | command |
+| `esc` | back / undo filter or clear | | `:` | command |
 | `j` / `k` | move | | `r` / `R` | replay / edit and replay |
 | `g` / `G` | top / bottom | | `c` | capabilities |
 | `ctrl-f` / `ctrl-b` | page | | `s` | tool summary |
 | `p` | pause | | `y` | copy |
 | `shift`+`<key>` | sort by column | | `e` | export |
 | `ctrl-d` | delete session | | `f` | follow |
-| `ctrl-l` | clear stream view | | | |
+| `ctrl-l` | clear stream view, `esc` restores | | | |
 | `?` | help | | | |
 
 Press `?` in the app for the full list.
@@ -1400,6 +1400,17 @@ your client config.
 For remote workflows, use SSH tunnelling or SSH file transfer so transport auth,
 encryption, host verification, key rotation, and audit policy stay in your
 existing SSH setup.
+
+### What a capture can do to your terminal
+
+A capture is data the other side chose. Frames and stderr lines can carry
+terminal escape sequences, and a terminal acts on whatever it is handed, which
+runs from a scrambled display through OSC 52 writing your system clipboard.
+mcpsnoop keeps only the colour sequences it generates itself and drops every
+other escape before a frame reaches your terminal. Table cells quote control
+characters so you can see they were there, the inspector spells them out in
+full, and the clipboard copy carries the escaped form, so nothing is hidden
+from you and nothing runs.
 
 ### Redacting what you capture
 

@@ -125,15 +125,17 @@ type Model struct {
 	streamLabel     string
 	full            []store.EventView // inspectable stream window, unfiltered, the inspector navigates this
 	timeline        []store.EventView // full after the stream filter, what the table shows
-
-	streamClearedThrough map[string]uint64 // per-session seq cutoff hidden from the stream view
+	// A per-session seq cutoff. Frames at or below it stay in the store and in the
+	// log and are only hidden from this view, so clearing costs no history.
+	streamClearedThrough map[string]uint64
 
 	streamSignals streamSignalCounts
 	streamCalls   int           // completed calls in the session
 	streamP50     time.Duration // median call latency
 	streamP95     time.Duration // 95th percentile call latency
 	selEvent      int           // index into timeline, the table selection
-	inspect       int           // index into full, the frame the inspector shows
+	inspect       int           // current index into full for the inspected frame
+	inspectSeq    uint64        // stable identity of the frame while the inspector is open
 	query         string        // stream filter
 	total         int
 	follow        bool
@@ -400,7 +402,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			// reachable even when the stream filter hides it from the table.
 			if pi, ok := m.pairIndex(m.inspect); ok {
 				m.inspect = pi
+				m.inspectSeq = m.full[pi].Seq
 				m.openOverlay(overlayInspector, m.inspectorBody())
+			} else if m.pairHiddenByClear() {
+				// The store still correlates the exchange, and the header above even
+				// prints the request's method and id, so refusing to move with no word
+				// about it reads as a broken key rather than a hidden frame.
+				m.setFlash("this frame's other half is hidden by the cleared view, esc out and esc again to bring it back")
 			}
 		case m.overlay == overlayInspector && key.Matches(msg, m.keys.Replay):
 			if cmd := m.startReplay(); cmd != nil {
@@ -670,21 +678,43 @@ func (m *Model) drillIn() {
 		}
 		return
 	}
-	if m.selEvent < len(m.timeline) {
-		m.inspect = m.fullIndexOf(m.timeline[m.selEvent].Seq)
-		m.openOverlay(overlayInspector, m.inspectorBody())
+	if m.selEvent >= 0 && m.selEvent < len(m.timeline) {
+		seq := m.timeline[m.selEvent].Seq
+		if inspect, ok := m.fullIndexOf(seq); ok {
+			m.inspect = inspect
+			m.inspectSeq = seq
+			m.openOverlay(overlayInspector, m.inspectorBody())
+		}
 	}
 }
 
 // fullIndexOf finds a frame in the unfiltered timeline by its unique seq, so the
 // inspector can navigate past the stream filter.
-func (m Model) fullIndexOf(seq uint64) int {
+func (m Model) fullIndexOf(seq uint64) (int, bool) {
 	for i, e := range m.full {
 		if e.Seq == seq {
-			return i
+			return i, true
 		}
 	}
-	return 0
+	return 0, false
+}
+
+// syncInspectIndex keeps the inspector attached to a frame by sequence number
+// when the bounded live store removes older frames from the front of m.full.
+// Below the frame limit nothing shifts and the identity check is O(1). At the
+// limit every refresh evicts, so the scan runs on every refresh, where it costs
+// a low single-digit percent of the timeline copy refresh already does. That is
+// not worth trading for a binary search, which would assume m.full stays ordered
+// by Seq, and a backfilled log does not have to honour that.
+func (m *Model) syncInspectIndex() bool {
+	if m.inspect >= 0 && m.inspect < len(m.full) && m.full[m.inspect].Seq == m.inspectSeq {
+		return true
+	}
+	inspect, ok := m.fullIndexOf(m.inspectSeq)
+	if ok {
+		m.inspect = inspect
+	}
+	return ok
 }
 
 // back pops one level, clear an active filter, then stream→sessions. At
@@ -695,6 +725,14 @@ func (m *Model) back() tea.Cmd {
 	if m.view == viewStream {
 		if m.query != "" {
 			m.applyFilter("")
+			return nil
+		}
+		// A clear only ever narrowed the view, so esc lifts it before leaving the
+		// stream, in the same order it lifts a filter. Without this the frames a
+		// user hid would stay hidden for as long as the session lives, and a
+		// debugger that cannot show you what it already captured has lost the point.
+		if _, cleared := m.streamClearedThrough[m.streamSessionID]; cleared {
+			m.restoreClearedStream()
 			return nil
 		}
 		m.view = viewSessions
@@ -767,6 +805,27 @@ func (m *Model) clearCurrentStream() {
 	m.streamClearedThrough[m.streamSessionID] = full[len(full)-1].Seq
 	m.refresh()
 	m.setFlash("✓ cleared stream view")
+}
+
+// restoreClearedStream puts the hidden frames back in the stream view. The store
+// kept them all along, so this only drops the cutoff.
+func (m *Model) restoreClearedStream() {
+	delete(m.streamClearedThrough, m.streamSessionID)
+	m.refresh()
+	m.setFlash("✓ restored the cleared frames")
+}
+
+// pairHiddenByClear reports whether the inspected frame's exchange has a half the
+// cleared view is holding back. Only the request half can be, because a response
+// always carries a higher seq than the request it answers, so a visible request
+// cannot have a hidden response.
+func (m Model) pairHiddenByClear() bool {
+	cutoff, cleared := m.streamClearedThrough[m.streamSessionID]
+	if !cleared || m.inspect < 0 || m.inspect >= len(m.full) {
+		return false
+	}
+	c := m.full[m.inspect].Call
+	return c != nil && c.RequestSeq != 0 && c.RequestSeq <= cutoff
 }
 
 // step moves the cursor by delta with wrap-around (for j/k, ↑/↓).
@@ -1123,11 +1182,27 @@ func (m *Model) refresh() {
 		full = full[firstVisible:]
 	}
 	m.full = full
-	m.total = len(full)
-	// m.inspect indexes m.full, and several inspector readers index it directly, so
-	// keep it in range when the timeline shrinks (e.g. a session delete), the same
-	// way m.selEvent is clamped below.
-	m.inspect = clamp(m.inspect, 0, max(len(m.full)-1, 0))
+	// The session's own count, not the cleared window's. A view that narrows must
+	// still say what it narrowed from, which is the same reason the footer flags
+	// the frames the memory budget dropped, and the signal counts below are over
+	// the whole session too, so one scope has to hold across the whole footer.
+	m.total = len(sessionFull)
+	if m.overlay == overlayInspector {
+		// The live store can evict old frames from the front of the timeline. Preserve
+		// the inspected frame by stable Seq instead of silently showing whatever moved
+		// into the same numeric index. If the frame itself is gone, stop acting on a
+		// different frame and tell the user where the complete capture remains.
+		if !m.syncInspectIndex() {
+			m.confirm, m.confirmAction = "", nil
+			m.closeOverlay()
+			m.inspect = clamp(m.inspect, 0, max(len(m.full)-1, 0))
+			m.setFlash("inspected frame left live memory; open the session log to inspect it")
+		}
+	} else {
+		// Several non-inspector helpers still use the last inspect index, so keep the
+		// dormant value safe when the timeline shrinks for another reason.
+		m.inspect = clamp(m.inspect, 0, max(len(m.full)-1, 0))
+	}
 	m.timeline = m.filterEvents(full)
 	// Count signals over the whole session, not the filtered view, so a stream
 	// filter never hides the session's health in the footer.
@@ -1664,6 +1739,7 @@ func (m *Model) deleteCurrentSession() {
 // closeOverlay dismisses the overlay and clears any in-overlay search.
 func (m *Model) closeOverlay() {
 	m.dismissTransient()
+	wasInspector := m.overlay == overlayInspector
 	m.overlay = overlayNone
 	m.overlayRaw = ""
 	m.overlayDisplay = ""
@@ -1671,6 +1747,9 @@ func (m *Model) closeOverlay() {
 	m.overlayHeaderH = 0
 	m.overlaySearch = ""
 	m.overlayMatches = nil
+	if wasInspector {
+		m.inspectSeq = 0
+	}
 }
 
 // applyOverlaySearch finds matches for q and renders the overlay with them
