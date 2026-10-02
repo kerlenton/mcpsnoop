@@ -164,7 +164,7 @@ func TestApplyConfigUsesConfigWhenFlagNotSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
+	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths, nil)
 
 	if *label != "filesystem" {
 		t.Fatalf("expected label %q, got %q", "filesystem", *label)
@@ -246,7 +246,7 @@ func TestApplyConfigExplicitFlagOverridesConfig(t *testing.T) {
 		Label: "from-config",
 	}
 
-	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
+	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths, nil)
 
 	if *label != "cli" {
 		t.Fatalf("expected CLI value %q, got %q", "cli", *label)
@@ -275,7 +275,7 @@ func TestApplyConfigNoConfigFile(t *testing.T) {
 		RedactKeys:    []string{"token"},
 	}
 
-	applyConfig(fs, cfg, false, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
+	applyConfig(fs, cfg, false, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths, nil)
 
 	if *label != "" {
 		t.Fatal("expected label to remain unchanged")
@@ -320,7 +320,7 @@ func TestApplyConfigExplicitFalseBoolOverridesConfig(t *testing.T) {
 		NoTrace: true,
 	}
 
-	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
+	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths, nil)
 
 	if *noTrace {
 		t.Fatal("expected explicit --no-trace=false to override config")
@@ -345,7 +345,7 @@ func TestApplyConfigExplicitRedactKeyOverridesConfig(t *testing.T) {
 	}
 	cfg := config{RedactKeys: []string{"config-key"}}
 
-	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
+	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths, nil)
 
 	if len(redactKeys) != 1 || redactKeys[0] != "cli-key" {
 		t.Fatalf("expected explicit redact-key to win, got %v", redactKeys)
@@ -374,7 +374,7 @@ func TestApplyConfigExplicitRedactPathOverridesConfig(t *testing.T) {
 	}
 	cfg := config{RedactPaths: configPaths}
 
-	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths)
+	applyConfig(fs, cfg, true, label, traceFile, noTrace, redactSecrets, &redactKeys, &redactValues, &redactPaths, nil)
 
 	if got, want := redactPaths.String(), "$.cli.password"; got != want {
 		t.Fatalf("redact paths = %q, want %q", got, want)

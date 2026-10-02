@@ -187,7 +187,7 @@ func (m Model) footerHints() string {
 		if m.sessionReplayable() {
 			hs = append(hs, hint{"r", "replay"}, hint{"R", "edit + replay"})
 		}
-		hs = append(hs, hint{"c", "caps"}, hint{"s", "summary"}, hint{"/", "filter"}, hint{"p", "pause"}, hint{"?", "help"})
+		hs = append(hs, hint{"c", "caps"}, hint{"s", "summary"}, hint{"w", "search"}, hint{"/", "filter"}, hint{"p", "pause"}, hint{"?", "help"})
 	}
 	return m.hintsRow(hs)
 }
@@ -1032,6 +1032,7 @@ func (m Model) renderHelp() string {
 		{"s", "show per-tool latency and error summary"},
 		{"l", "show what servers asked the user for"},
 		{"i", "show interactions with per-hop timing"},
+		{"w", "search the web (You.com integration)"},
 		{"p", "pause or resume the stream"},
 		{"f", "toggle follow"},
 	}}
