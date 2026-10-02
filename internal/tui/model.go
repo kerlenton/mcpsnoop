@@ -123,19 +123,23 @@ type Model struct {
 
 	streamSessionID string // session whose stream we drilled into
 	streamLabel     string
-	full            []store.EventView // whole session, unfiltered, the inspector navigates this
+	full            []store.EventView // inspectable stream window, unfiltered, the inspector navigates this
 	timeline        []store.EventView // full after the stream filter, what the table shows
-	streamSignals   streamSignalCounts
-	streamCalls     int           // completed calls in the session
-	streamP50       time.Duration // median call latency
-	streamP95       time.Duration // 95th percentile call latency
-	selEvent        int           // index into timeline, the table selection
-	inspect         int           // current index into full for the inspected frame
-	inspectSeq      uint64        // stable identity of the frame while the inspector is open
-	query           string        // stream filter
-	total           int
-	follow          bool
-	streamSort      sortState
+	// A per-session seq cutoff. Frames at or below it stay in the store and in the
+	// log and are only hidden from this view, so clearing costs no history.
+	streamClearedThrough map[string]uint64
+
+	streamSignals streamSignalCounts
+	streamCalls   int           // completed calls in the session
+	streamP50     time.Duration // median call latency
+	streamP95     time.Duration // 95th percentile call latency
+	selEvent      int           // index into timeline, the table selection
+	inspect       int           // current index into full for the inspected frame
+	inspectSeq    uint64        // stable identity of the frame while the inspector is open
+	query         string        // stream filter
+	total         int
+	follow        bool
+	streamSort    sortState
 
 	paused bool
 
@@ -261,6 +265,8 @@ func New(st *store.Store, opts ...Option) Model {
 		view:   viewSessions,
 		follow: true,
 		input:  ti,
+
+		streamClearedThrough: make(map[string]uint64),
 	}
 
 	for _, opt := range opts {
@@ -398,6 +404,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 				m.inspect = pi
 				m.inspectSeq = m.full[pi].Seq
 				m.openOverlay(overlayInspector, m.inspectorBody())
+			} else if m.pairHiddenByClear() {
+				// The store still correlates the exchange, and the header above even
+				// prints the request's method and id, so refusing to move with no word
+				// about it reads as a broken key rather than a hidden frame.
+				m.setFlash("this frame's other half is hidden by the cleared view, esc out and esc again to bring it back")
 			}
 		case m.overlay == overlayInspector && key.Matches(msg, m.keys.Replay):
 			if cmd := m.startReplay(); cmd != nil {
@@ -466,6 +477,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 				m.refresh()
 			}
 		}
+	case key.Matches(msg, m.keys.ClearStream):
+		m.clearCurrentStream()
 
 	case key.Matches(msg, m.keys.Caps):
 		if m.currentSessionID() != "" {
@@ -714,6 +727,14 @@ func (m *Model) back() tea.Cmd {
 			m.applyFilter("")
 			return nil
 		}
+		// A clear only ever narrowed the view, so esc lifts it before leaving the
+		// stream, in the same order it lifts a filter. Without this the frames a
+		// user hid would stay hidden for as long as the session lives, and a
+		// debugger that cannot show you what it already captured has lost the point.
+		if _, cleared := m.streamClearedThrough[m.streamSessionID]; cleared {
+			m.restoreClearedStream()
+			return nil
+		}
 		m.view = viewSessions
 		m.refresh()
 		return nil
@@ -767,6 +788,44 @@ func (m *Model) applyFilter(q string) {
 		m.query = q
 	}
 	m.refresh()
+}
+
+// clearCurrentStream hides everything observed so far from this session's stream
+// without touching the store or its durable log. A fresh store snapshot makes the
+// boundary independent of the current filter, pause state, or refresh cadence.
+func (m *Model) clearCurrentStream() {
+	if m.view != viewStream || m.streamSessionID == "" {
+		return
+	}
+	full := m.store.Timeline(m.streamSessionID)
+	if len(full) == 0 {
+		m.setFlash("nothing to clear")
+		return
+	}
+	m.streamClearedThrough[m.streamSessionID] = full[len(full)-1].Seq
+	m.refresh()
+	m.setFlash("✓ cleared stream view")
+}
+
+// restoreClearedStream puts the hidden frames back in the stream view. The store
+// kept them all along, so this only drops the cutoff.
+func (m *Model) restoreClearedStream() {
+	delete(m.streamClearedThrough, m.streamSessionID)
+	m.refresh()
+	m.setFlash("✓ restored the cleared frames")
+}
+
+// pairHiddenByClear reports whether the inspected frame's exchange has a half the
+// cleared view is holding back. Only the request half can be, because a response
+// always carries a higher seq than the request it answers, so a visible request
+// cannot have a hidden response.
+func (m Model) pairHiddenByClear() bool {
+	cutoff, cleared := m.streamClearedThrough[m.streamSessionID]
+	if !cleared || m.inspect < 0 || m.inspect >= len(m.full) {
+		return false
+	}
+	c := m.full[m.inspect].Call
+	return c != nil && c.RequestSeq != 0 && c.RequestSeq <= cutoff
 }
 
 // step moves the cursor by delta with wrap-around (for j/k, ↑/↓).
@@ -1113,9 +1172,21 @@ func (m *Model) refresh() {
 	if m.view != viewStream {
 		return
 	}
-	full := m.store.Timeline(m.streamSessionID)
+	sessionFull := m.store.Timeline(m.streamSessionID)
+	full := sessionFull
+	if cutoff, ok := m.streamClearedThrough[m.streamSessionID]; ok {
+		firstVisible := 0
+		for firstVisible < len(full) && full[firstVisible].Seq <= cutoff {
+			firstVisible++
+		}
+		full = full[firstVisible:]
+	}
 	m.full = full
-	m.total = len(full)
+	// The session's own count, not the cleared window's. A view that narrows must
+	// still say what it narrowed from, which is the same reason the footer flags
+	// the frames the memory budget dropped, and the signal counts below are over
+	// the whole session too, so one scope has to hold across the whole footer.
+	m.total = len(sessionFull)
 	if m.overlay == overlayInspector {
 		// The live store can evict old frames from the front of the timeline. Preserve
 		// the inspected frame by stable Seq instead of silently showing whatever moved
@@ -1135,8 +1206,8 @@ func (m *Model) refresh() {
 	m.timeline = m.filterEvents(full)
 	// Count signals over the whole session, not the filtered view, so a stream
 	// filter never hides the session's health in the footer.
-	m.streamSignals = countStreamSignals(full)
-	m.streamCalls, m.streamP50, m.streamP95 = callStats(full)
+	m.streamSignals = countStreamSignals(sessionFull)
+	m.streamCalls, m.streamP50, m.streamP95 = callStats(sessionFull)
 	m.sortStream()
 	// A non-chronological sort means we're inspecting, not tailing.
 	if m.streamSort.col != "" && m.streamSort.col != "time" {
@@ -1643,6 +1714,7 @@ func (m *Model) deleteCurrentSession() {
 	if id == "" {
 		return
 	}
+	delete(m.streamClearedThrough, id)
 	// The id is read out of the log's own session_id field, so it is data rather
 	// than a name mcpsnoop chose, and one carrying ".." resolved to a path outside
 	// the sessions directory. The store entry still goes, since that is in memory

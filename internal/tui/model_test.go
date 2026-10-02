@@ -706,6 +706,308 @@ func TestStreamFooterCountsSpanWholeSessionUnderFilter(t *testing.T) {
 	}
 }
 
+func TestClearStreamHidesHistoryWithoutResettingSession(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	storeFrames := len(st.Timeline("s1"))
+	beforeSignals := m.streamSignals
+	beforeCalls, beforeP50, beforeP95 := m.streamCalls, m.streamP50, m.streamP95
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+
+	if len(m.full) != 0 || len(m.timeline) != 0 {
+		t.Fatalf("clear left frames visible: full=%d timeline=%d", len(m.full), len(m.timeline))
+	}
+	if got := len(st.Timeline("s1")); got != storeFrames {
+		t.Fatalf("clear changed the store timeline: %d -> %d", storeFrames, got)
+	}
+	if m.streamSignals != beforeSignals || m.streamCalls != beforeCalls || m.streamP50 != beforeP50 || m.streamP95 != beforeP95 {
+		t.Fatal("clear changed whole-session health or latency statistics")
+	}
+	view := m.View()
+	if !strings.Contains(view, "stream cleared, waiting for new frames") {
+		t.Fatalf("cleared stream is not disclosed:\n%s", view)
+	}
+	if !strings.Contains(view, "4 hidden by clear") {
+		t.Fatalf("cleared stream does not say how much it is holding back:\n%s", view)
+	}
+	if strings.Contains(view, "no frames yet") {
+		t.Fatalf("cleared stream claims the session never had frames:\n%s", view)
+	}
+
+	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/progress"}`))
+	m.refresh()
+	if len(m.full) != 1 || len(m.timeline) != 1 || m.timeline[0].Seq != 5 {
+		t.Fatalf("new frame after clear not shown alone: full=%d timeline=%+v", len(m.full), m.timeline)
+	}
+	if !strings.Contains(m.View(), "4 hidden by clear") {
+		t.Fatal("clear marker disappeared once new traffic arrived")
+	}
+}
+
+// TestClearOnASessionWithNoFramesDoesNotPanic covers the guard in
+// clearCurrentStream. A session that carries only its meta frame shows up in the
+// list with an empty timeline, so this is reachable by drilling into one and
+// pressing the key, and without the guard the cutoff read indexes an empty slice.
+func TestClearOnASessionWithNoFramesDoesNotPanic(t *testing.T) {
+	st := store.New()
+	st.Ingest(metaEnv("s1", []string{"true"}))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.view != viewStream || len(m.full) != 0 {
+		t.Fatalf("this test needs an empty stream, view=%v full=%d", m.view, len(m.full))
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	if !m.flashActive() || !strings.Contains(m.flash, "nothing to clear") {
+		t.Fatalf("clearing an empty stream should say so, flash=%q", m.flash)
+	}
+	if _, cleared := m.streamClearedThrough["s1"]; cleared {
+		t.Fatal("clearing an empty stream should not record a cutoff")
+	}
+}
+
+// TestClearIsIgnoredInTheSessionsList covers the view guard. The key reaches the
+// same switch in both views, and streamSessionID keeps whichever session was
+// drilled into last, so without the guard the key would quietly clear a stream
+// the user is not looking at.
+func TestClearIsIgnoredInTheSessionsList(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // into the stream
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})   // and back out
+	if m.view != viewSessions || m.streamSessionID == "" {
+		t.Fatalf("this test needs a remembered session id in the list view, view=%v id=%q", m.view, m.streamSessionID)
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	if _, cleared := m.streamClearedThrough["s1"]; cleared {
+		t.Fatal("ctrl-l in the sessions list cleared the last visited stream")
+	}
+}
+
+// TestDeletingASessionForgetsItsClear covers the cleanup on delete. A session id
+// comes out of the log's own session_id field rather than being a name mcpsnoop
+// chose, so a re-run can present the same id again. A cutoff left behind would
+// then hide the new session's first frames with no marker and no way to guess why.
+func TestDeletingASessionForgetsItsClear(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	if _, cleared := m.streamClearedThrough["s1"]; !cleared {
+		t.Fatal("this test needs a cutoff recorded first")
+	}
+
+	// Delete from inside the cleared stream. Leaving it by esc would lift the clear
+	// first, which is the one route that cannot reach this.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if _, cleared := m.streamClearedThrough["s1"]; cleared {
+		t.Fatal("deleting a session left its clear cutoff behind")
+	}
+
+	// The id comes back on a fresh capture and must start unclear.
+	seed(st)
+	m.refresh()
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.full) == 0 {
+		t.Fatalf("a reused session id inherited the deleted session's clear, full=%d", len(m.full))
+	}
+}
+
+// TestClearedFooterKeepsOneScope is the footer's own rule. The signal counts are
+// deliberately over the whole session, so that a filter cannot hide a session's
+// health, and TestStreamFooterCountsSpanWholeSessionUnderFilter pins that. A clear
+// has to answer to the same rule, or the footer reads as a session with no
+// frames in it and an error in it at the same time.
+func TestClearedFooterKeepsOneScope(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"a"}}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"boom"}}`))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+
+	footer := ansi.Strip(m.footerCounters())
+	if !strings.Contains(footer, "0/2 frames") {
+		t.Errorf("the footer should still say what the session holds, got %q", footer)
+	}
+	if !strings.Contains(footer, "2 hidden by clear") {
+		t.Errorf("the footer should say how many frames the clear holds back, got %q", footer)
+	}
+	if !strings.Contains(footer, "1 err") {
+		t.Errorf("session health must survive a clear the way it survives a filter, got %q", footer)
+	}
+}
+
+// TestEscRestoresAClearedStream keeps the clear reversible. It hides frames the
+// store is still holding, so there has to be a way back to them, and esc is
+// already the key that lifts the other thing which narrows this view.
+func TestEscRestoresAClearedStream(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	if len(m.full) != 0 {
+		t.Fatalf("clear left %d frames visible", len(m.full))
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.view != viewStream {
+		t.Fatal("esc should lift the clear before it leaves the stream")
+	}
+	if len(m.full) != 4 || len(m.timeline) != 4 {
+		t.Fatalf("esc did not bring the frames back: full=%d timeline=%d", len(m.full), len(m.timeline))
+	}
+	if _, cleared := m.streamClearedThrough["s1"]; cleared {
+		t.Fatal("the cutoff should be gone, not merely bypassed")
+	}
+
+	// With nothing left narrowing the view, esc does what esc always did.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.view != viewSessions {
+		t.Fatal("esc on an unnarrowed stream should go back to the sessions list")
+	}
+}
+
+// TestPairJumpSaysWhenTheOtherHalfIsCleared covers the one navigation a clear
+// breaks. The store still correlates the exchange and the inspector header still
+// prints the request's method and id, so x doing nothing at all reads as a broken
+// key rather than as a frame the user chose to hide.
+func TestPairJumpSaysWhenTheOtherHalfIsCleared(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL}) // hides the request
+
+	// With the clear active, a request that arrived after it and has no response
+	// yet also has no pair to reach, and that is not the clear's doing. Checking
+	// this while the clear is active is the only way to tell a half the clear is
+	// hiding from a half that was never captured.
+	st.Ingest(env(2, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"later"}}`))
+	m.refresh()
+	mi := drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	mi = typeRunes(t, mi, "x")
+	if strings.Contains(mi.flash, "cleared view") {
+		t.Fatalf("a request still awaiting its response blamed the clear, flash=%q", mi.flash)
+	}
+
+	// The response to the hidden request lands on the visible side of the cutoff.
+	st.Ingest(env(3, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
+	m.refresh()
+	m.selEvent = -1
+	for i, e := range m.timeline {
+		if e.Seq == 3 {
+			m.selEvent = i
+		}
+	}
+	if m.selEvent < 0 {
+		t.Fatal("the response that answers the hidden request should be visible")
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspect the response
+	if m.overlay != overlayInspector {
+		t.Fatalf("this test needs the inspector open, overlay %d", m.overlay)
+	}
+	if _, ok := m.pairIndex(m.inspect); ok {
+		t.Fatal("the request has to be outside the cleared window for this test to mean anything")
+	}
+
+	before := m.inspect
+	m = typeRunes(t, m, "x")
+	if m.inspect != before {
+		t.Fatal("x moved the inspector onto a frame the clear is hiding")
+	}
+	if !m.flashActive() || !strings.Contains(m.flash, "hidden by the cleared view") {
+		t.Fatalf("x should explain why it cannot move, flash=%q", m.flash)
+	}
+}
+
+func TestClearStreamUsesFreshUnfilteredStoreSnapshot(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m.applyFilter("tool:echo")
+	m.paused = true
+
+	// This frame is neither in the active filter nor in the model's last refreshed
+	// timeline. Clear must still include it because it was already captured.
+	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/progress"}`))
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m.applyFilter("")
+
+	if len(m.full) != 0 || len(m.timeline) != 0 {
+		t.Fatalf("pre-clear filtered or paused traffic reappeared: full=%d timeline=%d", len(m.full), len(m.timeline))
+	}
+	if got := m.streamClearedThrough["s1"]; got != 5 {
+		t.Fatalf("clear cutoff = %d, want newest captured seq 5", got)
+	}
+}
+
+func TestClearStreamPreservesCrossBoundaryCallCorrelation(t *testing.T) {
+	st := store.New()
+	t0 := time.Now()
+	st.Ingest(envAt(1, proxy.ClientToServer, t0, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow"}}`))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+
+	st.Ingest(envAt(2, proxy.ServerToClient, t0.Add(time.Second), `{"jsonrpc":"2.0","id":7,"result":{"content":[]}}`))
+	m.refresh()
+
+	if len(m.full) != 1 || m.full[0].Kind != store.EventResponse || m.full[0].Call == nil {
+		t.Fatalf("post-clear response not visible and correlated: %+v", m.full)
+	}
+	if m.full[0].Call.RequestSeq != 1 || !m.full[0].Call.Done() {
+		t.Fatalf("response lost its pre-clear request: %+v", m.full[0].Call)
+	}
+}
+
+func TestClearStreamIsPerSession(t *testing.T) {
+	st := store.New()
+	seed(st)
+	st.Ingest(sessionEnv("s2", "search-api"))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	first := m.streamSessionID
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+
+	m = typeRunes(t, m, "]")
+	if m.streamSessionID == first || len(m.full) == 0 {
+		t.Fatalf("other session was affected by clear: id=%q frames=%d", m.streamSessionID, len(m.full))
+	}
+	m = typeRunes(t, m, "[")
+	if m.streamSessionID != first || len(m.full) != 0 {
+		t.Fatalf("cleared session did not retain its cutoff: id=%q frames=%d", m.streamSessionID, len(m.full))
+	}
+
+	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/progress"}`))
+	m.refresh()
+	if len(m.full) != 1 || m.full[0].Seq != 5 {
+		t.Fatalf("new traffic in cleared session not shown: %+v", m.full)
+	}
+}
+
+func TestClearStreamKeyIsBoundAndDocumented(t *testing.T) {
+	m := New(store.New())
+	if got := m.keys.ClearStream.Keys(); len(got) != 1 || got[0] != "ctrl+l" {
+		t.Fatalf("clear stream bound to %v, want ctrl+l", got)
+	}
+	m.width, m.height = 120, 40
+	if help := m.renderHelp(); !strings.Contains(help, "clear the stream view") {
+		t.Fatalf("help never documents clear stream:\n%s", help)
+	}
+}
+
 func TestCountLabel(t *testing.T) {
 	cases := []struct {
 		shown, total int

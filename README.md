@@ -335,13 +335,14 @@ server is written in.
 | Key | Action | | Key | Action |
 |---|---|---|---|---|
 | `enter` | inspect / drill in | | `/` | filter |
-| `esc` | back | | `:` | command |
+| `esc` | back / undo filter or clear | | `:` | command |
 | `j` / `k` | move | | `r` / `R` | replay / edit and replay |
 | `g` / `G` | top / bottom | | `c` | capabilities |
 | `ctrl-f` / `ctrl-b` | page | | `s` | tool summary |
 | `p` | pause | | `y` | copy |
 | `shift`+`<key>` | sort by column | | `e` | export |
 | `ctrl-d` | delete session | | `f` | follow |
+| `ctrl-l` | clear stream view, `esc` restores | | | |
 | `?` | help | | | |
 
 Press `?` in the app for the full list.

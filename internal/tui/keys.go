@@ -27,9 +27,12 @@ type keyMap struct {
 	Interact   key.Binding
 	Pause      key.Binding
 	Follow     key.Binding
-	Copy       key.Binding
-	Export     key.Binding
-	Delete     key.Binding
+
+	ClearStream key.Binding
+
+	Copy   key.Binding
+	Export key.Binding
+	Delete key.Binding
 
 	Quit key.Binding
 }
@@ -57,9 +60,12 @@ func defaultKeys() keyMap {
 		Interact:   key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "interactions")),
 		Pause:      key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause")),
 		Follow:     key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow")),
-		Copy:       key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy JSON")),
-		Export:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "export HTML")),
-		Delete:     key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl-d", "delete session")),
+
+		ClearStream: key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl-l", "clear stream view")),
+
+		Copy:   key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy JSON")),
+		Export: key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "export HTML")),
+		Delete: key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl-d", "delete session")),
 
 		Quit: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp(":q", "quit")),
 	}
