@@ -922,6 +922,10 @@ func TestPairJump(t *testing.T) {
 	}
 }
 
+// An unbounded store only appends, so no index moves here. This pins the
+// weaker half of the contract, that a dirty refresh never redraws the open
+// inspector from newer traffic. TestInspectorTracksFrameAcrossLiveWindowEviction
+// covers the half where the live window shifts underneath it.
 func TestInspectorDoesNotRenderNewFrameAfterDirtyRefresh(t *testing.T) {
 	st := store.New()
 	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
@@ -990,6 +994,24 @@ func TestInspectorTracksFrameAcrossLiveWindowEviction(t *testing.T) {
 	if m.overlayRaw != body {
 		t.Fatal("window shift replaced the inspector body")
 	}
+	// The body is a snapshot taken at open, but the meta line above it is redrawn
+	// from m.full[m.inspect] on every draw. A drifting index therefore used to put
+	// one frame's header over another frame's JSON, with no sign that the two no
+	// longer belonged together. The header must still describe seq 4, the response
+	// to tools/call id 2, now third of four.
+	var head string
+	for _, ln := range strings.Split(ansi.Strip(m.View()), "\n") {
+		if strings.Contains(ln, "FRAME ") {
+			head = ln
+			break
+		}
+	}
+	if !strings.Contains(head, "FRAME 3/4") {
+		t.Fatalf("inspector header did not follow the frame to index 2, got %q", head)
+	}
+	if !strings.Contains(head, "tools/call") {
+		t.Fatalf("header describes a different frame than the body it sits above, got %q", head)
+	}
 
 	// Once seq 4 itself leaves the live window, the inspector must close instead of
 	// silently retargeting to the frame that happens to inherit its old index.
@@ -1046,6 +1068,36 @@ func TestInspectorEvictionCancelsReplayConfirmation(t *testing.T) {
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 	if m.replaying {
 		t.Fatal("enter after eviction started the cancelled replay")
+	}
+}
+
+func TestInspectorFrameIdentityDoesNotOutliveTheOverlay(t *testing.T) {
+	st := store.New()
+	seed(st)
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // stream, following seq 4
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspect seq 4
+	if m.inspectSeq != 4 {
+		t.Fatalf("opening the inspector should pin seq 4, got %d", m.inspectSeq)
+	}
+
+	// Closing forgets the frame. A retained seq would let some later open path
+	// that forgets to pin inherit this frame and inspect it silently, which is the
+	// exact failure the seq exists to prevent. The proxy numbers frames from 1, so
+	// 0 is a sentinel no real frame can collide with.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.overlay != overlayNone {
+		t.Fatalf("esc should close the inspector, overlay %d", m.overlay)
+	}
+	if m.inspectSeq != 0 {
+		t.Fatalf("closed inspector kept frame identity %d", m.inspectSeq)
+	}
+
+	// Reopening pins whatever is selected now, never what was there before.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.inspectSeq != 3 || m.full[m.inspect].Seq != 3 {
+		t.Fatalf("reopen pinned seq %d at index %d, want seq 3", m.inspectSeq, m.inspect)
 	}
 }
 

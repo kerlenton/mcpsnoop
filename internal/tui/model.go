@@ -687,8 +687,12 @@ func (m Model) fullIndexOf(seq uint64) (int, bool) {
 }
 
 // syncInspectIndex keeps the inspector attached to a frame by sequence number
-// when the bounded live store removes older frames from the front of m.full. The
-// common append-only case stays O(1); a scan is needed only after the index moved.
+// when the bounded live store removes older frames from the front of m.full.
+// Below the frame limit nothing shifts and the identity check is O(1). At the
+// limit every refresh evicts, so the scan runs on every refresh, where it costs
+// a low single-digit percent of the timeline copy refresh already does. That is
+// not worth trading for a binary search, which would assume m.full stays ordered
+// by Seq, and a backfilled log does not have to honour that.
 func (m *Model) syncInspectIndex() bool {
 	if m.inspect >= 0 && m.inspect < len(m.full) && m.full[m.inspect].Seq == m.inspectSeq {
 		return true
