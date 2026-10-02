@@ -189,6 +189,98 @@ func ready(t *testing.T, st *store.Store) Model {
 	return drive(t, m, frameMsg{})
 }
 
+// TestMultilineToolErrorCannotPushSelectionBelowThePanel recreates the failure
+// where one frame's tool-error text contained newlines. renderStreamTable counts
+// frames, while panelBox counts physical lines; before the row was sanitized the
+// two disagreed, panelBox printed "… N more lines", and the selected frame could
+// be below that clipping point even though window() had selected it.
+func TestMultilineToolErrorCannotPushSelectionBelowThePanel(t *testing.T) {
+	st := store.New()
+	seed(st)
+	st.Ingest(env(5, proxy.ClientToServer, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"broken"}}`))
+	st.Ingest(env(6, proxy.ServerToClient, `{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"failure\nstdout_tail:\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8"}],"isError":true}}`))
+	st.Ingest(env(7, proxy.ClientToServer, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"after"}}`))
+	st.Ingest(env(8, proxy.ServerToClient, `{"jsonrpc":"2.0","id":4,"result":{"content":[]}}`))
+
+	m := ready(t, st)
+	m = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 12})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // enter the stream, following the newest frame
+	if m.selEvent != len(m.timeline)-1 {
+		t.Fatalf("precondition: selected event = %d, want newest %d", m.selEvent, len(m.timeline)-1)
+	}
+	multilineAt := -1
+	for i, e := range m.timeline {
+		if strings.Contains(m.streamCells(e).detail, "\n") {
+			multilineAt = i
+			break
+		}
+	}
+	if multilineAt < 0 {
+		t.Fatal("precondition: fixture did not produce multiline stream detail")
+	}
+	innerH := max(m.bodyHeight()-2, 1)
+	rows := innerH - 1
+	start, end := window(m.selEvent, len(m.timeline), rows)
+	if multilineAt < start || multilineAt >= end {
+		t.Fatalf("precondition: multiline frame %d is outside visible window [%d,%d)", multilineAt, start, end)
+	}
+	table := ansi.Strip(m.renderStreamTable(max(m.width-2, 1), innerH))
+	wantLines := 1 + end - start // column header + one physical row per visible frame
+	if got := len(strings.Split(strings.TrimSuffix(table, "\n"), "\n")); got != wantLines {
+		t.Fatalf("stream table rendered %d physical lines, want %d logical rows:\n%s", got, wantLines, table)
+	}
+
+	out := ansi.Strip(m.View())
+	if strings.Contains(out, "more lines") {
+		t.Fatalf("a multiline frame expanded the logical table and forced panel clipping:\n%s", out)
+	}
+	if got := strings.Count(out, "▌"); got != 1 {
+		t.Fatalf("selected stream row should remain visible exactly once, marker count = %d:\n%s", got, out)
+	}
+}
+
+func TestInspectorHeaderQuotesWireControlsButBodyStaysMultiline(t *testing.T) {
+	m := New(store.New())
+	m.full = []store.EventView{{
+		Kind:               store.EventResponse,
+		Raw:                json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+		MCPMethod:          "tools/call\nroute",
+		MCPName:            "echo\x1b[31m",
+		MCPProtocolVersion: "2026\n07",
+		MCPParamHeaders: []proxy.MCPParamHeader{{
+			Name: "Mcp-Param-X\nName", Value: "us\nwest",
+		}},
+		AuthChallenge: "Bearer\nchallenge",
+		Call: &store.CallView{
+			ID: "1\n2", Method: "tools/call\nmethod", TaskID: "task-1",
+			TaskStatus: "working\nbad", State: store.Pending,
+		},
+	}}
+	m.inspect = 0
+
+	header := ansi.Strip(m.inspectorHeader(400))
+	lines := strings.Split(header, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("inspector chrome = %d lines, want exactly 2:\n%s", len(lines), header)
+	}
+	for i, line := range lines {
+		if strings.ContainsAny(line, "\r\t\x1b") {
+			t.Fatalf("inspector chrome line %d still contains a terminal control: %q", i, line)
+		}
+	}
+	for _, want := range []string{
+		`tools/call\nmethod`, `1\n2`, `working\nbad`, `tools/call\nroute`, `echo\x1b[31m`,
+		`2026\n07`, `Mcp-Param-X\nName`, `us\nwest`, `Bearer\nchallenge`,
+	} {
+		if !strings.Contains(header, want) {
+			t.Fatalf("inspector header should preserve %q as visible escapes:\n%s", want, header)
+		}
+	}
+	if body := m.inspectorBody(); !strings.Contains(body, "\n") {
+		t.Fatalf("inspector body should remain multiline, got %q", body)
+	}
+}
+
 func TestSessionsTableDriftMarkerKeepsLabel(t *testing.T) {
 	st := store.New()
 	// A label long enough that the old wide "! drift " marker truncated its tail
@@ -2122,6 +2214,28 @@ func TestStreamRowKeepsATransportBodyOnOneLine(t *testing.T) {
 	}
 	if !strings.Contains(c.detail, "502 Bad Gateway") {
 		t.Fatalf("the readable part of the page should survive, got %q", c.detail)
+	}
+}
+
+// TestStreamRowKeepsToolErrorTextOnOneLine covers tool errors whose text content
+// contains real line breaks. Pagination counts one event as one row, so letting
+// those breaks reach the terminal makes that row overwrite the rows below it.
+func TestStreamRowKeepsToolErrorTextOnOneLine(t *testing.T) {
+	m := New(store.New())
+	e := store.EventView{
+		Kind: store.EventResponse,
+		Call: &store.CallView{
+			ToolErr: true,
+			Result:  json.RawMessage(`{"content":[{"type":"text","text":"first line\nsecond line"}],"isError":true}`),
+		},
+	}
+	lay := streamLayout{timeW: streamTimeW, timeFmt: "15:04:05.000", detailW: 40, showDetail: true}
+	row := m.rowLine(m.streamRow(e, lay), 120, false)
+	if strings.ContainsAny(row, "\n\r") {
+		t.Fatalf("a stream event must render as one terminal row, got %q", row)
+	}
+	if !strings.Contains(row, "first line second line") {
+		t.Fatalf("flattened tool error text should remain readable, got %q", row)
 	}
 }
 

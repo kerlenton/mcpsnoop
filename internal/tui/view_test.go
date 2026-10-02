@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
@@ -70,6 +72,55 @@ func TestTruncateAppendsEllipsisWhenItCuts(t *testing.T) {
 	got := truncate(strings.Repeat("a", 30), 10)
 	if !strings.HasSuffix(got, "…") {
 		t.Fatalf("a cut result should end with an ellipsis, got %q", got)
+	}
+}
+
+func TestStreamCellSafeForTableQuotesWireControls(t *testing.T) {
+	p := progressBar{done: 1, total: 2, token: "tok\n\x1b[2J"}
+	got := (streamCell{
+		method: "tools/call\nnext", id: "1\r2", status: "work\ting",
+		detail: "line one\nline two\x1b[H", tool: "echo\x1b[31m", progress: &p,
+	}).safeForTable()
+
+	for name, value := range map[string]string{
+		"method": got.method, "id": got.id, "status": got.status,
+		"detail": got.detail, "tool": got.tool, "progress token": got.progress.token,
+	} {
+		if strings.ContainsAny(value, "\r\n\t\x1b") {
+			t.Errorf("%s still contains a terminal control after table sanitizing: %q", name, value)
+		}
+	}
+	if !strings.Contains(got.detail, `\n`) || !strings.Contains(got.detail, `\x1b`) {
+		t.Fatalf("detail should preserve controls as visible escapes, got %q", got.detail)
+	}
+	if p.token != "tok\n\x1b[2J" {
+		t.Fatalf("safeForTable mutated the source progress token: %q", p.token)
+	}
+}
+
+func TestSessionsTableQuotesDynamicControls(t *testing.T) {
+	m := New(store.New())
+	m.sessions = []store.SessionHeader{{ID: "s1", Label: "bad\nname"}}
+	m.clients = map[string]string{"s1": "cli\x1bX"}
+	m.activity = map[string][]int{}
+
+	out := ansi.Strip(m.renderSessionsTable(100, 4))
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("sessions table = %d physical lines, want header + one session:\n%s", len(lines), out)
+	}
+	for i, line := range lines {
+		if strings.ContainsAny(line, "\r\t\x1b") {
+			t.Fatalf("sessions table line %d still contains a terminal control: %q", i, line)
+		}
+	}
+	for _, want := range []string{`bad\nname`, `cli\x1bX`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("sessions table should preserve %q as visible escapes:\n%s", want, out)
+		}
+	}
+	if got := strings.Count(out, "▌"); got != 1 {
+		t.Fatalf("selected session row should remain visible exactly once, marker count = %d:\n%s", got, out)
 	}
 }
 
@@ -494,5 +545,214 @@ func TestSummaryTableFitsANarrowTerminal(t *testing.T) {
 		if wantTrips := panelW >= sumWidthWithoutTrips+sumTripsW; strings.Contains(out, "TRIPS") != wantTrips {
 			t.Fatalf("at %d columns TRIPS present = %v, want %v", width, strings.Contains(out, "TRIPS"), wantTrips)
 		}
+	}
+}
+
+// TestRenderSafeKeepsStylingAndDropsEverythingElse locks the rule the whole
+// escape defence rests on. lipgloss emits SGR and nothing else, so SGR is the
+// only escape a frame can legitimately contain, and everything else in it came
+// off the wire. Getting this wrong in either direction is bad: keep too much and
+// a server drives the terminal, keep too little and the UI loses its colour.
+func TestRenderSafeKeepsStylingAndDropsEverythingElse(t *testing.T) {
+	esc := string(rune(27))
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"plain text survives", "hello", "hello"},
+		{"SGR colour survives", esc + "[31mred" + esc + "[0m", esc + "[31mred" + esc + "[0m"},
+		{"SGR with sub-parameters survives", esc + "[38;2;1;2;3mx", esc + "[38;2;1;2;3mx"},
+		{"screen erase is dropped", "a" + esc + "[2Jb", "ab"},
+		{"cursor home is dropped", "a" + esc + "[Hb", "ab"},
+		{"device status query is dropped", "a" + esc + "[6nb", "ab"},
+		{"OSC 52 clipboard write, BEL terminated", "a" + esc + "]52;c;aGk=" + string(rune(7)) + "b", "ab"},
+		{"OSC 52 clipboard write, ST terminated", "a" + esc + "]52;c;aGk=" + esc + "\\" + "b", "ab"},
+		{"OSC 8 hyperlink is dropped", "a" + esc + "]8;;http://x" + string(rune(7)) + "b", "ab"},
+		{"DCS is dropped", "a" + esc + "Pq#0" + esc + "\\" + "b", "ab"},
+		{"APC is dropped", "a" + esc + "_G f=1" + esc + "\\" + "b", "ab"},
+		{"two-byte escape is dropped", "a" + esc + "7b", "ab"},
+		{"a lone trailing ESC is dropped", "ab" + esc, "ab"},
+		{"newlines are the frame's own rows", "a" + "\n" + "b", "a" + "\n" + "b"},
+		{"carriage return cannot overwrite a row", "a" + "\r" + "b", "ab"},
+		{"BEL is dropped", "a" + string(rune(7)) + "b", "ab"},
+		{"C1 CSI is dropped", "a" + string(rune(0x9b)) + "2Jb", "a2Jb"},
+		{"bidi override is dropped", "safe" + string(rune(0x202e)) + "txet", "safetxet"},
+		{"wide runes are untouched", "中文", "中文"},
+		{"emoji ZWJ sequences keep their width", "👨‍👩‍👧", "👨‍👩‍👧"},
+		{"a malformed CSI resyncs instead of eating the frame", "a" + esc + "[" + string(rune(7)) + "tail", "atail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := renderSafe(tc.in); got != tc.want {
+				t.Fatalf("renderSafe(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCapturedEscapesCannotReachTheTerminal is the end-to-end form of the same
+// rule. The spec lets a server write any UTF-8 it likes to stderr, so a line of
+// it is the easiest thing in a capture for an attacker to control, and OSC 52 in
+// particular writes the clipboard of whoever is watching. None of it may survive
+// into the string bubbletea hands the terminal, in the table or the inspector.
+func TestCapturedEscapesCannotReachTheTerminal(t *testing.T) {
+	esc := string(rune(27))
+	hostile := esc + "[2J" + esc + "[H warming up " + esc + "]52;c;cHduZWQ=" + string(rune(7))
+
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	e := env(2, proxy.ServerToClient, "")
+	e.Raw = nil
+	e.Text = hostile
+	st.Ingest(e)
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // the stream table
+	inspector := drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if inspector.overlay != overlayInspector {
+		t.Fatalf("this test needs the inspector open, overlay %d", inspector.overlay)
+	}
+
+	for name, frame := range map[string]string{
+		"stream table": m.View(),
+		"inspector":    inspector.View(),
+	} {
+		for what, seq := range map[string]string{
+			"a screen erase":         esc + "[2J",
+			"a cursor move":          esc + "[H",
+			"an OSC clipboard write": esc + "]52;",
+		} {
+			if strings.Contains(frame, seq) {
+				t.Errorf("%s handed the terminal %s from captured stderr", name, what)
+			}
+		}
+	}
+
+	// Dropping them silently would be its own failure, so the inspector shows
+	// what the server sent, as text.
+	if body := inspector.inspectorBody(); !strings.Contains(body, `\`+"x1b[2J") {
+		t.Fatalf("inspector should show the captured escape as text, got %q", body)
+	}
+}
+
+// TestCopiedFrameTextCannotRunInAnotherTerminal covers the one sink that never
+// passes through View. Pasting a captured escape into a shell, an issue or a
+// colleague's terminal would run it there.
+func TestCopiedFrameTextCannotRunInAnotherTerminal(t *testing.T) {
+	esc := string(rune(27))
+	got := frameText(store.EventView{Text: "log " + esc + "]52;c;cHduZWQ=" + string(rune(7))})
+	if strings.ContainsRune(got, 27) {
+		t.Fatalf("clipboard payload still carries a raw escape: %q", got)
+	}
+	if !strings.Contains(got, `\`+"x1b]52;") {
+		t.Fatalf("clipboard payload should spell the escape out, got %q", got)
+	}
+}
+
+// TestSafeCellQuotesEverythingQuoteWouldEscape keeps safeCell's test and its
+// action in agreement. Triggering on unicode.IsControl alone let every bidi and
+// zero-width rune through, which is the Trojan Source shape: a tool named with a
+// right-to-left override draws as a different tool in the table.
+func TestSafeCellQuotesEverythingQuoteWouldEscape(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		in    string
+		quote bool
+	}{
+		{"plain ascii", "tools/call", false},
+		{"wide runes", "工具", false},
+		{"punctuation and symbols", `{"a": 1} ±§`, false},
+		{"escape", "x" + string(rune(27)) + "[2J", true},
+		{"newline", "a" + "\n" + "b", true},
+		{"right-to-left override", "safe" + string(rune(0x202e)) + "txet", true},
+		{"left-to-right mark", "a" + string(rune(0x200e)) + "b", true},
+		{"zero width space", "ec" + string(rune(0x200b)) + "ho", true},
+		{"byte order mark", "echo" + string(rune(0xfeff)), true},
+		{"non-breaking space", "a" + string(rune(0xa0)) + "b", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := safeCell(tc.in)
+			if quoted := got != tc.in; quoted != tc.quote {
+				t.Fatalf("safeCell(%q) = %q, quoted=%v want %v", tc.in, got, quoted, tc.quote)
+			}
+		})
+	}
+}
+
+// TestSafeBodyEscapesInPlaceWithoutFlattening is why the inspector needs its own
+// helper. A cell has to stay one row so safeCell quotes the whole value, but
+// quoting a payload would collapse it into one unreadable line.
+func TestSafeBodyEscapesInPlaceWithoutFlattening(t *testing.T) {
+	in := "first" + "\n" + "second " + string(rune(27)) + "[2J" + "\n" + "third"
+	got := safeBody(in)
+	if n := strings.Count(got, "\n"); n != 2 {
+		t.Fatalf("safeBody flattened the payload to %d newlines, want 2: %q", n, got)
+	}
+	if strings.ContainsRune(got, 27) {
+		t.Fatalf("safeBody left a raw escape: %q", got)
+	}
+	if !strings.Contains(got, `\`+"x1b[2J") {
+		t.Fatalf("safeBody should spell the escape out, got %q", got)
+	}
+	if plain := "nothing to escape" + "\n" + "here"; safeBody(plain) != plain {
+		t.Fatal("safeBody must leave ordinary text byte for byte")
+	}
+}
+
+// TestViewStripsEscapesFromAPanelThatDoesNotQuoteItsOwnValues is why View filters
+// at all. The capabilities panel prints the server's instructions text straight
+// from the wire, as several panels print several wire values, and expecting every
+// one of them to remember to quote is how this class of bug keeps coming back.
+// The filter in View is what makes the guarantee hold for panels that forgot.
+func TestViewStripsEscapesFromAPanelThatDoesNotQuoteItsOwnValues(t *testing.T) {
+	esc := string(rune(27))
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli"}}}`))
+	st.Ingest(env(2, proxy.ServerToClient,
+		`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"demo"},"instructions":"be helpful \u001b]52;c;cHduZWQ=\u0007\u001b[2J"}}`))
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = typeRunes(t, m, "c")
+	if m.overlay != overlayCaps {
+		t.Fatalf("c should open the capabilities panel, overlay %d", m.overlay)
+	}
+	// The fixture only reaches the backstop while this panel still prints the
+	// value unquoted. Failing rather than skipping keeps that from decaying
+	// quietly: whoever teaches this panel to quote should point the fixture at
+	// another panel that does not, so View's filter stays covered.
+	if body := m.capsContent(); !strings.Contains(body, esc+"]52;") {
+		t.Fatal("this panel now quotes its own values, so the fixture no longer exercises View's filter, repoint it at one that does not")
+	}
+	frame := m.View()
+	if strings.Contains(frame, esc+"]52;") {
+		t.Error("the frame handed the terminal an OSC clipboard write from the server's instructions")
+	}
+	if strings.Contains(frame, esc+"[2J") {
+		t.Error("the frame handed the terminal a screen erase from the server's instructions")
+	}
+	if !strings.Contains(ansi.Strip(frame), "be helpful") {
+		t.Errorf("the surrounding text should survive the filter:\n%s", frame)
+	}
+}
+
+// TestStreamRowStaysOneRowForAnyWireValue covers the sanitizing call in
+// streamRow rather than the helper it calls. A tool error has its own flattening
+// step, so without a case like this one the call that protects every other wire
+// value in the row, the method, the id, the status and the progress token, can be
+// deleted with the suite still green.
+func TestStreamRowStaysOneRowForAnyWireValue(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":"7\n8","method":"tools/\ncall","params":{"name":"echo"}}`))
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	rows := m.streamRow(m.full[0], m.streamLayoutFor(120))
+	for _, c := range rows {
+		if strings.ContainsAny(c.text, "\n\r") {
+			t.Fatalf("a wire value put a line break in a table cell: %q", c.text)
+		}
+	}
+	line := m.rowLine(rows, 120, false)
+	if n := strings.Count(line, "\n"); n != 0 {
+		t.Fatalf("one frame rendered as %d physical rows: %q", n+1, line)
 	}
 }
