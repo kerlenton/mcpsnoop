@@ -21,7 +21,16 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/store"
 )
 
-func (m Model) View() string {
+// View is the frame bubbletea writes to the terminal. Everything in it went
+// through lipgloss, which only ever emits SGR sequences for colour and
+// attributes, so any other escape in the frame arrived in captured traffic.
+// renderSafe removes those. It is the backstop under the per-value quoting
+// below, so a panel added later cannot hand a server's cursor control or OSC 52
+// clipboard write to the terminal just because its author did not know to quote
+// the values it renders.
+func (m Model) View() string { return renderSafe(m.renderFrame()) }
+
+func (m Model) renderFrame() string {
 	if !m.ready {
 		return "starting mcpsnoop…"
 	}
@@ -1167,14 +1176,19 @@ func (m Model) inspectorBody() string {
 	}
 	e := m.full[m.inspect]
 	var b strings.Builder
+	// Both of these are wire bytes. A stderr line is whatever the server chose to
+	// log, which the spec allows to be any UTF-8, and prettyJSON hands back the
+	// original bytes when they are not valid JSON, which is exactly the traffic
+	// this tool exists to show. safeBody keeps them multiline and readable while
+	// making any escape sequence in them visible rather than executable.
 	if e.Text != "" {
-		b.WriteString(e.Text)
+		b.WriteString(safeBody(e.Text))
 		if len(e.Raw) > 0 {
 			b.WriteString("\n")
 		}
 	}
 	if len(e.Raw) > 0 {
-		b.WriteString(prettyJSON(e.Raw))
+		b.WriteString(safeBody(prettyJSON(e.Raw)))
 	}
 	// A frame whose body the live store released still has a row, a verdict and a
 	// place in the timeline, and saying nothing here would read as a server that
@@ -2378,12 +2392,14 @@ func (m Model) onboardingCard() string {
 }
 
 // frameText is the copy-to-clipboard payload for a frame, pretty JSON, or the
-// raw stderr line.
+// stderr line. This one does not reach the terminal through View, so it carries
+// its own escaping: pasting a captured escape sequence into a shell, an issue or
+// another terminal would run it there instead.
 func frameText(e store.EventView) string {
 	if len(e.Raw) > 0 {
-		return prettyJSON(e.Raw)
+		return safeBody(prettyJSON(e.Raw))
 	}
-	return e.Text
+	return safeBody(e.Text)
 }
 
 func prettyJSON(raw json.RawMessage) string {
@@ -2655,8 +2671,120 @@ func (m Model) interactContent() string {
 // character for the same reason, and the inventory and stats tables quote rather
 // than drop one so the value stays recoverable.
 func safeCell(s string) string {
-	if strings.ContainsFunc(s, unicode.IsControl) {
+	// The test is the exact complement of what strconv.Quote escapes. Quoting on
+	// unicode.IsControl alone would miss everything outside Cc, and the runes it
+	// misses are the interesting ones: U+202E and the other bidi controls reorder
+	// the glyphs after them, so a tool can be named to render as a different tool,
+	// and the zero-width formatters let two different names draw identically. A
+	// wire debugger that shows one thing while the bytes say another has failed at
+	// the only job it has.
+	if strings.ContainsFunc(s, func(r rune) bool { return !strconv.IsPrint(r) }) {
 		return strconv.Quote(s)
 	}
 	return s
+}
+
+// safeBody is safeCell for text that is allowed to be more than one row. Quoting
+// the whole value would collapse a payload into one unreadable line, so newlines
+// survive and every other non-printable rune is escaped where it stands. Callers
+// pass unstyled wire text, never a string lipgloss has already rendered.
+func safeBody(s string) string {
+	if !strings.ContainsFunc(s, unsafeInBody) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 16)
+	for _, r := range s {
+		if !unsafeInBody(r) {
+			b.WriteRune(r)
+			continue
+		}
+		q := strconv.QuoteRune(r)
+		b.WriteString(q[1 : len(q)-1]) // the escape itself, without the quote marks
+	}
+	return b.String()
+}
+
+func unsafeInBody(r rune) bool { return r != '\n' && !strconv.IsPrint(r) }
+
+// renderSafe keeps the SGR sequences lipgloss emits and drops every other escape
+// sequence, along with the control characters that are not the newlines
+// separating the frame's own rows. Captured traffic can carry cursor control and
+// screen erase, which corrupt the display, and OSC 52, which writes the user's
+// system clipboard. None of it may reach the terminal as bytes.
+//
+// It also drops the bidi controls, which reorder the glyphs that follow them and
+// so let a server name a tool to render as a different tool. Dropping is the only
+// option available this late, because the frame has already been padded and
+// truncated to its columns, and escaping a rune into six visible characters here
+// would shift every cell after it. Removing them costs no width, since they draw
+// nothing. Nothing is hidden by this: safeCell quotes them in table cells and
+// safeBody escapes them in the inspector, both of which run before the layout.
+func renderSafe(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		switch c := s[i]; {
+		case c == escByte:
+			n, keep := scanEscape(s[i:])
+			if keep {
+				b.WriteString(s[i : i+n])
+			}
+			i += n
+		case c == '\n':
+			b.WriteByte(c)
+			i++
+		case c < 0x20 || c == 0x7f:
+			i++ // C0 and DEL
+		case c < utf8.RuneSelf:
+			b.WriteByte(c)
+			i++
+		default:
+			r, n := utf8.DecodeRuneInString(s[i:])
+			if !unicode.IsControl(r) && !unicode.Is(unicode.Bidi_Control, r) {
+				b.WriteString(s[i : i+n])
+			}
+			i += n
+		}
+	}
+	return b.String()
+}
+
+const escByte = 0x1b
+
+// scanEscape measures the escape sequence at the front of s, which starts with
+// ESC, and reports whether it may be kept. Only SGR survives, because colour and
+// attributes are the whole of what the styling layer emits. A malformed sequence
+// is consumed up to the byte that broke it and the scan resumes there, so one
+// bad byte from the wire cannot swallow the rest of the frame.
+func scanEscape(s string) (n int, keep bool) {
+	if len(s) < 2 {
+		return len(s), false
+	}
+	switch s[1] {
+	case '[': // CSI, parameter bytes then intermediate bytes then one final byte
+		i := 2
+		for i < len(s) && s[i] >= 0x30 && s[i] <= 0x3f {
+			i++
+		}
+		for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+			i++
+		}
+		if i >= len(s) || s[i] < 0x40 || s[i] > 0x7e {
+			return i, false // unterminated or malformed, resume at the offending byte
+		}
+		return i + 1, s[i] == 'm'
+	case ']', 'P', 'X', '^', '_': // OSC, DCS, SOS, PM and APC run until BEL or ST
+		for i := 2; i < len(s); i++ {
+			if s[i] == 0x07 {
+				return i + 1, false
+			}
+			if s[i] == escByte && i+1 < len(s) && s[i+1] == '\\' {
+				return i + 2, false
+			}
+		}
+		return len(s), false // unterminated, and a terminal would swallow the rest too
+	default:
+		return 2, false // a two-byte escape
+	}
 }

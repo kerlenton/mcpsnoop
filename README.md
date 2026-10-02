@@ -1400,6 +1400,17 @@ For remote workflows, use SSH tunnelling or SSH file transfer so transport auth,
 encryption, host verification, key rotation, and audit policy stay in your
 existing SSH setup.
 
+### What a capture can do to your terminal
+
+A capture is data the other side chose. Frames and stderr lines can carry
+terminal escape sequences, and a terminal acts on whatever it is handed, which
+runs from a scrambled display through OSC 52 writing your system clipboard.
+mcpsnoop keeps only the colour sequences it generates itself and drops every
+other escape before a frame reaches your terminal. Table cells quote control
+characters so you can see they were there, the inspector spells them out in
+full, and the clipboard copy carries the escaped form, so nothing is hidden
+from you and nothing runs.
+
 ### Redacting what you capture
 
 Captured frames can include prompts, tool arguments, credentials, and tool
