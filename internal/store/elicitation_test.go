@@ -117,18 +117,18 @@ func TestElicitationLedgerPairsQuestionWithAnswer(t *testing.T) {
 // is built on. The values are in the capture for anyone who needs them, and a
 // summary surface built to be pasted around must not repeat them.
 func TestElicitationNeverCarriesASubmittedValue(t *testing.T) {
-	const secret = "hunter2-do-not-repeat-me"
+	const canary = "hunter2-do-not-repeat-me"
 	s, id := elicitSession(t, "t", []elicitAsk{{
 		key:     "k",
 		state:   "st",
 		request: elicitReq("k", `{"mode":"form","message":"who are you","requestedSchema":{"type":"object","properties":{"name":{"type":"string"}}}}`),
-		answer:  fmt.Sprintf(`"k":{"action":"accept","content":{"name":%q}}`, secret),
+		answer:  fmt.Sprintf(`"k":{"action":"accept","content":{"name":%q}}`, canary),
 	}})
 	rendered, err := json.Marshal(s.Elicitations(id))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(rendered), secret) {
+	if strings.Contains(string(rendered), canary) {
 		t.Fatalf("a submitted value reached the ledger: %s", rendered)
 	}
 }

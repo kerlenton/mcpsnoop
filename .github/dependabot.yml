@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # The workflows and the composite action pin every action to a commit SHA, and
+  # a pin nobody moves goes stale. This moves them, in one pull request a month.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns:
+          - "*"

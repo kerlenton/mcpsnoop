@@ -76,7 +76,7 @@ func TestTruncateAppendsEllipsisWhenItCuts(t *testing.T) {
 }
 
 func TestStreamCellSafeForTableQuotesWireControls(t *testing.T) {
-	p := progressBar{done: 1, total: 2, token: "tok\n\x1b[2J"}
+	p := progressBar{done: 1, total: 2, token: "tok" + "\n\x1b[2J"}
 	got := (streamCell{
 		method: "tools/call\nnext", id: "1\r2", status: "work\ting",
 		detail: "line one\nline two\x1b[H", tool: "echo\x1b[31m", progress: &p,

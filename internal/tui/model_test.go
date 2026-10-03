@@ -2827,10 +2827,10 @@ func TestExportFromABoundedStoreReadsTheLog(t *testing.T) {
 
 	// One frame carrying a payload, written to the log the way the hub writes it,
 	// and fed to a store so tight that its body is released immediately.
-	const secret = "PAYLOAD-ONLY-IN-THE-LOG"
+	const payload = "PAYLOAD-ONLY-IN-THE-LOG"
 	env := proxy.Envelope{
 		SessionID: "s1", ServerLabel: "demo", Seq: 1, TS: time.Now(), Direction: proxy.ClientToServer,
-		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"t":"` + secret + `"}}}`),
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"t":"` + payload + `"}}}`),
 	}
 	line, err := json.Marshal(env)
 	if err != nil {
@@ -2857,7 +2857,7 @@ func TestExportFromABoundedStoreReadsTheLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(encoded), secret) {
+	if !strings.Contains(string(encoded), payload) {
 		t.Fatal("the export was built from the bounded store, so the released payload is missing from it")
 	}
 }

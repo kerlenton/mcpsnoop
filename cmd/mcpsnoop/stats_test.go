@@ -423,7 +423,7 @@ func TestStatsOnAnEmptyWindowExitsZero(t *testing.T) {
 func TestStatsNeverExposesAPayload(t *testing.T) {
 	t.Setenv("MCPSNOOP_HOME", t.TempDir())
 	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
-	const secret = "sk-live-do-not-print-me"
+	const canary = "canary-do-not-print-me"
 	meta, err := json.Marshal(proxy.SessionMeta{Command: []string{"node", "s.js"}, CWD: "/srv"})
 	if err != nil {
 		t.Fatal(err)
@@ -431,9 +431,9 @@ func TestStatsNeverExposesAPayload(t *testing.T) {
 	envs := []proxy.Envelope{
 		{SessionID: "p1", ServerLabel: "srv", Seq: 1, TS: t0, Direction: proxy.DirectionMeta, Transport: proxy.TransportStdio, Raw: meta},
 		{SessionID: "p1", ServerLabel: "srv", Seq: 2, TS: t0.Add(time.Millisecond), Direction: proxy.ClientToServer,
-			Raw: json.RawMessage(fmt.Sprintf(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"t","arguments":{"token":%q}}}`, secret))},
+			Raw: json.RawMessage(fmt.Sprintf(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"t","arguments":{"token":%q}}}`, canary))},
 		{SessionID: "p1", ServerLabel: "srv", Seq: 3, TS: t0.Add(20 * time.Millisecond), Direction: proxy.ServerToClient,
-			Raw: json.RawMessage(fmt.Sprintf(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":%q}]}}`, secret))},
+			Raw: json.RawMessage(fmt.Sprintf(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":%q}]}}`, canary))},
 	}
 	var buf bytes.Buffer
 	for _, e := range envs {
@@ -449,7 +449,7 @@ func TestStatsNeverExposesAPayload(t *testing.T) {
 
 	for _, args := range [][]string{nil, {"--format", "json"}} {
 		_, stdout, stderr := executeStats(t, args)
-		if strings.Contains(stdout, secret) || strings.Contains(stderr, secret) {
+		if strings.Contains(stdout, canary) || strings.Contains(stderr, canary) {
 			t.Fatalf("stats printed a captured payload with %v:\n%s%s", args, stdout, stderr)
 		}
 	}
