@@ -1,7 +1,23 @@
 # Contributing to mcpsnoop
 
 Thanks for taking the time to help. Bug reports, feature ideas, and pull
-requests are all welcome.
+requests are all welcome, and the section below says where they help most.
+
+## Where help is welcome
+
+mcpsnoop is focused on two jobs right now. One is failing CI on what an MCP
+server did on the wire, and the other is exporting that as OpenTelemetry. A new
+`check` signal, a fix that brings the spans closer to the
+[semantic conventions for MCP](https://github.com/open-telemetry/semantic-conventions-genai/tree/main/model/mcp),
+or a transport rule the specification makes checkable is the most likely to land.
+
+The terminal UI and `mcpsnoop mock` are feature-complete for now. Bug fixes there
+are welcome. New features there will usually be declined, however good they are,
+because reviewing them takes the time those two jobs need.
+
+For anything bigger than a bug fix, open an issue first and wait for a reply
+before writing code, so that nobody spends a weekend on a pull request that was
+never going to be merged.
 
 ## Getting started
 
