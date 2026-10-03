@@ -569,7 +569,10 @@ func TestWriteOTLP(t *testing.T) {
 		t.Fatalf("spans = %d, want 1", len(spans))
 	}
 	span := spans[0]
-	if span.Name != "tools/call" || len(span.TraceID) != 32 || len(span.SpanID) != 16 || span.StartTimeUnixNano == "" || span.EndTimeUnixNano == "" || span.Status.Code != "STATUS_CODE_OK" {
+	// The span name follows the convention, "{mcp.method.name} {target}", so a
+	// tool call carries the tool as its target rather than grouping every call of
+	// every tool under one name.
+	if span.Name != "tools/call echo" || len(span.TraceID) != 32 || len(span.SpanID) != 16 || span.StartTimeUnixNano == "" || span.EndTimeUnixNano == "" || span.Status.Code != "STATUS_CODE_OK" {
 		t.Fatalf("bad OTLP span: %+v", span)
 	}
 	if span.ParentSpanID != "" {
