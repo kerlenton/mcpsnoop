@@ -299,8 +299,7 @@ func rollUp(dir string, since time.Time, labels []string, limit int) (rollup, er
 // The calls come from the store rather than from the raw JSONL, because the
 // store is what knows a multi round-trip retry continues an operation rather
 // than starting one. Keying on the JSON-RPC id instead would count one logical
-// operation as several and feed its wall clock in more than once, which is the
-// failure docs/2026-07-28-mrtr-breaks-latency.md exists about.
+// operation as several and feed its wall clock in more than once.
 func foldSession(rows map[string]*toolRow, costs map[string]int, st *store.Store, sessionID string, header store.SessionHeader) {
 	command, cwd, _ := st.Command(sessionID)
 	id := serverIdentity{
