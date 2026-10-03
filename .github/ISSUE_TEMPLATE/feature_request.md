@@ -4,6 +4,10 @@ about: Suggest an idea or improvement
 labels: enhancement
 ---
 
+<!-- mcpsnoop is focused on CI checks and OpenTelemetry right now, and the
+terminal UI and mock are feature-complete. "Where help is welcome" in
+CONTRIBUTING.md says more. -->
+
 **The problem**
 <!-- What are you trying to do that mcpsnoop makes hard or impossible today? -->
 
