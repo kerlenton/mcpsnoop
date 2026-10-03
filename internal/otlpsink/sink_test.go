@@ -74,8 +74,25 @@ func TestSinkPostsCompletedCallAsOTLP(t *testing.T) {
 			t.Fatalf("posted %d spans, want 1", len(spans))
 		}
 		span := spans[0].(map[string]any)
-		if span["name"] != "tools/call" {
-			t.Fatalf("span name = %v, want tools/call", span["name"])
+		// The sink posts through exporter.WriteOTLP, so it carries the same
+		// semantic conventions as the file export, span name included. That shared
+		// path is the point: a live push and an exported file describe one capture
+		// the same way, and a consumer does not have to know which produced it.
+		if span["name"] != "tools/call lookup" {
+			t.Fatalf("span name = %v, want the convention's \"{method} {target}\"", span["name"])
+		}
+		if attrs, ok := span["attributes"].([]any); ok {
+			found := false
+			for _, a := range attrs {
+				if a.(map[string]any)["key"] == "mcp.method.name" {
+					found = true
+				}
+			}
+			if !found {
+				t.Error("a posted span must carry the required mcp.method.name")
+			}
+		} else {
+			t.Error("posted span has no attributes")
 		}
 		if span["endTimeUnixNano"] == span["startTimeUnixNano"] {
 			t.Fatal("completed span has zero duration")

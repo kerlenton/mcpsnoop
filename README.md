@@ -393,7 +393,7 @@ mcpsnoop export -T json|html|text|har|otlp [-o file|-] [session-id|log.jsonl|-]
 | `html` | a self-contained browser file with search and collapsible JSON |
 | `text` | a pretty plain-text dump |
 | `har` | one entry per correlated call, openable in browser devtools and anything else that reads HAR |
-| `otlp` | OTLP JSON with a span per correlated call, with W3C trace context joining caller traces where it is present and one trace per session otherwise |
+| `otlp` | OTLP JSON with a span per correlated call, carrying the OpenTelemetry semantic conventions for MCP, with W3C trace context joining caller traces where it is present and one trace per session otherwise |
 
 MCP is not HTTP, so a HAR entry's URL, status code, and timings are a deliberate
 mapping of each call rather than a wire transcript.
@@ -403,6 +403,46 @@ span IDs, and `_meta.tracestate` rides along on the span. When the traceparent i
 absent or invalid, mcpsnoop keeps the session-derived trace and carries no state.
 mcpsnoop observes rather than participates, so it adds no vendor entry of its own
 and passes the caller's state through unchanged.
+
+#### What the spans carry
+
+Protocol-level Logging is deprecated as of revision 2026-07-28, on a twelve-month
+clock, and the replacement is OpenTelemetry. The spans here follow the
+[OpenTelemetry semantic conventions for MCP](https://github.com/open-telemetry/semantic-conventions-genai/tree/main/model/mcp),
+so a capture lands in a dashboard built for MCP rather than one built for
+mcpsnoop. Nothing has to be instrumented for this. The server is not touched, the
+client is not touched, and the spans describe what actually crossed the wire.
+
+| Attribute | When |
+|---|---|
+| `mcp.method.name` | always, the one the convention requires |
+| `mcp.protocol.version` | when a handshake was captured |
+| `mcp.resource.uri` | on `resources/read`, `resources/subscribe`, `resources/unsubscribe` and `notifications/resources/updated` |
+| `gen_ai.tool.name` | when the call names a tool |
+| `gen_ai.operation.name` | `execute_tool`, on a tool call and nothing else |
+| `gen_ai.prompt.name` | on `prompts/get` |
+| `jsonrpc.request.id` | when the request carried a non-null id |
+| `rpc.response.status_code` | when the response carried a JSON-RPC error code |
+| `error.type` | when the call failed, the error code, or `tool_error` for a result with `isError` |
+| `network.transport` | `pipe` on stdio, `tcp` on HTTP |
+| `server.address`, `server.port` | on an HTTP capture |
+
+Span names follow the convention's `{method} {target}`, so `tools/call search`
+rather than every tool collapsing into one `tools/call`. The resource URI stays
+out of the name on purpose, because a URI per span is the high-cardinality case
+the convention tells instrumentation to avoid.
+
+There is no `mcp.session.id`. It identifies a connection-scoped MCP session, and
+2026-07-28 removed that concept, so a current capture has nothing to put there.
+mcpsnoop's own capture id is a different identifier and travels as
+`mcpsnoop.session.id` instead, rather than wearing the convention's name.
+
+The payload argument and result attributes the convention marks opt-in are not
+emitted. They carry the bytes themselves, which an export is not the place for by
+default, and redaction is the flag that decides what leaves the machine.
+
+The same spans go to a live collector with `--otlp-endpoint`, because the export
+and the live push share one code path.
 
 ```bash
 mcpsnoop export -T html -o out.html                    # an HTML file to open in a browser

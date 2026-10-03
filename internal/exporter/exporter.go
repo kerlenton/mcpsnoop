@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -824,6 +825,10 @@ type otlpSpan struct {
 
 type otlpStatus struct {
 	Code string `json:"code"`
+	// Message is the status description. The MCP span convention says it SHOULD
+	// match JSONRPCError.message when the status is ERROR, which is the one place
+	// a reader of the trace learns what the server actually said.
+	Message string `json:"message,omitempty"`
 }
 
 type otlpAttribute struct {
@@ -856,16 +861,27 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 		if call.EndedAt != nil {
 			end = *call.EndedAt
 		}
-		attrs := []otlpAttribute{
+		attrs := mcpSemconvAttrs(call, data)
+		attrs = append(attrs,
+			// The generic RPC conventions, kept beside the MCP ones. They are not
+			// part of the MCP span definition and rpc.method restates
+			// mcp.method.name, but an existing dashboard may be keyed on them, so
+			// they go when a release can say they went.
 			otlpString("rpc.system", "mcp"),
 			otlpString("rpc.method", call.Method),
+		)
+		attrs = append(attrs, []otlpAttribute{
 			otlpString("mcpsnoop.call.id", call.ID),
 			otlpString("mcpsnoop.call.status", call.Status),
 			otlpString("mcpsnoop.call.state", call.State),
 			otlpBool("mcpsnoop.call.is_tool", call.IsTool),
 			otlpBool("mcpsnoop.call.is_error", call.IsError),
 			otlpBool("mcpsnoop.call.tool_error", call.ToolError),
-		}
+			// Which peer opened the exchange. The span kind no longer carries it,
+			// because the convention ties kind to the span type rather than to the
+			// direction of travel, and mcpsnoop always reports the initiator side.
+			otlpString("mcpsnoop.call.direction", string(call.Direction)),
+		}...)
 		if call.ToolName != "" {
 			attrs = append(attrs, otlpString("mcpsnoop.call.tool_name", call.ToolName))
 		}
@@ -888,21 +904,24 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 		if call.IsError {
 			status = "STATUS_CODE_ERROR"
 		}
+		// Every span here is the initiator-side one the convention calls mcp.client,
+		// which it fixes at kind client whichever peer initiated, because what is
+		// measured is the wait for the peer's reply. mcpsnoop is on the wire rather
+		// than inside either peer, so it has no receiver-side timing to report and
+		// emits no mcp.server span. Under 2026-07-28 a server cannot initiate a
+		// request at all, so the server-initiated case is legacy captures only.
 		kind := "SPAN_KIND_CLIENT"
-		if call.Direction == proxy.ServerToClient {
-			kind = "SPAN_KIND_SERVER"
-		}
 		spans = append(spans, otlpSpan{
 			TraceID:           traceID,
 			SpanID:            otlpID(8, "span", data.Session.ID, call.ID, string(call.Direction)),
 			ParentSpanID:      parentSpanID,
 			TraceState:        traceState,
-			Name:              call.Method,
+			Name:              mcpSpanName(call),
 			Kind:              kind,
 			StartTimeUnixNano: fmt.Sprint(call.StartedAt.UnixNano()),
 			EndTimeUnixNano:   fmt.Sprint(end.UnixNano()),
 			Attributes:        attrs,
-			Status:            otlpStatus{Code: status},
+			Status:            otlpStatus{Code: status, Message: statusMessage(status, call)},
 		})
 	}
 	payload := otlpExport{ResourceSpans: []otlpResourceSpans{{
@@ -922,6 +941,191 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 	enc := jsonwire.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payload)
+}
+
+// mcpSemconvAttrs is the OpenTelemetry semantic-convention surface for one MCP
+// call. These names, rather than mcpsnoop's own, are what make a capture land in
+// an off-the-shelf MCP dashboard instead of needing one built for this tool.
+//
+// Verified against the model in open-telemetry/semantic-conventions-genai,
+// model/mcp/{registry,common,spans}.yaml, at Development stability. mcp.method.name
+// is the only required attribute; the rest are conditional on data the capture
+// may not hold, and each condition below is the one the model states.
+//
+// mcp.session.id is deliberately absent. It identifies a connection-scoped MCP
+// session, and revision 2026-07-28 removed that concept, so a current capture has
+// nothing to put there. A legacy capture had the header but mcpsnoop never
+// recorded it. Writing mcpsnoop's own capture id there would be a different
+// identifier wearing the convention's name.
+//
+// gen_ai.tool.call.arguments, gen_ai.tool.call.result and gen_ai.prompt.variable.*
+// are opt-in in the model and carry payloads the model itself flags as possibly
+// sensitive. They stay out until a flag asks for them, since an export is a file
+// people hand around.
+func mcpSemconvAttrs(call CallExport, data SessionExport) []otlpAttribute {
+	attrs := []otlpAttribute{otlpString("mcp.method.name", call.Method)}
+	if call.ToolName != "" {
+		attrs = append(attrs, otlpString("gen_ai.tool.name", call.ToolName))
+	}
+	// Set for a tool call and for nothing else, which is what lets a consumer
+	// treat an MCP tool call like any other tool call without the attribute
+	// claiming an operation kind for a handshake or a listing.
+	if call.IsTool {
+		attrs = append(attrs, otlpString("gen_ai.operation.name", "execute_tool"))
+	}
+	if name := mcpPromptName(call); name != "" {
+		attrs = append(attrs, otlpString("gen_ai.prompt.name", name))
+	}
+	if uri := mcpResourceURI(call); uri != "" {
+		attrs = append(attrs, otlpString("mcp.resource.uri", uri))
+	}
+	// A string, and left out for a null or absent id, both as the registry says.
+	if call.ID != "" && call.ID != "null" {
+		attrs = append(attrs, otlpString("jsonrpc.request.id", call.ID))
+	}
+	if call.Error != nil {
+		// rpc.response.status_code is a string across every RPC system, so the
+		// JSON-RPC code goes in as decimal text. A bare number here is the mistake
+		// that makes a payload look right and get rejected at the collector.
+		attrs = append(attrs, otlpString("rpc.response.status_code", strconv.Itoa(call.Error.Code)))
+	}
+	if t := mcpErrorType(call); t != "" {
+		attrs = append(attrs, otlpString("error.type", t))
+	}
+	if data.Capabilities != nil && data.Capabilities.ProtocolVersion != "" {
+		attrs = append(attrs, otlpString("mcp.protocol.version", data.Capabilities.ProtocolVersion))
+	}
+	if t := mcpNetworkTransport(data.Session.Transport); t != "" {
+		attrs = append(attrs, otlpString("network.transport", t))
+	}
+	if host, port := mcpServerAddress(data.Session.Endpoint); host != "" {
+		attrs = append(attrs, otlpString("server.address", host))
+		if port > 0 {
+			attrs = append(attrs, otlpInt("server.port", int64(port)))
+		}
+	}
+	return attrs
+}
+
+// mcpSpanName follows the convention, "{mcp.method.name} {target}", where target
+// is the tool or prompt name when the call names one. The resource URI is left
+// out on purpose: the model says instrumentation SHOULD NOT use it as the target
+// by default, because a URI per span makes span names high cardinality and a
+// tracing backend groups by name.
+func mcpSpanName(call CallExport) string {
+	if call.ToolName != "" {
+		return call.Method + " " + call.ToolName
+	}
+	if name := mcpPromptName(call); name != "" {
+		return call.Method + " " + name
+	}
+	return call.Method
+}
+
+// mcpErrorType is error.type, which the model requires if and only if the
+// operation failed, so this returns empty for everything the span does not mark
+// ERROR. A tool error is a JSON-RPC call that succeeded while the result said it
+// did not, and the model names that exact case "tool_error".
+func mcpErrorType(call CallExport) string {
+	switch {
+	case call.ToolError:
+		return "tool_error"
+	case call.Error != nil:
+		return strconv.Itoa(call.Error.Code)
+	case call.IsError:
+		// The store settled it as failed without a JSON-RPC error object, which a
+		// terminal task failure can do. _OTHER is the registry's fallback for an
+		// error with no lower-cardinality name.
+		return "_OTHER"
+	}
+	return ""
+}
+
+// statusMessage is the span status description, which the model says SHOULD match
+// JSONRPCError.message when the status is ERROR. A tool error carries its text
+// inside the result rather than in an error object, so there is nothing to quote.
+func statusMessage(status string, call CallExport) string {
+	if status != "STATUS_CODE_ERROR" || call.Error == nil {
+		return ""
+	}
+	return call.Error.Message
+}
+
+// mcpNetworkTransport maps the captured transport onto network.transport, which
+// the model pins to "pipe" for stdio and to the HTTP carrier otherwise. Empty for
+// a legacy log whose frames named no transport, since guessing would assert
+// something the capture does not say.
+func mcpNetworkTransport(transport string) string {
+	switch transport {
+	case string(proxy.TransportStdio):
+		return "pipe"
+	case string(proxy.TransportHTTP):
+		return "tcp"
+	}
+	return ""
+}
+
+// mcpResourceURI is the resource URI for the request types the model lists as
+// carrying one. Any other method is left alone, so a tools/call argument named
+// uri never reads as a resource.
+func mcpResourceURI(call CallExport) string {
+	switch call.Method {
+	case "resources/read", "resources/subscribe", "resources/unsubscribe", "notifications/resources/updated":
+		return paramString(call.Params, "uri")
+	}
+	return ""
+}
+
+// mcpPromptName is the prompt a call names, read only for prompts/get. tools/call
+// also puts a name in params, and reading it generically would file a tool under
+// gen_ai.prompt.name.
+func mcpPromptName(call CallExport) string {
+	if call.Method != "prompts/get" {
+		return ""
+	}
+	return paramString(call.Params, "name")
+}
+
+// paramString reads one top-level string parameter, and returns empty for
+// anything that is not a string, since the value goes out as a string attribute.
+func paramString(params json.RawMessage, key string) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(params, &fields) != nil {
+		return ""
+	}
+	var value string
+	if raw, ok := fields[key]; !ok || json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	return value
+}
+
+// mcpServerAddress splits the captured endpoint into server.address and
+// server.port. The port is the one the request actually went to, so a URL that
+// left it implicit resolves to its scheme's default rather than reporting none.
+// Empty host for a stdio capture, which has no endpoint.
+func mcpServerAddress(endpoint string) (string, int) {
+	if endpoint == "" {
+		return "", 0
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "", 0
+	}
+	if p := u.Port(); p != "" {
+		port, err := strconv.Atoi(p)
+		if err != nil {
+			return u.Hostname(), 0
+		}
+		return u.Hostname(), port
+	}
+	switch u.Scheme {
+	case "https":
+		return u.Hostname(), 443
+	case "http":
+		return u.Hostname(), 80
+	}
+	return u.Hostname(), 0
 }
 
 // propagatedContext is the W3C trace context a request carried. TraceState is
