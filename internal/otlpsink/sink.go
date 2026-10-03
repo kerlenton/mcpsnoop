@@ -24,10 +24,17 @@ type Config struct {
 	Client     *http.Client
 	MinBackoff time.Duration
 	MaxBackoff time.Duration
+	// CancelGrace is how long a cancelled call waits for an answer that was
+	// already on its way before it goes out without one. Two seconds when unset.
+	CancelGrace time.Duration
 }
 
-// Sink correlates observed envelopes and delivers each completed call as one
-// OTLP span. Network work stays in a single background goroutine.
+// Sink delivers each finished MCP operation to a collector the moment the
+// response that finishes it is observed. An operation that took one request is
+// one span. One that took several, which multi round-trip requests make
+// ordinary, is a span per request under an execute_tool span, built by the same
+// code as an export so the two can never describe it differently. Network work
+// stays in a single background goroutine.
 type Sink struct {
 	endpoint string
 	headers  http.Header
@@ -41,6 +48,7 @@ type Sink struct {
 	minRetry time.Duration
 	maxRetry time.Duration
 	limit    int
+	grace    time.Duration
 }
 
 // New starts a live OTLP sink. The queue is bounded and Emit drops on overflow.
@@ -60,6 +68,9 @@ func New(cfg Config) *Sink {
 	if cfg.MaxBackoff < cfg.MinBackoff {
 		cfg.MaxBackoff = cfg.MinBackoff
 	}
+	if cfg.CancelGrace <= 0 {
+		cfg.CancelGrace = 2 * time.Second
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Sink{
 		endpoint: cfg.Endpoint,
@@ -71,119 +82,150 @@ func New(cfg Config) *Sink {
 		minRetry: cfg.MinBackoff,
 		maxRetry: cfg.MaxBackoff,
 		limit:    cfg.Buffer,
+		grace:    cfg.CancelGrace,
 	}
 	go s.run(ctx)
 	return s
 }
 
+// The store the sink correlates with. It holds open operations however long a
+// person takes to answer one, and releases settled frames past these bounds.
+// The frame bound is far above what passes during an ordinary answer. Past it,
+// an open operation can lose its first hop, and the operation then goes out as
+// one span with an exact server and client split rather than as a partial
+// breakdown passed off as the whole.
+const (
+	sinkBodyBytes = 8 << 20
+	sinkFrames    = 8192
+)
+
 func (s *Sink) run(ctx context.Context) {
 	defer close(s.done)
-	pending := make(map[callKey]pendingCall)
-	order := list.New()
+	// One store for the life of the sink, so the store links the requests of a
+	// multi round-trip operation the way it does everywhere else. A fresh store
+	// per request and response pair could not, which sent a retry out alone with
+	// its own short duration and never sent the request the server answered by
+	// asking a person something.
+	st := store.NewBounded(sinkBodyBytes, sinkFrames)
+	posted := newRecent(s.limit)
+	awaiting := make(map[operationKey]awaitingCancel)
+	tick := min(max(s.grace/4, 10*time.Millisecond), 500*time.Millisecond)
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case now := <-ticker.C:
+			for key, a := range awaiting {
+				if now.Before(a.due) {
+					continue
+				}
+				delete(awaiting, key)
+				if !s.send(ctx, st, posted, key, a.op) {
+					return
+				}
+			}
 		case env, ok := <-s.ch:
 			if !ok {
+				// Shutting down, so no answer is coming for anything still waiting.
+				for key, a := range awaiting {
+					delete(awaiting, key)
+					if !s.send(ctx, st, posted, key, a.op) {
+						return
+					}
+				}
 				return
 			}
-			msg, ok := proxy.ParseRPC(env.Raw)
-			if !ok {
+			ev := st.Ingest(env)
+			if ev.Call == nil || !ev.Call.Done() {
 				continue
 			}
-			if msg.IsRequest() && len(msg.ID) > 0 {
-				s.remember(pending, order, requestKey(env, msg), env)
+			key := operationKey{session: env.SessionID, seq: ev.Call.RequestSeq}
+			if ev.Kind == store.EventResponse {
+				delete(awaiting, key)
+				if !s.send(ctx, st, posted, key, *ev.Call) {
+					return
+				}
 				continue
 			}
-			if !msg.IsResponse() {
+			// Settled without an answer, which is how a cancelled call ends, since a
+			// server receiving the cancellation SHOULD not send a response. The
+			// specification also has both sides handle a response that was already in
+			// flight when the cancellation went out, so the call waits a moment for
+			// one before it goes without. Waiting for an answer indefinitely would
+			// mean the most common cancellation, and the one a client sends when a
+			// request times out, never reached the collector at all.
+			if ev.Call.State != store.Cancelled {
 				continue
 			}
-			key, ok := responseKey(env, msg)
-			if !ok {
+			if _, waiting := awaiting[key]; waiting || posted.has(key) {
 				continue
 			}
-			request, ok := pending[key]
-			if !ok {
+			if len(awaiting) >= s.limit {
+				if !s.send(ctx, st, posted, key, *ev.Call) {
+					return
+				}
 				continue
 			}
-			delete(pending, key)
-			order.Remove(request.element)
-			payload, ok := payloadFor(request.envelope, env)
-			if !ok {
-				continue
-			}
-			if !s.deliver(ctx, payload) {
-				return
-			}
+			awaiting[key] = awaitingCancel{op: *ev.Call, due: time.Now().Add(s.grace)}
 		}
 	}
 }
 
-type callKey struct {
-	session   string
-	direction proxy.Direction
-	id        string
+// awaitingCancel is a cancelled call held for an answer already on its way.
+type awaitingCancel struct {
+	op  store.CallView
+	due time.Time
 }
 
-type pendingCall struct {
-	envelope proxy.Envelope
-	element  *list.Element
-}
-
-func requestKey(env proxy.Envelope, msg proxy.RPCMessage) callKey {
-	return callKey{session: env.SessionID, direction: env.Direction, id: string(msg.ID)}
-}
-
-func responseKey(env proxy.Envelope, msg proxy.RPCMessage) (callKey, bool) {
-	var requestDirection proxy.Direction
-	switch env.Direction {
-	case proxy.ClientToServer:
-		requestDirection = proxy.ServerToClient
-	case proxy.ServerToClient:
-		requestDirection = proxy.ClientToServer
-	default:
-		return callKey{}, false
-	}
-	return callKey{session: env.SessionID, direction: requestDirection, id: string(msg.ID)}, true
-}
-
-func (s *Sink) remember(pending map[callKey]pendingCall, order *list.List, key callKey, env proxy.Envelope) {
-	if previous, ok := pending[key]; ok {
-		previous.envelope = env
-		pending[key] = previous
-		order.MoveToBack(previous.element)
-		return
-	}
-	if len(pending) >= s.limit {
-		oldest := order.Front()
-		delete(pending, oldest.Value.(callKey))
-		order.Remove(oldest)
-		s.dropped.Add(1)
-	}
-	element := order.PushBack(key)
-	pending[key] = pendingCall{envelope: env, element: element}
-}
-
-func payloadFor(request, response proxy.Envelope) ([]byte, bool) {
-	st := store.New()
-	st.Ingest(request)
-	event := st.Ingest(response)
-	if event.Call == nil || !event.Call.Done() {
-		return nil, false
-	}
-	data, err := exporter.Build(st, request.SessionID)
-	if err != nil {
-		return nil, false
-	}
-	if len(data.Calls) != 1 {
-		return nil, false
+// send delivers one operation, once. It reports whether run should keep going.
+func (s *Sink) send(ctx context.Context, st *store.Store, posted *recent, key operationKey, op store.CallView) bool {
+	if !posted.add(key) {
+		return true // a duplicate or late response for one already sent
 	}
 	var payload bytes.Buffer
-	if err := exporter.WriteOTLP(&payload, data); err != nil {
-		return nil, false
+	if err := exporter.OperationOTLP(&payload, st, key.session, op); err != nil {
+		return true
 	}
-	return payload.Bytes(), true
+	return s.deliver(ctx, payload.Bytes())
+}
+
+// operationKey names one operation across every session a sink carries.
+type operationKey struct {
+	session string
+	seq     uint64
+}
+
+// recent is a bounded set of the operations already delivered, oldest forgotten
+// first, so a duplicate response cannot send one twice.
+type recent struct {
+	limit int
+	seen  map[operationKey]*list.Element
+	order *list.List
+}
+
+func newRecent(limit int) *recent {
+	return &recent{limit: limit, seen: make(map[operationKey]*list.Element), order: list.New()}
+}
+
+func (r *recent) has(key operationKey) bool {
+	_, ok := r.seen[key]
+	return ok
+}
+
+// add reports whether key is new, and remembers it.
+func (r *recent) add(key operationKey) bool {
+	if _, ok := r.seen[key]; ok {
+		return false
+	}
+	if len(r.seen) >= r.limit {
+		oldest := r.order.Front()
+		delete(r.seen, oldest.Value.(operationKey))
+		r.order.Remove(oldest)
+	}
+	r.seen[key] = r.order.PushBack(key)
+	return true
 }
 
 // maxDeliveryAttempts bounds the retries of a single payload, so a persistently

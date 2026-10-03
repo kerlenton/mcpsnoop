@@ -176,12 +176,20 @@ type traceOptions struct {
 	OTLPHeaders  http.Header
 }
 
-func parseTraceOptions(endpoint string, headers otlpHeadersFlag) (traceOptions, error) {
+func parseTraceOptions(endpoint string, headers otlpHeadersFlag, noTrace bool) (traceOptions, error) {
 	if endpoint == "" {
 		if len(headers) != 0 {
 			return traceOptions{}, errors.New("--otlp-header requires --otlp-endpoint")
 		}
 		return traceOptions{}, nil
+	}
+	// no-trace turns every observer off, the OTLP sink among them, so the two
+	// together used to run and send nothing without a word. Refused instead,
+	// since whoever passed an endpoint wanted spans and would otherwise go looking
+	// for a fault in their collector. It can come from .mcpsnoop.toml as well as
+	// the flag, and the message names both.
+	if noTrace {
+		return traceOptions{}, errors.New("--otlp-endpoint has nothing to send with no-trace set, by flag or in .mcpsnoop.toml, since no-trace turns every observer off")
 	}
 	u, err := url.ParseRequestURI(endpoint)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -291,7 +299,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 				fmt.Fprintln(os.Stderr, "mcpsnoop:", err)
 				return exitCode(2)
 			}
-			trace, err := parseTraceOptions(otlpEndpoint, otlpHeaders)
+			trace, err := parseTraceOptions(otlpEndpoint, otlpHeaders, noTrace)
 			if err != nil {
 				return err
 			}
@@ -760,7 +768,7 @@ func newHTTPCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "mcpsnoop http: --target is required")
 				return exitCode(2)
 			}
-			trace, err := parseTraceOptions(otlpEndpoint, otlpHeaders)
+			trace, err := parseTraceOptions(otlpEndpoint, otlpHeaders, noTrace)
 			if err != nil {
 				return err
 			}

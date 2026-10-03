@@ -700,16 +700,34 @@ func TestOTLPHeadersFlagRejectsMalformedValues(t *testing.T) {
 	}
 }
 
+// TestNoTraceRefusesAnOTLPEndpoint covers the combination that used to run and
+// send nothing. no-trace turns every observer off, the OTLP sink with them, so
+// whoever also passed an endpoint got silence and a collector to debug. Refused
+// up front instead, and only when there is an endpoint, since no-trace alone is
+// the pure passthrough it has always been.
+func TestNoTraceRefusesAnOTLPEndpoint(t *testing.T) {
+	_, err := parseTraceOptions("http://127.0.0.1:4318/v1/traces", nil, true)
+	if err == nil {
+		t.Fatal("no-trace with an OTLP endpoint was accepted and would send nothing")
+	}
+	if !strings.Contains(err.Error(), "no-trace") || !strings.Contains(err.Error(), ".mcpsnoop.toml") {
+		t.Fatalf("the refusal should name no-trace and where it can come from, got %q", err)
+	}
+	if _, err := parseTraceOptions("", nil, true); err != nil {
+		t.Fatalf("no-trace without an endpoint is a plain passthrough, got %v", err)
+	}
+}
+
 func TestParseTraceOptionsValidatesEndpointAndHeaderDependency(t *testing.T) {
 	for _, endpoint := range []string{"collector:4318/v1/traces", "ftp://collector/v1/traces", "http:///v1/traces"} {
-		if _, err := parseTraceOptions(endpoint, nil); err == nil {
+		if _, err := parseTraceOptions(endpoint, nil, false); err == nil {
 			t.Fatalf("parseTraceOptions(%q) returned nil error", endpoint)
 		}
 	}
-	if _, err := parseTraceOptions("", otlpHeadersFlag{"Authorization": {"Bearer token"}}); err == nil {
+	if _, err := parseTraceOptions("", otlpHeadersFlag{"Authorization": {"Bearer token"}}, false); err == nil {
 		t.Fatal("header without endpoint returned nil error")
 	}
-	got, err := parseTraceOptions("https://collector.example/v1/traces", otlpHeadersFlag{"Authorization": {"Bearer token"}})
+	got, err := parseTraceOptions("https://collector.example/v1/traces", otlpHeadersFlag{"Authorization": {"Bearer token"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

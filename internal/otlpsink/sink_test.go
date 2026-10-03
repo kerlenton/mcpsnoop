@@ -12,7 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"bytes"
+	"github.com/kerlenton/mcpsnoop/internal/exporter"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/store"
+	"strings"
 )
 
 func callEnvelopes(session string, id int, started time.Time) (proxy.Envelope, proxy.Envelope) {
@@ -74,10 +78,12 @@ func TestSinkPostsCompletedCallAsOTLP(t *testing.T) {
 			t.Fatalf("posted %d spans, want 1", len(spans))
 		}
 		span := spans[0].(map[string]any)
-		// The sink posts through exporter.WriteOTLP, so it carries the same
-		// semantic conventions as the file export, span name included. That shared
-		// path is the point: a live push and an exported file describe one capture
-		// the same way, and a consumer does not have to know which produced it.
+		// The sink posts through the exporter's own span code, so it carries the
+		// same semantic conventions as the file export, span name included. A live
+		// push and an exported file describe one capture the same way, and a
+		// consumer does not have to know which produced it.
+		// TestSinkPostsAMultiRoundTripOperationWholeAndAsTheExportWould holds that
+		// to the span for the case where it used to fail.
 		if span["name"] != "tools/call lookup" {
 			t.Fatalf("span name = %v, want the convention's \"{method} {target}\"", span["name"])
 		}
@@ -363,5 +369,279 @@ func TestSinkDropsPayloadAfterMaxRetriesAndAdvances(t *testing.T) {
 	}
 	if sink.Dropped() == 0 {
 		t.Fatal("the undeliverable first call should have been dropped")
+	}
+}
+
+// mrtrEnvelopes is a booking that took two requests, with a person answering in
+// between, and an ordinary call landing while it waited. Timestamps carry no
+// monotonic reading, so the live path and the file export see identical times.
+func mrtrEnvelopes() []proxy.Envelope {
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	frames := []struct {
+		dir proxy.Direction
+		ms  int
+		raw string
+	}{
+		{proxy.ClientToServer, 0, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"book_flight"}}`},
+		{proxy.ServerToClient, 100, `{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","requestState":"st-1","inputRequests":{"confirm":{"method":"elicitation/create"}}}}`},
+		{proxy.ClientToServer, 200, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"lookup"}}`},
+		{proxy.ServerToClient, 250, `{"jsonrpc":"2.0","id":9,"result":{"content":[]}}`},
+		{proxy.ClientToServer, 4100, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"book_flight","requestState":"st-1","inputResponses":{"confirm":{"action":"accept"}}}}`},
+		{proxy.ServerToClient, 4400, `{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`},
+	}
+	out := make([]proxy.Envelope, 0, len(frames))
+	for i, f := range frames {
+		out = append(out, proxy.Envelope{
+			SessionID: "session-mrtr", ServerLabel: "booking", Seq: uint64(i + 1),
+			TS: t0.Add(time.Duration(f.ms) * time.Millisecond), Direction: f.dir,
+			Transport: proxy.TransportStdio, Raw: json.RawMessage(f.raw),
+		})
+	}
+	return out
+}
+
+// spansByID flattens OTLP payloads to span id and the span's JSON, attributes
+// included, so two paths can be compared span for span.
+func spansByID(t *testing.T, payloads ...[]byte) map[string]string {
+	t.Helper()
+	out := make(map[string]string)
+	for _, p := range payloads {
+		var doc struct {
+			ResourceSpans []struct {
+				ScopeSpans []struct {
+					Spans []map[string]json.RawMessage `json:"spans"`
+				} `json:"scopeSpans"`
+			} `json:"resourceSpans"`
+		}
+		if err := json.Unmarshal(p, &doc); err != nil {
+			t.Fatalf("invalid OTLP JSON: %v", err)
+		}
+		for _, rs := range doc.ResourceSpans {
+			for _, ss := range rs.ScopeSpans {
+				for _, sp := range ss.Spans {
+					var id string
+					if err := json.Unmarshal(sp["spanId"], &id); err != nil {
+						t.Fatal(err)
+					}
+					if _, dup := out[id]; dup {
+						t.Errorf("span %s delivered twice", id)
+					}
+					canon, err := json.Marshal(sp)
+					if err != nil {
+						t.Fatal(err)
+					}
+					out[id] = string(canon)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// TestSinkPostsAMultiRoundTripOperationWholeAndAsTheExportWould is the live half
+// of the multi round-trip fix. A fresh store per request and response pair could
+// not link a retry to the operation it continues, so the live push never sent the
+// request the server answered by asking a person, and sent the retry alone with
+// its own short duration, which is the measurement this tool exists to get right.
+// The sink now holds one store, sends nothing until the operation finishes, then
+// sends it whole, and what it sends is exactly what an export of the same capture
+// says, span for span and attribute for attribute.
+func TestSinkPostsAMultiRoundTripOperationWholeAndAsTheExportWould(t *testing.T) {
+	received := make(chan []byte, 8)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		received <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sink := New(Config{Endpoint: server.URL})
+	envelopes := mrtrEnvelopes()
+	for _, env := range envelopes {
+		sink.Emit(env)
+	}
+
+	var posts [][]byte
+	for len(posts) < 2 {
+		select {
+		case p := <-received:
+			posts = append(posts, p)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out after %d posts, want 2", len(posts))
+		}
+	}
+	sink.Close()
+
+	// The ordinary call landed while the booking waited for its person, so it is
+	// the first thing out. A sink that posted the waiting request on its own would
+	// have sent that first.
+	first := spansByID(t, posts[0])
+	if len(first) != 1 || !strings.Contains(firstSpanName(first), "tools/call lookup") {
+		t.Fatalf("first post = %v, want the ordinary call alone", first)
+	}
+	second := spansByID(t, posts[1])
+	if len(second) != 3 {
+		t.Fatalf("the finished booking went out as %d spans, want execute_tool and both hops", len(second))
+	}
+
+	st := store.New()
+	for _, env := range envelopes {
+		st.Ingest(env)
+	}
+	data, err := exporter.Build(st, "session-mrtr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file bytes.Buffer
+	if err := exporter.WriteOTLP(&file, data); err != nil {
+		t.Fatal(err)
+	}
+	live, exported := spansByID(t, posts...), spansByID(t, file.Bytes())
+	if len(live) != len(exported) {
+		t.Fatalf("live push sent %d spans, the export holds %d", len(live), len(exported))
+	}
+	for id, want := range exported {
+		if got, ok := live[id]; !ok {
+			t.Errorf("span %s is in the export and was never pushed: %s", id, want)
+		} else if got != want {
+			t.Errorf("span %s differs\n live   %s\n export %s", id, got, want)
+		}
+	}
+}
+
+func firstSpanName(spans map[string]string) string {
+	for _, s := range spans {
+		return s
+	}
+	return ""
+}
+
+// TestSinkWaitsForALateResultRatherThanPostingTheCancellation pins the race the
+// cancellation section tells both sides to handle, a response already in flight
+// when the cancellation went out. Posting the moment the cancellation arrives
+// would send the call without that answer and then drop the answer as a
+// duplicate, so a cancelled call waits a short grace window first.
+func TestSinkWaitsForALateResultRatherThanPostingTheCancellation(t *testing.T) {
+	received := make(chan []byte, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sink := New(Config{Endpoint: server.URL})
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	frames := []struct {
+		dir proxy.Direction
+		ms  int
+		raw string
+	}{
+		{proxy.ClientToServer, 0, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slow"}}`},
+		{proxy.ClientToServer, 1000, `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":3,"reason":"user gave up"}}`},
+		{proxy.ServerToClient, 4000, `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`},
+	}
+	for i, f := range frames {
+		sink.Emit(proxy.Envelope{SessionID: "late", ServerLabel: "slow", Seq: uint64(i + 1),
+			TS: t0.Add(time.Duration(f.ms) * time.Millisecond), Direction: f.dir, Raw: json.RawMessage(f.raw)})
+	}
+
+	var post []byte
+	select {
+	case post = <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the late result was never posted")
+	}
+	sink.Close()
+	select {
+	case extra := <-received:
+		t.Fatalf("the call went out twice, second post %s", extra)
+	default:
+	}
+	spans := spansByID(t, post)
+	if len(spans) != 1 {
+		t.Fatalf("posted %d spans, want the one call", len(spans))
+	}
+	span := firstSpanName(spans)
+	for _, want := range []string{`"mcpsnoop.call.late_result"`, `"mcpsnoop.call.cancelled_at"`, `"user gave up"`} {
+		if !strings.Contains(span, want) {
+			t.Errorf("the posted span should carry %s, since it went out with the late answer\n%s", want, span)
+		}
+	}
+}
+
+func cancelledCall(sink *Sink, session string, withReason bool) {
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	params := `{"requestId":5}`
+	if withReason {
+		params = `{"requestId":5,"reason":"timed out"}`
+	}
+	sink.Emit(proxy.Envelope{SessionID: session, ServerLabel: "slow", Seq: 1, TS: t0,
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"hang"}}`)})
+	sink.Emit(proxy.Envelope{SessionID: session, ServerLabel: "slow", Seq: 2, TS: t0.Add(30 * time.Second),
+		Direction: proxy.ClientToServer, Raw: json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":` + params + `}`)})
+}
+
+// TestSinkPostsACancelledCallThatGetsNoAnswer covers the ordinary end of a
+// cancellation. A server receiving one SHOULD not answer, and a client cancels
+// exactly when a request has hung past its timeout, so a sink that waited for an
+// answer kept every hung call out of the collector. It goes out once the grace
+// window passes, saying when it was cancelled and why, and claiming no result.
+func TestSinkPostsACancelledCallThatGetsNoAnswer(t *testing.T) {
+	received := make(chan []byte, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sink := New(Config{Endpoint: server.URL, CancelGrace: 50 * time.Millisecond})
+	defer sink.Close()
+	cancelledCall(sink, "hung", true)
+
+	var post []byte
+	select {
+	case post = <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a cancelled call that got no answer never reached the collector")
+	}
+	span := firstSpanName(spansByID(t, post))
+	for _, want := range []string{`"mcpsnoop.call.cancelled_at"`, `"timed out"`, `"STATUS_CODE_UNSET"`} {
+		if !strings.Contains(span, want) {
+			t.Errorf("the cancelled call should carry %s\n%s", want, span)
+		}
+	}
+	if strings.Contains(span, `"mcpsnoop.call.late_result"`) {
+		t.Errorf("no answer came, so no late result may be claimed\n%s", span)
+	}
+}
+
+// TestSinkCloseSendsACancelledCallStillWaiting covers shutdown inside the grace
+// window. Nothing more will arrive once the sink is closing, so a call waiting
+// for an answer goes out then rather than being lost with the process.
+func TestSinkCloseSendsACancelledCallStillWaiting(t *testing.T) {
+	received := make(chan []byte, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sink := New(Config{Endpoint: server.URL, CancelGrace: time.Hour})
+	cancelledCall(sink, "closing", false)
+	sink.Close()
+
+	select {
+	case post := <-received:
+		if !strings.Contains(firstSpanName(spansByID(t, post)), `"mcpsnoop.call.cancelled_at"`) {
+			t.Errorf("close sent something other than the cancelled call: %s", post)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("closing the sink dropped a cancelled call that was waiting for its answer")
 	}
 }

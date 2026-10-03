@@ -4,8 +4,9 @@ MCP revision 2026-07-28 deprecates protocol-level Logging. It stays in the
 specification for at least twelve months, and the specification tells existing
 implementations to move to `stderr` on stdio, or to OpenTelemetry for structured
 observability. mcpsnoop already covers both. A stdio server's `stderr` lines show
-up in the stream beside its frames, filterable with `kind:stderr`, and every call
-becomes an OpenTelemetry span without instrumenting the client or the server.
+up in the stream beside its frames, filterable with `kind:stderr`, and every
+request becomes an OpenTelemetry span without instrumenting the client or the
+server.
 
 ## Export spans from a capture
 
@@ -33,11 +34,11 @@ client is not touched, and the spans describe what actually crossed the wire.
 | `mcp.protocol.version` | when a handshake was captured |
 | `mcp.resource.uri` | on `resources/read`, `resources/subscribe`, `resources/unsubscribe` and `notifications/resources/updated` |
 | `gen_ai.tool.name` | when the call names a tool |
-| `gen_ai.operation.name` | `execute_tool`, on a tool call and nothing else |
+| `gen_ai.operation.name` | `execute_tool`, on the span that stands for a tool execution and nothing else |
 | `gen_ai.prompt.name` | on `prompts/get` |
 | `jsonrpc.request.id` | when the request carried a non-null id |
 | `rpc.response.status_code` | when the response carried a JSON-RPC error code |
-| `error.type` | when the call failed, the error code, or `tool_error` for a result with `isError` |
+| `error.type` | on the span that failed, the error code, or `tool_error` for a result with `isError` |
 | `network.transport` | `pipe` on stdio, `tcp` on HTTP |
 | `server.address`, `server.port` | on an HTTP capture |
 
@@ -55,8 +56,58 @@ The payload argument and result attributes the convention marks opt-in are not
 emitted. They carry the bytes themselves, which an export is not the place for by
 default, and redaction is the flag that decides what leaves the machine.
 
-The same spans go to a live collector with `--otlp-endpoint`, because the export
-and the live push share one code path.
+## Operations that took more than one request
+
+Under multi round-trip requests a server answers a tool call with
+`input_required`, a person answers it, and the client retries under a new id.
+The specification makes that retry an independent request, and the convention
+defines an `mcp.client` span as one request and the wait for its answer. So an
+operation like that is a span per request, each with its own
+`jsonrpc.request.id` and a duration that is the server's time for that request
+alone.
+
+A tool call among them also gets a GenAI `execute_tool {tool}` span above its
+hops, kind internal, covering the whole operation from the first request to the
+final answer. A booking where the server worked 1.2 seconds and a person took 37
+reads like this.
+
+```text
+execute_tool book_flight   38.2s   round_trips 3, server 1200ms, client 37000ms
+├─ tools/call book_flight   0.4s   id 1, asked elicitation/create
+├─ tools/call book_flight   0.3s   id 2, waited 12000ms, asked elicitation/create
+└─ tools/call book_flight   0.5s   id 3, waited 25000ms
+```
+
+A latency panel built on the `tools/call` spans sees the server's time and not
+the person's, and one built on `execute_tool` sees the whole thing.
+`gen_ai.operation.name` sits on the parent only and `mcp.method.name` on the hops
+only, so neither kind of panel counts one operation twice. Only the last hop and
+the parent carry the outcome, since the earlier hops were answered with
+`input_required` and succeeded as requests.
+
+| Attribute | On | Meaning |
+|---|---|---|
+| `mcpsnoop.call.round_trips` | the parent | how many requests the operation took |
+| `mcpsnoop.call.server_time_ms` | the parent | the server's share of the whole |
+| `mcpsnoop.call.client_turnaround_ms` | the parent | the rest, mostly a person deciding |
+| `mcpsnoop.call.id` | every hop | the id the operation opened with, which groups the hops |
+| `mcpsnoop.hop.index` | every hop | its place in the operation, from zero |
+| `mcpsnoop.hop.asked` | a hop that asked for input | what the answer asked the client for, as an array |
+| `mcpsnoop.hop.client_turnaround_ms` | every hop after the first | the wait before it |
+
+`prompts/get` and `resources/read` can take more than one request too. The
+conventions define no span for one prompt fetch or one resource read, so mcpsnoop
+does not invent one. Those keep their hops grouped by `mcpsnoop.call.id`, and the
+last hop carries the operation's totals.
+
+A live store can release old frames to stay inside its memory budget, and an
+operation that outlives that can lose its first hop. It then goes out as one span
+with `mcpsnoop.call.hops_complete` set to false, still carrying the exact server
+and client split, which the store accumulates as frames arrive, rather than as a
+partial breakdown passed off as the whole.
+
+The same spans go to a live collector with `--otlp-endpoint`, with the same ids,
+because the export and the live push share one code path.
 
 ## Stream completed calls to an OTLP collector
 
@@ -74,6 +125,21 @@ mcpsnoop http \
   --target http://localhost:3000/mcp \
   --otlp-endpoint http://localhost:4318/v1/traces
 ```
+
+An operation goes out when it finishes. One that takes several requests goes out
+whole once the last answer arrives, never a request at a time, and nothing is
+sent for one still waiting on a person.
+
+A cancelled call has usually finished without an answer, since a server receiving
+the cancellation SHOULD not send one, and a client cancels exactly when a request
+has hung past its timeout. It goes out two seconds after the cancellation, which
+is time for an answer that was already in flight to arrive and go out with it.
+The cancellation section has both sides handle that race. Closing the proxy sends
+anything still waiting at once.
+
+`--otlp-endpoint` is refused together with `--no-trace`, from the flag or from
+`.mcpsnoop.toml`. `--no-trace` turns every observer off, the OTLP sink with them,
+so the two together would run and send nothing.
 
 Delivery is best-effort and never blocks proxied MCP traffic. If the collector
 is unavailable, mcpsnoop retries in the background and drops new trace frames
