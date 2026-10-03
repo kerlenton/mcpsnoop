@@ -45,6 +45,12 @@ test suite under the race detector, the same checks CI runs. A focused unit test
 for new behaviour is appreciated. Most packages already have one to copy the
 style from.
 
+CI also runs the HOL plugin scan, the same one the awesome-ai-plugins catalog
+runs on mcpsnoop. It reads a name like `secret`, `token` or `password` followed
+by a quoted string as a hardcoded secret, tests included, so a value a test
+asserts never leaks is named `canary` here. A failing scan names the files behind
+it in the job log.
+
 ## Code style
 
 - Idiomatic, modern Go. Prefer `any` over `interface{}`, the `slices` and `cmp`
