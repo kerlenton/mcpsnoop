@@ -65,7 +65,7 @@ func newRemoteCmd() *cobra.Command {
 // instead of handing them a command that silently fails.
 func remoteUnsupportedOS(goos string) (msg string, unsupported bool) {
 	if goos == "windows" {
-		return "the live tunnel needs a Unix workstation (Linux or macOS). SSH Unix-socket forwarding does not run on Windows, so copy the remote logs instead (see the post-mortem section in the README)", true
+		return "the live tunnel needs a Unix workstation (Linux or macOS). SSH Unix-socket forwarding does not run on Windows, so copy the remote logs instead, as https://github.com/kerlenton/mcpsnoop/blob/main/docs/USING.md#post-mortem shows", true
 	}
 	return "", false
 }
