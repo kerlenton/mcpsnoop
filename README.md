@@ -56,7 +56,7 @@ MCP revision 2026-07-28 deprecates protocol-level Logging and tells
 implementations to move to `stderr` on stdio, or to OpenTelemetry for structured
 observability. mcpsnoop covers both without touching the client or the server.
 A stdio server's `stderr` lines show up in the stream beside its frames, and
-every call becomes a span that follows the
+every request becomes a span that follows the
 [OpenTelemetry semantic conventions for MCP](https://github.com/open-telemetry/semantic-conventions-genai/tree/main/model/mcp).
 
 ```bash

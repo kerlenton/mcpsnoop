@@ -564,15 +564,7 @@ func (c *newlineCounter) lineAt(offset int64) int {
 }
 
 func Build(st *store.Store, sessionID string) (SessionExport, error) {
-	var header store.SessionHeader
-	found := false
-	for _, h := range st.Sessions() {
-		if h.ID == sessionID {
-			header = h
-			found = true
-			break
-		}
-	}
+	header, found := sessionHeaderOf(st, sessionID)
 	if !found {
 		return SessionExport{}, fmt.Errorf("session %q not found", sessionID)
 	}
@@ -598,40 +590,15 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 	outInteractions := make([]InteractionExport, 0, len(interactions))
 	for _, in := range interactions {
 		byCall[in.CallSeq] = in
-		row := InteractionExport{
-			CallID: in.CallID, Method: in.Method, ToolName: in.ToolName,
-			State:        in.State.String(),
-			RoundTrips:   in.RoundTrips,
-			ServerTimeMS: durationMS(in.ServerTime), ClientTurnaroundMS: durationMS(in.ClientTurnaround),
-			DurationMS: durationMS(in.Duration), StartedAt: in.Start,
-			HopsComplete: in.HopsComplete,
-		}
+		row := interactionExportOf(in)
 		if idx, ok := callIndex[strconv.FormatUint(in.CallSeq, 10)]; ok {
 			row.CallIndex = &idx
-		}
-		for _, h := range in.Hops {
-			hop := HopExport{
-				RequestID: h.RequestID, RequestAt: h.RequestAt,
-				ServerTimeMS: durationMS(h.ServerTime), ClientTurnaroundMS: durationMS(h.ClientTurnaround),
-				Asked: h.Asked, AskedUnknown: h.AskedUnknown, Pending: h.Pending,
-			}
-			if !h.ResponseAt.IsZero() {
-				at := h.ResponseAt
-				hop.ResponseAt = &at
-			}
-			row.Hops = append(row.Hops, hop)
 		}
 		outInteractions = append(outInteractions, row)
 	}
 	for i := range outCalls {
-		in, ok := byCall[calls[i].RequestSeq]
-		if !ok {
-			continue
-		}
-		outCalls[i].RoundTrips = in.RoundTrips
-		if in.ServerTime > 0 || in.RoundTrips > 1 {
-			ms := durationMS(in.ServerTime)
-			outCalls[i].ServerTimeMS = &ms
+		if in, ok := byCall[calls[i].RequestSeq]; ok {
+			applyInteraction(&outCalls[i], in)
 		}
 	}
 
@@ -659,23 +626,8 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 	}
 
 	out := SessionExport{
-		GeneratedAt: time.Now().UTC(),
-		Session: SessionSummary{
-			ID:               header.ID,
-			Label:            header.Label,
-			Transport:        header.Transport,
-			Endpoint:         header.Endpoint,
-			First:            header.First,
-			Last:             header.Last,
-			Requests:         header.Requests,
-			Responses:        header.Responses,
-			Notifications:    header.Notifications,
-			Errors:           header.Errors,
-			Pending:          header.Pending,
-			LateResults:      header.LateResults,
-			MissingFrames:    header.MissingFrames,
-			RetiredExchanges: header.RetiredExchanges,
-		},
+		GeneratedAt:  time.Now().UTC(),
+		Session:      sessionSummaryOf(header),
 		Calls:        outCalls,
 		Events:       outEvents,
 		Elicitations: outElicitations,
@@ -690,17 +642,111 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 	if costs, ok := st.ToolCosts(sessionID); ok {
 		out.Summary.Definitions = exportToolListCost(costs)
 	}
-	if caps, ok := st.Capabilities(sessionID); ok {
-		out.Capabilities = &CapabilitiesExport{
-			ProtocolVersion: caps.ProtocolVersion,
-			ClientInfo:      caps.ClientInfo,
-			ServerInfo:      caps.ServerInfo,
-			Client:          caps.Client,
-			Server:          caps.Server,
-			Instructions:    caps.Instructions,
+	out.Capabilities = capabilitiesOf(st, sessionID)
+	return out, nil
+}
+
+// OperationOTLP writes one operation as OTLP JSON, built by the same code as
+// WriteOTLP. The live sink calls it when a response finishes an operation, so a
+// push to a collector and an exported file describe that operation as the same
+// spans with the same ids. It reads one operation from the store rather than
+// building the whole session, because the sink asks once per finished
+// operation and a whole-session build would make every answer cost all of them.
+func OperationOTLP(w io.Writer, st *store.Store, sessionID string, op store.CallView) error {
+	header, found := sessionHeaderOf(st, sessionID)
+	if !found {
+		return fmt.Errorf("session %q not found", sessionID)
+	}
+	data := SessionExport{
+		GeneratedAt:  time.Now().UTC(),
+		Session:      sessionSummaryOf(header),
+		Calls:        []CallExport{exportCall(0, op)},
+		Capabilities: capabilitiesOf(st, sessionID),
+	}
+	if in, ok := st.Interaction(sessionID, op.RequestSeq); ok {
+		zero := 0
+		row := interactionExportOf(in)
+		row.CallIndex = &zero
+		data.Interactions = []InteractionExport{row}
+		applyInteraction(&data.Calls[0], in)
+	}
+	return WriteOTLP(w, data)
+}
+
+func sessionHeaderOf(st *store.Store, sessionID string) (store.SessionHeader, bool) {
+	for _, h := range st.Sessions() {
+		if h.ID == sessionID {
+			return h, true
 		}
 	}
-	return out, nil
+	return store.SessionHeader{}, false
+}
+
+func sessionSummaryOf(header store.SessionHeader) SessionSummary {
+	return SessionSummary{
+		ID:               header.ID,
+		Label:            header.Label,
+		Transport:        header.Transport,
+		Endpoint:         header.Endpoint,
+		First:            header.First,
+		Last:             header.Last,
+		Requests:         header.Requests,
+		Responses:        header.Responses,
+		Notifications:    header.Notifications,
+		Errors:           header.Errors,
+		Pending:          header.Pending,
+		LateResults:      header.LateResults,
+		MissingFrames:    header.MissingFrames,
+		RetiredExchanges: header.RetiredExchanges,
+	}
+}
+
+func capabilitiesOf(st *store.Store, sessionID string) *CapabilitiesExport {
+	caps, ok := st.Capabilities(sessionID)
+	if !ok {
+		return nil
+	}
+	return &CapabilitiesExport{
+		ProtocolVersion: caps.ProtocolVersion,
+		ClientInfo:      caps.ClientInfo,
+		ServerInfo:      caps.ServerInfo,
+		Client:          caps.Client,
+		Server:          caps.Server,
+		Instructions:    caps.Instructions,
+	}
+}
+
+func interactionExportOf(in store.InteractionView) InteractionExport {
+	row := InteractionExport{
+		CallID: in.CallID, Method: in.Method, ToolName: in.ToolName,
+		State:        in.State.String(),
+		RoundTrips:   in.RoundTrips,
+		ServerTimeMS: durationMS(in.ServerTime), ClientTurnaroundMS: durationMS(in.ClientTurnaround),
+		DurationMS: durationMS(in.Duration), StartedAt: in.Start,
+		HopsComplete: in.HopsComplete,
+	}
+	for _, h := range in.Hops {
+		hop := HopExport{
+			RequestID: h.RequestID, RequestAt: h.RequestAt,
+			ServerTimeMS: durationMS(h.ServerTime), ClientTurnaroundMS: durationMS(h.ClientTurnaround),
+			Asked: h.Asked, AskedUnknown: h.AskedUnknown, Pending: h.Pending,
+		}
+		if !h.ResponseAt.IsZero() {
+			at := h.ResponseAt
+			hop.ResponseAt = &at
+		}
+		row.Hops = append(row.Hops, hop)
+	}
+	return row
+}
+
+// applyInteraction gives a call the counts that only its interaction knows.
+func applyInteraction(c *CallExport, in store.InteractionView) {
+	c.RoundTrips = in.RoundTrips
+	if in.ServerTime > 0 || in.RoundTrips > 1 {
+		ms := durationMS(in.ServerTime)
+		c.ServerTimeMS = &ms
+	}
 }
 
 func exportToolSummary(summary store.SessionToolSummary) ToolSummaryExport {
@@ -844,85 +890,29 @@ type otlpAnyValue struct {
 	// receivers parse it back. Writing a bare number here is the mistake that
 	// makes a payload look right and get rejected at the collector.
 	IntValue *string `json:"intValue,omitempty"`
+	// ArrayValue carries a list, which is what lets a backend filter on one member
+	// of it rather than on a joined string it would have to split.
+	ArrayValue *otlpArrayValue `json:"arrayValue,omitempty"`
+}
+
+type otlpArrayValue struct {
+	Values []otlpAnyValue `json:"values"`
 }
 
 // WriteOTLP writes data using the OTLP JSON encoding.
 func WriteOTLP(w io.Writer, data SessionExport) error {
 	sessionTraceID := otlpID(16, "trace", data.Session.ID)
+	// An interaction names its call by index, and only one that took more than a
+	// single request has hops to render.
+	byCall := make(map[int]*InteractionExport, len(data.Interactions))
+	for i := range data.Interactions {
+		if idx := data.Interactions[i].CallIndex; idx != nil {
+			byCall[*idx] = &data.Interactions[i]
+		}
+	}
 	spans := make([]otlpSpan, 0, len(data.Calls))
-	for _, call := range data.Calls {
-		traceID, parentSpanID, traceState := sessionTraceID, "", ""
-		if propagated, ok := traceContext(call.Params); ok {
-			traceID = propagated.TraceID
-			parentSpanID = propagated.ParentSpanID
-			traceState = propagated.TraceState
-		}
-		end := call.StartedAt
-		if call.EndedAt != nil {
-			end = *call.EndedAt
-		}
-		attrs := mcpSemconvAttrs(call, data)
-		attrs = append(attrs,
-			// The generic RPC conventions, kept beside the MCP ones. They are not
-			// part of the MCP span definition and rpc.method restates
-			// mcp.method.name, but an existing dashboard may be keyed on them, so
-			// they go when a release can say they went.
-			otlpString("rpc.system", "mcp"),
-			otlpString("rpc.method", call.Method),
-		)
-		attrs = append(attrs, []otlpAttribute{
-			otlpString("mcpsnoop.call.id", call.ID),
-			otlpString("mcpsnoop.call.status", call.Status),
-			otlpString("mcpsnoop.call.state", call.State),
-			otlpBool("mcpsnoop.call.is_tool", call.IsTool),
-			otlpBool("mcpsnoop.call.is_error", call.IsError),
-			otlpBool("mcpsnoop.call.tool_error", call.ToolError),
-			// Which peer opened the exchange. The span kind no longer carries it,
-			// because the convention ties kind to the span type rather than to the
-			// direction of travel, and mcpsnoop always reports the initiator side.
-			otlpString("mcpsnoop.call.direction", string(call.Direction)),
-		}...)
-		if call.ToolName != "" {
-			attrs = append(attrs, otlpString("mcpsnoop.call.tool_name", call.ToolName))
-		}
-		if call.DurationMS != nil {
-			attrs = append(attrs, otlpDouble("mcpsnoop.call.duration_ms", *call.DurationMS))
-		}
-		if call.CancelledAt != nil {
-			attrs = append(attrs, otlpString("mcpsnoop.call.cancelled_at", call.CancelledAt.Format(time.RFC3339Nano)))
-		}
-		if call.CancelReason != "" {
-			attrs = append(attrs, otlpString("mcpsnoop.call.cancel_reason", call.CancelReason))
-		}
-		if call.LateResult {
-			attrs = append(attrs, otlpBool("mcpsnoop.call.late_result", true))
-		}
-		status := "STATUS_CODE_OK"
-		if call.State == "pending" || call.State == "superseded" || call.Status == "call_cancelled" || call.Status == "late_result" {
-			status = "STATUS_CODE_UNSET"
-		}
-		if call.IsError {
-			status = "STATUS_CODE_ERROR"
-		}
-		// Every span here is the initiator-side one the convention calls mcp.client,
-		// which it fixes at kind client whichever peer initiated, because what is
-		// measured is the wait for the peer's reply. mcpsnoop is on the wire rather
-		// than inside either peer, so it has no receiver-side timing to report and
-		// emits no mcp.server span. Under 2026-07-28 a server cannot initiate a
-		// request at all, so the server-initiated case is legacy captures only.
-		kind := "SPAN_KIND_CLIENT"
-		spans = append(spans, otlpSpan{
-			TraceID:           traceID,
-			SpanID:            otlpID(8, "span", data.Session.ID, call.ID, string(call.Direction)),
-			ParentSpanID:      parentSpanID,
-			TraceState:        traceState,
-			Name:              mcpSpanName(call),
-			Kind:              kind,
-			StartTimeUnixNano: fmt.Sprint(call.StartedAt.UnixNano()),
-			EndTimeUnixNano:   fmt.Sprint(end.UnixNano()),
-			Attributes:        attrs,
-			Status:            otlpStatus{Code: status, Message: statusMessage(status, call)},
-		})
+	for i, call := range data.Calls {
+		spans = append(spans, callSpans(call, byCall[i], data, sessionTraceID)...)
 	}
 	payload := otlpExport{ResourceSpans: []otlpResourceSpans{{
 		Resource: otlpResource{Attributes: []otlpAttribute{
@@ -963,6 +953,20 @@ func WriteOTLP(w io.Writer, data SessionExport) error {
 // sensitive. They stay out until a flag asks for them, since an export is a file
 // people hand around.
 func mcpSemconvAttrs(call CallExport, data SessionExport) []otlpAttribute {
+	return mcpAttrs(call, data, mcpAttrOptions{requestID: call.ID, operation: true, outcome: true})
+}
+
+// mcpAttrOptions says which request a span covers and what it stands for. A
+// call that took one request is all three at once. A hop of a multi round-trip
+// operation is one request among several and stands for neither the tool
+// execution nor, unless it is the last, the outcome.
+type mcpAttrOptions struct {
+	requestID string
+	operation bool
+	outcome   bool
+}
+
+func mcpAttrs(call CallExport, data SessionExport, o mcpAttrOptions) []otlpAttribute {
 	attrs := []otlpAttribute{otlpString("mcp.method.name", call.Method)}
 	if call.ToolName != "" {
 		attrs = append(attrs, otlpString("gen_ai.tool.name", call.ToolName))
@@ -970,7 +974,7 @@ func mcpSemconvAttrs(call CallExport, data SessionExport) []otlpAttribute {
 	// Set for a tool call and for nothing else, which is what lets a consumer
 	// treat an MCP tool call like any other tool call without the attribute
 	// claiming an operation kind for a handshake or a listing.
-	if call.IsTool {
+	if call.IsTool && o.operation {
 		attrs = append(attrs, otlpString("gen_ai.operation.name", "execute_tool"))
 	}
 	if name := mcpPromptName(call); name != "" {
@@ -980,17 +984,20 @@ func mcpSemconvAttrs(call CallExport, data SessionExport) []otlpAttribute {
 		attrs = append(attrs, otlpString("mcp.resource.uri", uri))
 	}
 	// A string, and left out for a null or absent id, both as the registry says.
-	if call.ID != "" && call.ID != "null" {
-		attrs = append(attrs, otlpString("jsonrpc.request.id", call.ID))
+	if o.requestID != "" && o.requestID != "null" {
+		attrs = append(attrs, otlpString("jsonrpc.request.id", o.requestID))
 	}
-	if call.Error != nil {
-		// rpc.response.status_code is a string across every RPC system, so the
-		// JSON-RPC code goes in as decimal text. A bare number here is the mistake
-		// that makes a payload look right and get rejected at the collector.
-		attrs = append(attrs, otlpString("rpc.response.status_code", strconv.Itoa(call.Error.Code)))
-	}
-	if t := mcpErrorType(call); t != "" {
-		attrs = append(attrs, otlpString("error.type", t))
+	if o.outcome {
+		if call.Error != nil {
+			// rpc.response.status_code is a string across every RPC system, so the
+			// JSON-RPC code goes in as decimal text. A bare number here is the
+			// mistake that makes a payload look right and get rejected at the
+			// collector.
+			attrs = append(attrs, otlpString("rpc.response.status_code", strconv.Itoa(call.Error.Code)))
+		}
+		if t := mcpErrorType(call); t != "" {
+			attrs = append(attrs, otlpString("error.type", t))
+		}
 	}
 	if data.Capabilities != nil && data.Capabilities.ProtocolVersion != "" {
 		attrs = append(attrs, otlpString("mcp.protocol.version", data.Capabilities.ProtocolVersion))
@@ -1126,6 +1133,259 @@ func mcpServerAddress(endpoint string) (string, int) {
 		return u.Hostname(), 80
 	}
 	return u.Hostname(), 0
+}
+
+// spanContext is where a span hangs in its trace.
+type spanContext struct {
+	traceID, parent, state string
+}
+
+// callSpans renders one operation. One that took a single request is one
+// mcp.client span, as it always was.
+//
+// One that took several, which multi round-trip requests make ordinary, is a
+// span per request. The convention defines mcp.client as a request and the wait
+// for its answer, and the specification says a retry is an independent request
+// with its own id, so one span stretched over all of them would carry only the
+// first id and fold the time a person spent answering into what reads as the
+// server's latency. A tool call among those also gets the GenAI execute_tool span
+// above its hops, covering the whole operation, so a backend sees the server's
+// time on the hops and the end-to-end time on the parent, and neither pollutes
+// the other.
+func callSpans(call CallExport, in *InteractionExport, data SessionExport, sessionTraceID string) []otlpSpan {
+	ctx := spanContext{traceID: sessionTraceID}
+	if propagated, ok := traceContext(call.Params); ok {
+		ctx = spanContext{traceID: propagated.TraceID, parent: propagated.ParentSpanID, state: propagated.TraceState}
+	}
+	if in == nil || in.RoundTrips < 2 || !in.HopsComplete {
+		return []otlpSpan{singleCallSpan(call, in, data, ctx)}
+	}
+	spans := make([]otlpSpan, 0, len(in.Hops)+1)
+	hopCtx := ctx
+	// execute_tool requires the tool's name, so a tools/call that never named one
+	// keeps its hops and goes without a parent rather than inventing one.
+	underTool := call.IsTool && call.ToolName != ""
+	if underTool {
+		parent := executeToolSpan(call, in, data, ctx)
+		spans = append(spans, parent)
+		hopCtx = spanContext{traceID: ctx.traceID, parent: parent.SpanID, state: ctx.state}
+	}
+	for i, h := range in.Hops {
+		spans = append(spans, hopSpan(call, in, h, i, data, hopCtx, underTool))
+	}
+	return spans
+}
+
+func singleCallSpan(call CallExport, in *InteractionExport, data SessionExport, ctx spanContext) otlpSpan {
+	end := callEnd(call)
+	attrs := mcpSemconvAttrs(call, data)
+	attrs = append(attrs, rpcCompatAttrs(call)...)
+	attrs = append(attrs, logicalCallAttrs(call)...)
+	// Several requests whose breakdown the store could no longer give in full,
+	// which a live store that released old frames produces. One span is the honest
+	// shape when the hops are unknown, and the split still comes along because
+	// the store accumulates it as frames arrive, so it is exact either way.
+	if in != nil && in.RoundTrips > 1 {
+		attrs = append(attrs, roundTripAttrs(in)...)
+		attrs = append(attrs, otlpBool("mcpsnoop.call.hops_complete", in.HopsComplete))
+	}
+	status := callStatus(call)
+	// Every span here is the initiator-side one the convention calls mcp.client,
+	// which it fixes at kind client whichever peer initiated, because what is
+	// measured is the wait for the peer's reply. mcpsnoop is on the wire rather
+	// than inside either peer, so it has no receiver-side timing to report and
+	// emits no mcp.server span. Under 2026-07-28 a server cannot initiate a
+	// request at all, so the server-initiated case is legacy captures only.
+	return otlpSpan{
+		TraceID:           ctx.traceID,
+		SpanID:            otlpID(8, "span", data.Session.ID, call.ID, string(call.Direction)),
+		ParentSpanID:      ctx.parent,
+		TraceState:        ctx.state,
+		Name:              mcpSpanName(call),
+		Kind:              "SPAN_KIND_CLIENT",
+		StartTimeUnixNano: fmt.Sprint(call.StartedAt.UnixNano()),
+		EndTimeUnixNano:   fmt.Sprint(end.UnixNano()),
+		Attributes:        attrs,
+		Status:            otlpStatus{Code: status, Message: statusMessage(status, call)},
+	}
+}
+
+// executeToolSpan is the GenAI span for one tool execution, which under multi
+// round-trip requests spans several requests and the time a person spent
+// answering between them. It follows gen_ai.execute_tool.internal in the
+// semantic-conventions-genai model: named execute_tool {gen_ai.tool.name}, kind
+// internal, gen_ai.operation.name required.
+//
+// It carries no mcp.method.name on purpose. Its hops do, and a backend counting
+// tools/call by that attribute would otherwise count every operation once more.
+func executeToolSpan(call CallExport, in *InteractionExport, data SessionExport, ctx spanContext) otlpSpan {
+	end := callEnd(call)
+	attrs := []otlpAttribute{
+		otlpString("gen_ai.operation.name", "execute_tool"),
+		otlpString("gen_ai.tool.name", call.ToolName),
+	}
+	if t := mcpErrorType(call); t != "" {
+		attrs = append(attrs, otlpString("error.type", t))
+	}
+	attrs = append(attrs, logicalCallAttrs(call)...)
+	attrs = append(attrs, roundTripAttrs(in)...)
+	status := callStatus(call)
+	return otlpSpan{
+		TraceID:           ctx.traceID,
+		SpanID:            otlpID(8, "span", data.Session.ID, call.ID, string(call.Direction), "execute_tool"),
+		ParentSpanID:      ctx.parent,
+		TraceState:        ctx.state,
+		Name:              "execute_tool " + call.ToolName,
+		Kind:              "SPAN_KIND_INTERNAL",
+		StartTimeUnixNano: fmt.Sprint(call.StartedAt.UnixNano()),
+		EndTimeUnixNano:   fmt.Sprint(end.UnixNano()),
+		Attributes:        attrs,
+		Status:            otlpStatus{Code: status, Message: statusMessage(status, call)},
+	}
+}
+
+// hopSpan is one request of a multi round-trip operation and its answer, which
+// is exactly what the convention means by an mcp.client span. Each carries its
+// own JSON-RPC id and its own duration, the server's time for that request
+// alone. Only the last carries the operation's outcome, since the earlier ones
+// were answered with input_required, which is a request that succeeded.
+//
+// None carries gen_ai.operation.name. The convention asks for it on a span that
+// describes a tool call, and the MCP span model asks that one tool execution not
+// become two spans. Under an execute_tool parent the parent is that execution,
+// and repeating the name on every hop would count one execution as many.
+func hopSpan(call CallExport, in *InteractionExport, h HopExport, i int, data SessionExport, ctx spanContext, underTool bool) otlpSpan {
+	last := i == len(in.Hops)-1
+	end := h.RequestAt
+	switch {
+	case h.ResponseAt != nil:
+		end = *h.ResponseAt
+	case last && call.CancelledAt != nil:
+		// The client stopped waiting here, which is where this request ended.
+		end = *call.CancelledAt
+	}
+	attrs := mcpAttrs(call, data, mcpAttrOptions{requestID: h.RequestID, outcome: last})
+	attrs = append(attrs, rpcCompatAttrs(call)...)
+	attrs = append(attrs, otlpInt("mcpsnoop.hop.index", int64(i)))
+	if len(h.Asked) > 0 {
+		attrs = append(attrs, otlpStrings("mcpsnoop.hop.asked", h.Asked))
+	}
+	if h.AskedUnknown {
+		attrs = append(attrs, otlpBool("mcpsnoop.hop.asked_unknown", true))
+	}
+	// The wait before this request, which is mostly a person deciding, and the
+	// gap a trace view draws between two hops without saying what it was.
+	if h.ClientTurnaroundMS > 0 {
+		attrs = append(attrs, otlpDouble("mcpsnoop.hop.client_turnaround_ms", h.ClientTurnaroundMS))
+	}
+	// With no execute_tool span above them, the last hop is the one place the
+	// operation as a whole can be described, and that description already names
+	// the call. Every other hop names it alone, which is what groups them, and an
+	// attribute key may appear once on a span.
+	if last && !underTool {
+		attrs = append(attrs, logicalCallAttrs(call)...)
+		attrs = append(attrs, roundTripAttrs(in)...)
+	} else {
+		attrs = append(attrs, otlpString("mcpsnoop.call.id", call.ID))
+	}
+	status, message := "STATUS_CODE_OK", ""
+	switch {
+	case h.Pending:
+		status = "STATUS_CODE_UNSET"
+	case last:
+		status = callStatus(call)
+		message = statusMessage(status, call)
+	}
+	return otlpSpan{
+		TraceID:           ctx.traceID,
+		SpanID:            otlpID(8, "span", data.Session.ID, call.ID, string(call.Direction), "hop", strconv.Itoa(i), h.RequestID),
+		ParentSpanID:      ctx.parent,
+		TraceState:        ctx.state,
+		Name:              mcpSpanName(call),
+		Kind:              "SPAN_KIND_CLIENT",
+		StartTimeUnixNano: fmt.Sprint(h.RequestAt.UnixNano()),
+		EndTimeUnixNano:   fmt.Sprint(end.UnixNano()),
+		Attributes:        attrs,
+		Status:            otlpStatus{Code: status, Message: message},
+	}
+}
+
+// rpcCompatAttrs are the generic RPC conventions, kept beside the MCP ones. They
+// are not part of the MCP span definition and rpc.method restates
+// mcp.method.name, but an existing dashboard may be keyed on them, so they go
+// when a release can say they went.
+func rpcCompatAttrs(call CallExport) []otlpAttribute {
+	return []otlpAttribute{
+		otlpString("rpc.system", "mcp"),
+		otlpString("rpc.method", call.Method),
+	}
+}
+
+// logicalCallAttrs describe the operation rather than any one request in it.
+func logicalCallAttrs(call CallExport) []otlpAttribute {
+	attrs := []otlpAttribute{
+		otlpString("mcpsnoop.call.id", call.ID),
+		otlpString("mcpsnoop.call.status", call.Status),
+		otlpString("mcpsnoop.call.state", call.State),
+		otlpBool("mcpsnoop.call.is_tool", call.IsTool),
+		otlpBool("mcpsnoop.call.is_error", call.IsError),
+		otlpBool("mcpsnoop.call.tool_error", call.ToolError),
+		// Which peer opened the exchange. The span kind does not carry it, because
+		// the convention ties kind to the span type rather than to the direction of
+		// travel, and mcpsnoop always reports the initiator side.
+		otlpString("mcpsnoop.call.direction", string(call.Direction)),
+	}
+	if call.ToolName != "" {
+		attrs = append(attrs, otlpString("mcpsnoop.call.tool_name", call.ToolName))
+	}
+	if call.DurationMS != nil {
+		attrs = append(attrs, otlpDouble("mcpsnoop.call.duration_ms", *call.DurationMS))
+	}
+	if call.CancelledAt != nil {
+		attrs = append(attrs, otlpString("mcpsnoop.call.cancelled_at", call.CancelledAt.Format(time.RFC3339Nano)))
+	}
+	if call.CancelReason != "" {
+		attrs = append(attrs, otlpString("mcpsnoop.call.cancel_reason", call.CancelReason))
+	}
+	if call.LateResult {
+		attrs = append(attrs, otlpBool("mcpsnoop.call.late_result", true))
+	}
+	return attrs
+}
+
+// roundTripAttrs split the operation's duration into the server's share and the
+// client's, which sum to the whole by construction in the store.
+func roundTripAttrs(in *InteractionExport) []otlpAttribute {
+	return []otlpAttribute{
+		otlpInt("mcpsnoop.call.round_trips", int64(in.RoundTrips)),
+		otlpDouble("mcpsnoop.call.server_time_ms", in.ServerTimeMS),
+		otlpDouble("mcpsnoop.call.client_turnaround_ms", in.ClientTurnaroundMS),
+	}
+}
+
+// callEnd is when the operation ended for the client. A cancelled call that got
+// no answer ended when the client gave up, and that interval is the hang a
+// cancellation usually reports, so ending its span where it began would show a
+// request that cost nothing.
+func callEnd(call CallExport) time.Time {
+	switch {
+	case call.EndedAt != nil:
+		return *call.EndedAt
+	case call.CancelledAt != nil && call.CancelledAt.After(call.StartedAt):
+		return *call.CancelledAt
+	}
+	return call.StartedAt
+}
+
+func callStatus(call CallExport) string {
+	status := "STATUS_CODE_OK"
+	if call.State == "pending" || call.State == "superseded" || call.Status == "call_cancelled" || call.Status == "late_result" {
+		status = "STATUS_CODE_UNSET"
+	}
+	if call.IsError {
+		status = "STATUS_CODE_ERROR"
+	}
+	return status
 }
 
 // propagatedContext is the W3C trace context a request carried. TraceState is
@@ -1287,6 +1547,14 @@ func otlpBool(key string, value bool) otlpAttribute {
 
 func otlpDouble(key string, value float64) otlpAttribute {
 	return otlpAttribute{Key: key, Value: otlpAnyValue{DoubleValue: &value}}
+}
+
+func otlpStrings(key string, values []string) otlpAttribute {
+	out := make([]otlpAnyValue, 0, len(values))
+	for _, v := range values {
+		out = append(out, otlpAnyValue{StringValue: &v})
+	}
+	return otlpAttribute{Key: key, Value: otlpAnyValue{ArrayValue: &otlpArrayValue{Values: out}}}
 }
 
 func otlpInt(key string, value int64) otlpAttribute {

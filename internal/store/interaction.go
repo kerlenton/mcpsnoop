@@ -103,7 +103,31 @@ func (s *Store) Interactions(sessionID string) []InteractionView {
 	if !ok {
 		return nil
 	}
+	return interactionsOf(sess, 0)
+}
 
+// Interaction is Interactions narrowed to the one operation opened by the request
+// with sequence callSeq. The live OTLP sink asks this once per finished operation,
+// and building every other operation in the session to find one would make each
+// answer cost the whole session.
+func (s *Store) Interaction(sessionID string, callSeq uint64) (InteractionView, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok || callSeq == 0 {
+		return InteractionView{}, false
+	}
+	out := interactionsOf(sess, callSeq)
+	if len(out) != 1 {
+		return InteractionView{}, false
+	}
+	return out[0], true
+}
+
+// interactionsOf walks the session once. only is the request sequence of the one
+// operation to keep, or zero for all of them, which is safe because sequences
+// start at one.
+func interactionsOf(sess *session, only uint64) []InteractionView {
 	// One pass, one map. Grouping the frames first and then walking each group
 	// allocated a slice per call, and this runs under the read lock while the live
 	// panel rebuilds on a timer, so every allocation here is one the ingest path
@@ -114,7 +138,7 @@ func (s *Store) Interactions(sessionID string) []InteractionView {
 	// next hop's wait is measured from.
 	lastResponse := make([]time.Time, 0, 16)
 	for _, ev := range sess.events {
-		if ev.call == nil {
+		if ev.call == nil || (only != 0 && ev.call.requestSeq != only) {
 			continue
 		}
 		i, known := at[ev.call]
