@@ -1,0 +1,30 @@
+name: plugin scan
+
+# The scan the awesome-ai-plugins catalog runs on mcpsnoop, run here on every
+# change so a regression shows up in review rather than in the catalog. HOL also
+# counts a maintainer-run scan toward the trust score its registry shows.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: hashgraph-online/ai-plugin-scanner-action@e48bafa772fc8faa5c4d6fdee554500d474ffb18 # v1.2.750
+        # The catalog's bar. By default the action only reports and never fails.
+        # Markdown so the log names the file behind each finding, which the text
+        # report does not. No comments, so a pull request gets a check and nothing
+        # else.
+        with:
+          min_score: 80
+          fail_on_severity: high
+          format: markdown
+          pr_comment: "off"
