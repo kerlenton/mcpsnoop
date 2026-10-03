@@ -156,8 +156,10 @@ republishing anything. The version beside it comes from the release, so the two
 drift: after a tag, the sidebar advertises the new version while the snippet in
 the text still pins the old one, and the reader copies the snippet. `make release-prep` at the top of this file is what bumps them, which is why it
 comes before the tag rather than after. `action/tests/docs_test.sh` keeps the two
-`uses:` lines consistent with each other, but nothing can tell whether they are
-current, which is why this is a step and not a check.
+`uses:` lines consistent with each other and fails when they fall behind the
+newest release tag, which CI fetches for it. It still cannot bump them, so this
+stays a step, and the check is what catches it skipped, as it was for v0.22.0 and
+v0.23.0.
 
 The listing is keyed on the `name` field in `action.yml`, not on the repository,
 so that field must not change. Do not rename `action.yml` to `action.yaml`
