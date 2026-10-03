@@ -41,16 +41,16 @@ func TestEndpointForLogKeepsIdentityAndDropsCredentials(t *testing.T) {
 // sample of. A value is a secret whatever it is spelled like, so no input that
 // carries one may come back out, including one shaped like the marker itself.
 func TestEndpointForLogNeverEchoesASecret(t *testing.T) {
-	const secret = "sk-live-do-not-log-me"
+	const canary = "sk-live-do-not-log-me"
 	for _, in := range []string{
-		"https://" + secret + "@h/mcp",
-		"https://u:" + secret + "@h/mcp",
-		"https://h/mcp?token=" + secret,
-		"https://h/mcp?a=1&token=" + secret + "&b=2",
-		"https://h/mcp#" + secret,
-		"https://h/mcp?x=[stripped]&token=" + secret,
+		"https://" + canary + "@h/mcp",
+		"https://u:" + canary + "@h/mcp",
+		"https://h/mcp?token=" + canary,
+		"https://h/mcp?a=1&token=" + canary + "&b=2",
+		"https://h/mcp#" + canary,
+		"https://h/mcp?x=[stripped]&token=" + canary,
 	} {
-		if got := EndpointForLog(in); strings.Contains(got, secret) {
+		if got := EndpointForLog(in); strings.Contains(got, canary) {
 			t.Fatalf("EndpointForLog(%q) = %q, which still carries the secret", in, got)
 		}
 	}

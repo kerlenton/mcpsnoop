@@ -480,7 +480,7 @@ func TestRedactKeyAndSecretsAlsoScrubTheMirroredParamHeader(t *testing.T) {
 // that compares the two spellings verbatim never fires and the log keeps a header
 // that decodes straight back to the secret.
 func TestRedactScrubsTheEncodedMirror(t *testing.T) {
-	const secret = "sk-live-абв"
+	const canary = "sk-live-абв"
 	path, err := ParseRedactPath("$.params.arguments.authKey")
 	if err != nil {
 		t.Fatal(err)
@@ -489,10 +489,10 @@ func TestRedactScrubsTheEncodedMirror(t *testing.T) {
 	NewRedactingSink(sink, RedactConfig{Paths: []RedactPath{path}}).Emit(Envelope{
 		Direction: ClientToServer,
 		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
-			`{"name":"fetch","arguments":{"authKey":` + quoteJSONString(secret) + `}}}`),
+			`{"name":"fetch","arguments":{"authKey":` + quoteJSONString(canary) + `}}}`),
 		MCPParamHeaders: []MCPParamHeader{
 			{Name: "Mcp-Param-Auth", Value: Base64SentinelPrefix +
-				base64.StdEncoding.EncodeToString([]byte(secret)) + Base64SentinelSuffix},
+				base64.StdEncoding.EncodeToString([]byte(canary)) + Base64SentinelSuffix},
 		},
 	})
 
@@ -502,7 +502,7 @@ func TestRedactScrubsTheEncodedMirror(t *testing.T) {
 	if !ok {
 		t.Fatalf("header value stopped decoding: %q", value)
 	}
-	if strings.Contains(decoded, secret) {
+	if strings.Contains(decoded, canary) {
 		t.Fatalf("the encoded header still decodes back to the secret: %q", value)
 	}
 }
@@ -621,15 +621,15 @@ func TestRedactScrubsAMirrorNestedUnderARemovedObject(t *testing.T) {
 // carries the same value in, and the encoded header decoded straight back to the
 // secret the pattern had just removed from the body.
 func TestRedactValuePatternScrubsTheEncodedMirror(t *testing.T) {
-	const secret = "sk-live-аб123"
+	const canary = "sk-live-аб123"
 	sink := &captureSink{}
 	NewRedactingSink(sink, RedactConfig{ValuePatterns: []string{`sk-live-\S+`}}).Emit(Envelope{
 		Direction: ClientToServer,
 		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
-			`{"name":"fetch","arguments":{"authKey":` + quoteJSONString(secret) + `}}}`),
+			`{"name":"fetch","arguments":{"authKey":` + quoteJSONString(canary) + `}}}`),
 		MCPParamHeaders: []MCPParamHeader{
 			{Name: "Mcp-Param-Auth", Value: Base64SentinelPrefix +
-				base64.StdEncoding.EncodeToString([]byte(secret)) + Base64SentinelSuffix},
+				base64.StdEncoding.EncodeToString([]byte(canary)) + Base64SentinelSuffix},
 		},
 	})
 	value := sink.byDir(ClientToServer)[0].MCPParamHeaders[0].Value
@@ -637,7 +637,7 @@ func TestRedactValuePatternScrubsTheEncodedMirror(t *testing.T) {
 	if !ok {
 		t.Fatalf("header value stopped decoding: %q", value)
 	}
-	if strings.Contains(decoded, secret) {
+	if strings.Contains(decoded, canary) {
 		t.Fatalf("the encoded header still decodes back to the secret: %q", value)
 	}
 }
