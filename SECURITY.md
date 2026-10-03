@@ -9,7 +9,7 @@ page. You can expect a response within a few days.
 
 mcpsnoop runs the server command you wrap and captures MCP payloads that may
 include credentials, so treat saved traces as sensitive and see the redaction
-options in the README before you share one.
+options in [docs/REDACTION.md](docs/REDACTION.md) before you share one.
 
 mcpsnoop also reads `.mcpsnoop.toml` from the current working directory. Only
 use it in directories you trust, since a config file can change tracing

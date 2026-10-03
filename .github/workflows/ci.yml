@@ -10,6 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # Tags, so the docs test in make action-test can compare the README's
+        # pinned action with the newest release. A default checkout is one
+        # commit and no tags, and the comparison would quietly skip.
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: stable

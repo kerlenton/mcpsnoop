@@ -8,9 +8,11 @@
 # one and forgetting the other leaves the page telling two stories about which
 # release to pin, and the reader takes whichever they scroll to first.
 #
-# None of this can tell whether the pin is the newest release. That is a person's
-# job at release time and RELEASING.md says so. What it can do is insist the two
-# agree, and that the page says the pin is the reader's to choose.
+# It also insists the pin is not older than the newest release tag. Bumping it is
+# a step in RELEASING.md, and v0.22.0 and v0.23.0 both shipped with that step
+# skipped, so the listing named one release in its sidebar and installed an older
+# one from its snippet for a month. The pin may run ahead of the newest tag, which
+# is the minute between the release-prep commit and the tag, and never behind.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +20,7 @@ readme="$here/../../README.md"
 
 fail=0
 ok() { printf '  ok    %s\n' "$1"; }
+skip() { printf '  skip  %s\n' "$1"; }
 bad() {
 	printf '  FAIL  %s\n' "$1"
 	shift
@@ -50,6 +53,19 @@ if printf '%s' "$first" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
 	ok "and pins a full release tag rather than a branch or a floating major"
 else
 	bad "README.md pins the action at \"$first\", which is not a full release tag"
+fi
+
+# A checkout without tags skips rather than fails, since a missing tag list says
+# nothing about the pin. CI fetches them for exactly this.
+newest="$(git -C "$here/../.." tag --list 'v*' 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+if [ -z "$newest" ]; then
+	skip "the pin is not compared with the newest release, since this checkout has no release tags"
+elif [ "$(printf '%s\n%s\n' "$first" "$newest" | sort -V | tail -1)" = "$first" ]; then
+	ok "and is not older than the newest release, $newest"
+else
+	bad "README.md hands out $first while $newest is released" \
+		"the listing's sidebar names $newest and its snippet installs $first" \
+		"run make release-prep TAG=$newest"
 fi
 
 if grep -q "releases page" "$readme"; then
