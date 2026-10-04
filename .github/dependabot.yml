@@ -10,3 +10,13 @@ updates:
       github-actions:
         patterns:
           - "*"
+  # The client matrix measures the official Go SDK, so the column is only worth
+  # reading while it is the current SDK.
+  - package-ecosystem: gomod
+    directory: /clientmatrix
+    schedule:
+      interval: monthly
+    groups:
+      clientmatrix:
+        patterns:
+          - "*"

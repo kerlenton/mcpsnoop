@@ -46,6 +46,17 @@ jobs:
       # only part of this repository that runs in other people's workflows.
       - name: action
         run: make action-test
+      # The client matrix is its own module, so ./... above never reaches it. Its
+      # harness is also the one place real SDK traffic crosses the proxy. The
+      # official Go SDK's client and server run a full scenario through mcpsnoop
+      # once per revision, and a change that breaks transparency for them fails
+      # here rather than in somebody's editor.
+      - name: client matrix
+        run: |
+          (cd clientmatrix && go vet ./...)
+          clientmatrix/run.sh go-sdk "$RUNNER_TEMP/captures"
+          clientmatrix/run.sh go-sdk-2025-11-25 "$RUNNER_TEMP/captures"
+          go run ./cmd/mcpsnoop clients "$RUNNER_TEMP/captures"/*.jsonl
 
   # Keep the Windows and macOS binaries honest. The release ships both, but the
   # gate above only runs on Linux. macOS is Unix-like, so it runs the full race
