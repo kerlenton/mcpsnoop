@@ -46,9 +46,12 @@ path, command, *args = sys.argv[1:]
 with open(path, "w") as f:
     json.dump({"mcpServers": {"ref": {"command": command, "args": args}}}, f)
 PY
-	claude -p "$(cat "$here/scenario.md")" \
+	# Run from an empty directory, so no project instructions or project settings
+	# shape what the model does, and only the scenario and the server's own
+	# descriptions reach it.
+	(cd "$bin" && claude -p "$(cat "$here/scenario.md")" \
 		--mcp-config "$config" --strict-mcp-config \
-		--allowedTools "mcp__ref__echo,mcp__ref__confirm_action,mcp__ref__slow_task,ListMcpResourcesTool,ReadMcpResourceTool"
+		--allowedTools "mcp__ref__echo,mcp__ref__confirm_action,mcp__ref__slow_task,ListMcpResourcesTool,ReadMcpResourceTool")
 	;;
 *)
 	usage
