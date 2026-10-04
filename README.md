@@ -40,7 +40,7 @@ permissions:
   contents: read
 
 steps:
-  - uses: kerlenton/mcpsnoop@v0.24.0
+  - uses: kerlenton/mcpsnoop@v0.25.0
     with:
       session: artifacts/session.jsonl
 ```
@@ -245,7 +245,7 @@ permissions:
   contents: read
 
 steps:
-  - uses: kerlenton/mcpsnoop@v0.24.0
+  - uses: kerlenton/mcpsnoop@v0.25.0
     with:
       session: artifacts/session.jsonl
 ```

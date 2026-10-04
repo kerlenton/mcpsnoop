@@ -60,7 +60,7 @@ inputs:
     default: "true"
   version:
     description: |
-      Which mcpsnoop to install, for example v0.24.0. Defaults to the release you
+      Which mcpsnoop to install, for example v0.25.0. Defaults to the release you
       pinned the action to, so normally there is nothing to set. Needed only when
       pinning a branch or a commit, which names no release.
     default: ""
