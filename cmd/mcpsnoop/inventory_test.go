@@ -870,3 +870,21 @@ func TestInventoryTellsAMissingMetaFrameFromAnEmptyOne(t *testing.T) {
 		t.Fatalf("the row does not say what it actually found:\n%s", stdout)
 	}
 }
+
+// TestInventoryQuotesABidiControlInAnArgument keeps an argument from reading as
+// a different command. A zero-width or bidi rune is printable to
+// unicode.IsControl and still changes what a reader sees.
+func TestInventoryQuotesABidiControlInAnArgument(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	writeSessionLog(t, "bidi.jsonl", stdioSession(t, "s1", "srv", t0, "/proj",
+		[]string{"node", "safe\U0000202esj.liveb"}, false)...)
+
+	_, stdout, _ := executeInventory(t, nil)
+	if strings.ContainsRune(stdout, '\U0000202e') {
+		t.Fatalf("a bidi control reached the output unescaped:\n%q", stdout)
+	}
+	if !strings.Contains(stdout, `\`+"u202e") {
+		t.Fatalf("the argument was dropped rather than quoted:\n%s", stdout)
+	}
+}
