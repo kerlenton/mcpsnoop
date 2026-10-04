@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -457,7 +456,7 @@ func seenRange(row serverRow) string {
 func renderCommand(argv []string) string {
 	parts := make([]string, 0, len(argv))
 	for _, arg := range argv {
-		if arg == "" || strings.ContainsAny(arg, " \t\"'\\") || hasControl(arg) {
+		if arg == "" || strings.ContainsAny(arg, " \t\"'\\") || unprintable(arg) {
 			parts = append(parts, strconv.Quote(arg))
 			continue
 		}
@@ -486,15 +485,22 @@ func field(w io.Writer, name, value string) error {
 //
 // paths.CheckLabel refuses a control character for this reason and the TUI drops
 // them for it too. Quoting rather than dropping keeps the value recoverable.
+//
+// The test is everything strconv.Quote would escape, the same line the TUI's
+// safeCell draws, rather than unicode.IsControl. The runes between the two are
+// the ones that lie without breaking a line. U+202E and the other bidi controls
+// reorder the glyphs after them, so a tool can be named to read as a different
+// tool, and the zero-width formatters let two different names print identically.
 func oneLine(s string) string {
-	if hasControl(s) {
+	if unprintable(s) {
 		return strconv.Quote(s)
 	}
 	return s
 }
 
-func hasControl(s string) bool {
-	return strings.ContainsFunc(s, unicode.IsControl)
+// unprintable reports whether s holds a rune strconv.Quote would escape.
+func unprintable(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return !strconv.IsPrint(r) })
 }
 
 // plural renders a count with its noun, so a summary reads as a sentence rather

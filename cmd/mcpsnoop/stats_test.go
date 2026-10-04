@@ -1099,3 +1099,26 @@ func TestParseAgeRefusesAnAgeItCannotHold(t *testing.T) {
 		t.Fatalf("prune deleted a log that is an hour old under a 200000-day cutoff: %v", err)
 	}
 }
+
+// TestStatsQuotesABidiControlInAToolName is the hazard unicode.IsControl misses.
+// A tool name comes from the server, and U+202E reverses the glyphs after it, so
+// a name can be chosen to print as a different tool while the bytes say
+// otherwise. The table has to show what was on the wire.
+func TestStatsQuotesABidiControlInAToolName(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	t0 := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	tool := "read_file\U0000202eetirw"
+	writeCapture(t, "bidi.jsonl", "srv", t0, "/proj", []string{"node", "s.js"}, []string{tool},
+		[]call{{tool: tool, duration: time.Millisecond, answer: answerOK}})
+
+	code, stdout, stderr := executeStats(t, nil)
+	if code != 0 || stderr != "" {
+		t.Fatalf("code %d stderr %q", code, stderr)
+	}
+	if strings.ContainsRune(stdout, '\U0000202e') {
+		t.Fatalf("a bidi control reached the output unescaped:\n%q", stdout)
+	}
+	if !strings.Contains(stdout, `\`+"u202e") {
+		t.Fatalf("the name was dropped rather than quoted, so it is not recoverable:\n%s", stdout)
+	}
+}
