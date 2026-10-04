@@ -15,6 +15,9 @@ Each part of it exists to make a client show one behaviour.
 | `echo` tool | the baseline call, and the `_meta` a client sends on it |
 | `confirm_action` tool | an elicitation, through multi round-trip requests under 2026-07-28 and through `elicitation/create` under older revisions |
 | `slow_task` tool | progress tokens, and cancellation when a client gives up |
+| `echo_read` and `slow_read` tools | the same two marked `readOnlyHint`, so whether calls asked for at once are sent at once shows |
+| `list_roots` tool | what a client reports as its roots, through multi round-trip requests or `roots/list` |
+| `unlock_tool` and the `bonus_tool` it adds | whether a tool added mid-conversation is picked up, through `subscriptions/listen` under 2026-07-28 |
 | `greeting` prompt and `ref://about` resource | whether a client lists and reads them |
 | `ttlMs` of one minute on every list | whether a client re-lists inside the window |
 

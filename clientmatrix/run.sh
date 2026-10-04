@@ -51,7 +51,7 @@ PY
 	# descriptions reach it.
 	(cd "$bin" && claude -p "$(cat "$here/scenario.md")" \
 		--mcp-config "$config" --strict-mcp-config \
-		--allowedTools "mcp__ref__echo,mcp__ref__confirm_action,mcp__ref__slow_task,ListMcpResourcesTool,ReadMcpResourceTool")
+		--allowedTools "mcp__ref__echo,mcp__ref__confirm_action,mcp__ref__slow_task,mcp__ref__list_roots,mcp__ref__unlock_tool,mcp__ref__bonus_tool,mcp__ref__echo_read,mcp__ref__slow_read,ListMcpResourcesTool,ReadMcpResourceTool")
 	;;
 *)
 	usage
