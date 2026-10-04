@@ -42,6 +42,7 @@ func main() {
 			return &mcp.ElicitResult{Action: "accept", Content: map[string]any{"confirm": true}}, nil
 		},
 	})
+	client.AddRoots(&mcp.Root{URI: "file:///tmp/goclient-root", Name: "goclient"})
 	cmd := exec.Command(flag.Arg(0), flag.Args()[1:]...)
 	cmd.Stderr = os.Stderr
 	session, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, &mcp.ClientSessionOptions{ProtocolVersion: *revision})
@@ -90,6 +91,20 @@ func main() {
 
 	_, err = session.ListTools(ctx, nil)
 	step("tools/list again, inside the ttl", err)
+
+	res, err = session.CallTool(ctx, &mcp.CallToolParams{Name: "list_roots"})
+	step("list_roots", err)
+	if err == nil {
+		for _, c := range res.Content {
+			if t, ok := c.(*mcp.TextContent); ok {
+				log.Printf("list_roots answered: %s", t.Text)
+			}
+		}
+	}
+	_, err = session.CallTool(ctx, &mcp.CallToolParams{Name: "unlock_tool"})
+	step("unlock_tool", err)
+	_, err = session.CallTool(ctx, &mcp.CallToolParams{Name: "bonus_tool"})
+	step("bonus_tool, added mid-session", err)
 
 	short, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	_, err = session.CallTool(short, &mcp.CallToolParams{Name: "slow_task", Arguments: map[string]any{"seconds": 10}})

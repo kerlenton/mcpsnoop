@@ -43,6 +43,14 @@ func main() {
 	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "Return the text it is given."}, echo)
 	mcp.AddTool(server, &mcp.Tool{Name: "confirm_action", Description: "Ask the user to confirm an action, then report what they answered."}, confirm)
 	mcp.AddTool(server, &mcp.Tool{Name: "slow_task", Description: "Work for a few seconds while reporting progress, then finish."}, slow)
+	// The same two tools again, marked read-only. A client may treat a call it
+	// knows has no side effects differently, and the pair makes the difference
+	// observable, for example whether two calls asked for at once are sent at once.
+	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true}
+	mcp.AddTool(server, &mcp.Tool{Name: "echo_read", Description: "Return the text it is given. Read-only.", Annotations: readOnly}, echo)
+	mcp.AddTool(server, &mcp.Tool{Name: "slow_read", Description: "Work for a few seconds while reporting progress, then finish. Read-only.", Annotations: readOnly}, slow)
+	mcp.AddTool(server, &mcp.Tool{Name: "list_roots", Description: "Ask the client for its roots and report them."}, listRoots)
+	mcp.AddTool(server, &mcp.Tool{Name: "unlock_tool", Description: "Make a new tool, bonus_tool, available on this server."}, unlock(server))
 	server.AddPrompt(&mcp.Prompt{
 		Name:        "greeting",
 		Description: "Greet someone by name.",
@@ -119,6 +127,48 @@ func slow(ctx context.Context, req *mcp.CallToolRequest, in slowIn) (*mcp.CallTo
 		}
 	}
 	return text(fmt.Sprintf("worked for %d seconds", seconds)), nil, nil
+}
+
+// listRoots asks for the client's roots the same way confirm asks a question.
+// Roots is deprecated in 2026-07-28 and still fully part of it, so what a client
+// answers here, and whether it answers at all, is worth measuring while it lasts.
+func listRoots(_ context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+	if caps := req.ClientCapabilities(); caps == nil || caps.RootsV2 == nil {
+		return text("this client did not declare roots, so nothing was asked"), nil, nil
+	}
+	resp, answered := req.Params.InputResponses["roots"]
+	if !answered {
+		return &mcp.CallToolResult{
+			InputRequests: mcp.InputRequestMap{"roots": &mcp.ListRootsParams{}},
+			RequestState:  "roots-v1",
+		}, nil, nil
+	}
+	result, ok := resp.(*mcp.ListRootsResult)
+	if !ok || result == nil {
+		return text("the answer was not a roots result"), nil, nil
+	}
+	if len(result.Roots) == 0 {
+		return text("the client has no roots"), nil, nil
+	}
+	out := fmt.Sprintf("the client sent %d root(s):", len(result.Roots))
+	for _, r := range result.Roots {
+		out += " " + r.URI
+	}
+	return text(out), nil, nil
+}
+
+// unlock adds a tool while the conversation is running. The SDK announces it
+// with notifications/tools/list_changed, which a 2026-07-28 client receives on
+// the subscriptions/listen stream it opted into, so whether the new tool is
+// usable afterwards shows whether the client acts on that stream.
+func unlock(server *mcp.Server) mcp.ToolHandlerFor[struct{}, any] {
+	return func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+		mcp.AddTool(server, &mcp.Tool{Name: "bonus_tool", Description: "A tool that only exists after unlock_tool was called."},
+			func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+				return text("bonus_tool works"), nil, nil
+			})
+		return text("bonus_tool is now available"), nil, nil
+	}
 }
 
 func greeting(_ context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
