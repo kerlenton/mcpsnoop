@@ -1,4 +1,5 @@
-// Command mcpsnoop is a transparent proxy debugger for MCP traffic.
+// Command mcpsnoop records the real MCP traffic between an AI client and its
+// servers, to watch live, to gate in CI and to export as OpenTelemetry.
 //
 // Two modes in one binary.
 //
@@ -266,8 +267,11 @@ func newRootCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "mcpsnoop [flags] -- <server command> [args...]",
-		Short: "Wireshark for MCP, a transparent proxy and TUI for debugging MCP traffic",
-		Long: `mcpsnoop is a transparent proxy debugger for MCP traffic.
+		Short: "Wireshark for MCP, the real traffic between your AI client and your MCP servers",
+		Long: `mcpsnoop sits between your AI client and your MCP server and records every
+JSON-RPC frame they exchange, with no change to either side. Watch it live in
+the TUI, fail CI on what it finds with check, or send it to a tracing backend as
+OpenTelemetry spans.
 
 Wrap your server with "mcpsnoop -- <server command>" and it forwards stdio byte
 for byte while tracing every JSON-RPC frame. Run "mcpsnoop" with no arguments to
@@ -323,7 +327,7 @@ Repeated shim flags can live in a .mcpsnoop.toml file in the current directory.`
 	flags.SetInterspersed(false)
 
 	cmd.SetVersionTemplate("mcpsnoop {{.Version}}\n")
-	cmd.AddCommand(newHTTPCmd(), newExportCmd(), newCheckCmd(), newBaselineCmd(), newDiffCmd(), newOpenCmd(), newMockCmd(), newPruneCmd(), newInventoryCmd(), newStatsCmd(), newWrapCmd(), newUnwrapCmd(), newRemoteCmd(), newDemoCmd(), newVersionCmd())
+	cmd.AddCommand(newHTTPCmd(), newExportCmd(), newCheckCmd(), newBaselineCmd(), newDiffCmd(), newOpenCmd(), newMockCmd(), newPruneCmd(), newInventoryCmd(), newStatsCmd(), newClientsCmd(), newWrapCmd(), newUnwrapCmd(), newRemoteCmd(), newDemoCmd(), newVersionCmd())
 	return cmd
 }
 

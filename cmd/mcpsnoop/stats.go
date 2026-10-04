@@ -167,22 +167,20 @@ type rollup struct {
 // returned, where every store it dropped is collectable anyway.
 var afterFold = func() {}
 
-// rollUp folds every selected log into one row per server and tool.
-//
-// One store is resident at a time. A log is loaded, its calls are folded into
-// the running aggregate, and the store is dropped before the next one opens, so
-// peak memory is the largest single capture plus the counters rather than the
-// whole directory.
-func rollUp(dir string, since time.Time, labels []string, limit int) (rollup, error) {
-	logs, counts, err := sessionLogs(dir, since, 0)
+// selectLogs picks the logs a walk over the sessions directory reads, newest
+// first, narrowed to the sessions carrying one of labels and bounded by limit.
+// unreadable counts the logs the label pre-pass could not open, which belong in
+// the caller's skipped total.
+func selectLogs(dir string, since time.Time, labels []string, limit int) (logs []sessionLog, counts logCounts, unreadable int, err error) {
+	logs, counts, err = sessionLogs(dir, since, 0)
 	if err != nil {
-		return rollup{}, err
+		return nil, logCounts{}, 0, err
 	}
 	// A --label of nothing but blanks is not "no filter". The command catches the
 	// case pflag can express as an empty slice; this catches a caller handing in a
 	// slice of blanks directly.
 	if len(labels) > 0 && len(nonBlank(labels)) == 0 {
-		return rollup{}, errBlankLabel
+		return nil, logCounts{}, 0, errBlankLabel
 	}
 	want := make(map[string]struct{}, len(labels))
 	for _, l := range nonBlank(labels) {
@@ -194,7 +192,6 @@ func rollUp(dir string, since time.Time, labels []string, limit int) (rollup, er
 	// mean the newest logs of the selected server rather than the newest logs
 	// overall, which is what somebody asking for both is after: --label x --limit 5
 	// should be five of x, not however many of x happen to be in the newest five.
-	unreadable := 0
 	if len(want) > 0 {
 		kept := logs[:0]
 		for _, log := range logs {
@@ -214,6 +211,20 @@ func rollUp(dir string, since time.Time, labels []string, limit int) (rollup, er
 	}
 	if limit > 0 && len(logs) > limit {
 		logs = logs[:limit]
+	}
+	return logs, counts, unreadable, nil
+}
+
+// rollUp folds every selected log into one row per server and tool.
+//
+// One store is resident at a time. A log is loaded, its calls are folded into
+// the running aggregate, and the store is dropped before the next one opens, so
+// peak memory is the largest single capture plus the counters rather than the
+// whole directory.
+func rollUp(dir string, since time.Time, labels []string, limit int) (rollup, error) {
+	logs, counts, unreadable, err := selectLogs(dir, since, labels, limit)
+	if err != nil {
+		return rollup{}, err
 	}
 
 	roll := rollup{Dir: dir, Total: counts.total, Empty: counts.empty, Skipped: counts.skipped + unreadable}

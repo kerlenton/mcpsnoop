@@ -188,6 +188,7 @@ completion and the install path for your OS.
 | `mcpsnoop mock <session>` | serve a captured session back as a stdio MCP server |
 | `mcpsnoop inventory` | list every server that has run through mcpsnoop on this machine |
 | `mcpsnoop stats` | fold every stored capture into one row per server and tool |
+| `mcpsnoop clients` | show what each MCP client actually did on the wire, by name and version |
 | `mcpsnoop prune` | delete saved session logs older than a cutoff |
 | `mcpsnoop wrap <server>` | route one of Claude Desktop's servers through mcpsnoop |
 | `mcpsnoop unwrap <server>` | put that server's entry back the way it was |
@@ -283,7 +284,7 @@ check without the action, the signals it can fail on and the exit codes are in
 |---|---|
 | [Checking sessions in CI](docs/CI.md) | every signal `check` can fail on, exit codes, assertions, JUnit and SARIF reports, comparing two sessions, and wiring it up without the action |
 | [OpenTelemetry and Prometheus](docs/OPENTELEMETRY.md) | the spans and what they carry, streaming them to a collector, and live tool metrics |
-| [Using mcpsnoop](docs/USING.md) | keys, filtering, export formats, replay, what a server asked your user for, cost in context, stats across captures, the server inventory, remote machines and the config file |
+| [Using mcpsnoop](docs/USING.md) | keys, filtering, export formats, replay, what a server asked your user for, cost in context, stats across captures, what each client actually sends, the server inventory, remote machines and the config file |
 | [Redaction](docs/REDACTION.md) | scrubbing secrets, during capture or from a capture you already have |
 | [How it works](docs/HOW_IT_WORKS.md) | memory bounds, the history limit, and pruning old logs |
 | [Try it for real](docs/TRY_IT.md) | a published test server, driven by your own client |
