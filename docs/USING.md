@@ -306,6 +306,87 @@ of how many were read, so a bounded answer never passes for a complete one.
 `stats` reports and does not gate. It writes nothing, touches no baseline, opens
 no socket, and exits 0 whenever the walk succeeded.
 
+## See what each client actually sends
+
+The tables that say which client supports what are written from documentation.
+`clients` is read from traffic, so a client that documents elicitation and never
+answers one, or that sends trace context nobody wrote down, shows up as what it
+did.
+
+```bash
+mcpsnoop clients
+mcpsnoop clients --since 7d --label my-server
+mcpsnoop clients --format markdown claude.jsonl codex.jsonl > CLIENTS.md
+```
+
+```
+read 2 named logs, 2 sessions with client traffic
+
+oldie 0.9
+  sessions                 1 (stdio)
+  revision                 2025-11-25
+  opens with               initialize
+  names itself             in initialize
+  declares                 elicitation, roots, sampling
+  lists                    tools/list ×1
+  re-fetches inside ttlMs  none
+  trace context            0 of 4 requests
+  progress tokens          0 of 1 tool calls
+  multi round-trip         not exercised
+  elicitation answers      decline 1
+  server requests          elicitation/create answered ×1, roots/list error -32601 ×1
+  cancellations            none
+  deprecated in use        logging ×1
+  protocol warnings        none
+
+probe 1.4.0
+  sessions                 1 (stdio)
+  revision                 2026-07-28
+  opens with               server/discover, then stateless
+  names itself             on 5 of 5 requests
+  declares                 elicitation (form, url)
+  lists                    tools/list ×2
+  re-fetches inside ttlMs  1
+  trace context            4 of 5 requests
+  progress tokens          1 of 2 tool calls
+  multi round-trip         1 input_required, 1 retried
+  elicitation answers      accept 1
+  server requests          none
+  cancellations            none
+  deprecated in use        none
+  protocol warnings        none
+```
+
+Sessions are grouped by the `clientInfo` each client sent, name and version, so
+two versions of one client get two blocks. Under 2025-11-25 that name arrives in
+`initialize`, and under 2026-07-28 a client SHOULD put it in the `_meta` of every
+request, which is what `names itself` counts. A client that never named itself is
+reported as unidentified rather than guessed at.
+
+`opens with` tells the two handshakes apart. A 2026-07-28 client sends its
+version and capabilities on each request and may probe with `server/discover`
+first, and one that probes and then sends `initialize` fell back to an older
+server, the way the specification describes for stdio. `multi round-trip` counts
+the `input_required` answers the server gave and the retries that continued
+them, with any retry whose `requestState` came back changed, missing or invented.
+`server requests` is the older channel, where the server asked through a request
+of its own and the client answered it or refused.
+
+`trace context` counts requests carrying a W3C `traceparent` in `_meta`, which is
+what lets a client's own spans and mcpsnoop's join one trace. `re-fetches inside
+ttlMs` counts list and read requests repeated inside the freshness window the
+server declared, so a client ignoring the caching hints is visible. `deprecated
+in use` names features 2026-07-28 deprecated and the client still exercised.
+
+With no arguments it walks the sessions directory the way `stats` does, with the
+same `--since`, `--label` and `--limit`. Name logs to read exactly those, which
+is how a published comparison is built from captures kept for the purpose, and a
+named log that cannot be read is an error rather than a skip. `--format
+markdown` prints one table with a column per client, and every value in it came
+off the wire, so a pipe or an escape sequence in a client's name is quoted rather
+than rendered. `clients` reports and does not gate, and exits 0 whenever the read
+succeeded.
+
 ## See which servers have actually run here
 
 The finding people keep repeating about Shadow MCP is that organisations
