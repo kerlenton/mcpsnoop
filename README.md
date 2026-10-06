@@ -181,7 +181,7 @@ completion and the install path for your OS.
 | `mcpsnoop --metrics-listen <addr>` | run a headless hub and expose live Prometheus metrics |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, har, or otlp |
-| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, hung calls, late results, or a latency budget |
+| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, hung calls, late results, tool drift, annotations that loosened or say nothing, or a latency budget |
 | `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |

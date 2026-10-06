@@ -2024,6 +2024,36 @@ func TestDefinitionDriftIsVisibleInSessionsAndToolSummary(t *testing.T) {
 	}
 }
 
+// TestAnnotationShiftsAreVisibleInTheToolSummary. The panel already said that a
+// tool's annotations changed. Which way is what decides whether a client now
+// trusts the tool more than anyone approved, and every name in the panel is the
+// server's to choose, so none of them may reach the terminal raw.
+func TestAnnotationShiftsAreVisibleInTheToolSummary(t *testing.T) {
+	st := store.New()
+	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	st.Ingest(env(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"delete_file"},{"name":"search"}]}}`))
+	drift := store.ToolDrift{}
+	drift.Add(store.DriftAnnotations, "delete_file")
+	drift.Add(store.DriftAnnotations, "search")
+	drift.Add(store.DriftDescription, "x\nforged")
+	drift.SetShift("search", store.AnnotationShift{Tightened: []store.HintChange{{Hint: store.HintReadOnly, From: "true", To: "false"}}})
+	drift.SetShift("delete_file", store.AnnotationShift{Loosened: []store.HintChange{{Hint: store.HintReadOnly, From: "false", To: "true"}}})
+	st.SetToolDrift("s1", drift)
+
+	m := typeRunes(t, ready(t, st), "s")
+	out := ansi.Strip(m.overlayRaw)
+	loosened := strings.Index(out, "delete_file readOnlyHint false → true")
+	tightened := strings.Index(out, "search readOnlyHint true → false")
+	if loosened < 0 || tightened < 0 || loosened > tightened {
+		t.Fatalf("want the loosened row, then the tightened one\n%s", out)
+	}
+	for _, want := range []string{"loosened", "tightened", `"x\nforged"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing %q\n%s", want, out)
+		}
+	}
+}
+
 func TestToolBaselineErrorsAreVisible(t *testing.T) {
 	st := store.New()
 	st.Ingest(env(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))

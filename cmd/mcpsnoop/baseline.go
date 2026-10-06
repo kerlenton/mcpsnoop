@@ -8,8 +8,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kerlenton/mcpsnoop/internal/paths"
+	"github.com/kerlenton/mcpsnoop/internal/sessiondiff"
 	"github.com/kerlenton/mcpsnoop/internal/store"
 	"github.com/kerlenton/mcpsnoop/internal/toolbaseline"
+	"github.com/kerlenton/mcpsnoop/internal/wiretext"
 )
 
 // resolveBaselineDir returns the tool-baseline directory to use: an explicit
@@ -99,16 +101,39 @@ func writeToolDrift(w io.Writer, report store.ToolDrift) {
 	// then go unprinted here, leaving a failing run with nothing to act on.
 	for _, kind := range store.ToolDriftKinds {
 		if names := report.Names(kind); len(names) > 0 {
-			fmt.Fprintf(w, "  %s: %s\n", driftLabel(kind), strings.Join(names, ", "))
+			fmt.Fprintf(w, "  %s: %s\n", driftLabel(kind), joinWireNames(names))
 		}
 	}
+	// The writer only fails when w does, and every other line here ignores that
+	// the same way.
+	_ = sessiondiff.WriteAnnotationShifts(w, report)
+}
+
+// joinWireNames joins tool names for a report line. Every name came from the
+// server, so each one goes through wiretext.OneLine before it reaches a terminal
+// or a CI log, the way inventory and stats already treat them.
+func joinWireNames(names []string) string {
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = wiretext.OneLine(name)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func writeSchemaFindings(w io.Writer, report store.SchemaReport) {
 	fmt.Fprintln(w, "schema findings:")
 	for _, kind := range store.ObservationalSchemaKinds {
 		if names := report.Names(kind); len(names) > 0 {
-			fmt.Fprintf(w, "  %s: %s\n", kind, strings.Join(names, ", "))
+			fmt.Fprintf(w, "  %s: %s\n", kind, joinWireNames(names))
+		}
+	}
+}
+
+func writeAnnotationFindings(w io.Writer, report store.AnnotationReport) {
+	fmt.Fprintln(w, "annotation findings:")
+	for _, kind := range store.ObservationalAnnotationKinds {
+		if names := report.Names(kind); len(names) > 0 {
+			fmt.Fprintf(w, "  %s: %s\n", kind, joinWireNames(names))
 		}
 	}
 }

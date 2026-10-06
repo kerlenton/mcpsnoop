@@ -5,7 +5,7 @@
 #
 # Every client gets the same server and, if it is driven by a model, the same
 # prompt in scenario.md. The capture lands in capture-dir/<client>.jsonl, and
-# `mcpsnoop clients` turns a directory of them into the comparison.
+# `mcpsnoop clients capture-dir/*.jsonl` turns them into the comparison.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

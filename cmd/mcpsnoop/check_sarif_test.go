@@ -53,8 +53,8 @@ func TestCheckSARIFCleanSessionDeclaresEveryRuleAndNoResults(t *testing.T) {
 	// closes.
 	want := []string{
 		"mcpsnoop/error", "mcpsnoop/invalid", "mcpsnoop/warn", "mcpsnoop/mismatch",
-		"mcpsnoop/pending", "mcpsnoop/late-result", "mcpsnoop/drift", "mcpsnoop/deprecated",
-		"mcpsnoop/incomplete", "mcpsnoop/schema",
+		"mcpsnoop/pending", "mcpsnoop/late-result", "mcpsnoop/drift", "mcpsnoop/loosened",
+		"mcpsnoop/deprecated", "mcpsnoop/incomplete", "mcpsnoop/schema", "mcpsnoop/annotations",
 		"mcpsnoop/assertion", "mcpsnoop/report-truncated",
 	}
 	if len(driver.Rules) != len(want) {
@@ -349,9 +349,11 @@ func TestCheckSARIFReportsAssertionFailures(t *testing.T) {
 func TestCheckSARIFFilesNoAlertForACleanRunThatRecordedABaseline(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	// Fully annotated, so the baseline it records is the only thing this run could
+	// file.
 	log := encodeCheckLog(t,
 		checkEnvelope(1, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
-		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","inputSchema":{"type":"object"}}]}}`),
+		checkEnvelope(2, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}]}}`),
 	)
 
 	code, stdout, _ := executeCheck(t, []string{"--format", "sarif", "--baseline", dir, "-"}, log)
@@ -714,9 +716,9 @@ func TestCheckSARIFReportsEverySignalTheGateCounts(t *testing.T) {
 	_, sarifOut, _ := executeCheck(t, []string{"--format", "sarif", "-"}, log)
 	report := decodeCheckSARIF(t, sarifOut)
 
-	// drift needs a baseline and incomplete needs a dropped frame, neither of
-	// which belongs in one hand-written capture. Both are covered on their own.
-	skip := map[checkSignal]bool{checkDrift: true, checkIncomplete: true}
+	// drift and loosened need a baseline and incomplete needs a dropped frame,
+	// none of which belongs in one hand-written capture. Each is covered on its own.
+	skip := map[checkSignal]bool{checkDrift: true, checkLoosened: true, checkIncomplete: true}
 	counted := 0
 	for _, signal := range checkSignalOrder {
 		if skip[signal] {
@@ -750,6 +752,8 @@ func checkTextCountField(signal checkSignal) string {
 		return "missing_frames"
 	case checkSchema:
 		return "schema_findings"
+	case checkAnnotations:
+		return "annotation_findings"
 	case checkError:
 		return "errors"
 	}

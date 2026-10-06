@@ -150,15 +150,15 @@ if ((data.elicitations || []).length) {
   block.appendChild(list);
   document.getElementById("summary").after(block);
 }
-if (data.summary?.definitions?.per_tool?.length) {
-  const withFindings = data.summary.definitions.per_tool.filter(t => (t.findings || []).length);
+for (const [title, key] of [["Schema findings", "findings"], ["Annotation findings", "annotation_findings"]]) {
+  const withFindings = (data.summary?.definitions?.per_tool || []).filter(t => (t[key] || []).length);
   if (withFindings.length) {
     const block = document.createElement("div");
-    block.innerHTML = "<div class=\"section-title\">Schema findings</div>";
+    block.innerHTML = "<div class=\"section-title\">" + title + "</div>";
     const list = document.createElement("div");
     list.className = "grid";
     withFindings.forEach(t => {
-      list.innerHTML += "<div class=\"pill\">" + esc(t.name) + "<br><b>" + esc((t.findings || []).join(", ")) + "</b></div>";
+      list.innerHTML += "<div class=\"pill\">" + esc(t.name) + "<br><b>" + esc(t[key].join(", ")) + "</b></div>";
     });
     block.appendChild(list);
     document.querySelector("main").insertBefore(block, document.getElementById("events"));

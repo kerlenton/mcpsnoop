@@ -14,6 +14,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
 	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 	"github.com/kerlenton/mcpsnoop/internal/store"
+	"github.com/kerlenton/mcpsnoop/internal/wiretext"
 )
 
 const (
@@ -193,10 +194,13 @@ func WriteText(w io.Writer, report Report) error {
 		// added later cannot be counted here and then never printed.
 		for _, kind := range store.ToolDriftKinds {
 			for _, name := range report.Tools.Names(kind) {
-				if _, err := fmt.Fprintf(w, "  %s: %s\n", driftLabel(kind), name); err != nil {
+				if _, err := fmt.Fprintf(w, "  %s: %s\n", driftLabel(kind), wiretext.OneLine(name)); err != nil {
 					return err
 				}
 			}
+		}
+		if err := WriteAnnotationShifts(w, report.Tools); err != nil {
+			return err
 		}
 	}
 	if len(report.CallChanges) > 0 {
@@ -205,7 +209,7 @@ func WriteText(w io.Writer, report Report) error {
 		}
 		for _, change := range report.CallChanges {
 			if _, err := fmt.Fprintf(w, "  status changed: %s %s %s -> %s\n",
-				change.ToolName, change.Arguments, change.Before, change.After); err != nil {
+				wiretext.OneLine(change.ToolName), wiretext.OneLine(change.Arguments), change.Before, change.After); err != nil {
 				return err
 			}
 		}
@@ -220,8 +224,36 @@ func WriteText(w io.Writer, report Report) error {
 				direction = "faster"
 			}
 			if _, err := fmt.Fprintf(w, "  %s: %s %s %s -> %s\n",
-				direction, change.ToolName, change.Arguments, change.Before, change.After); err != nil {
+				direction, wiretext.OneLine(change.ToolName), wiretext.OneLine(change.Arguments), change.Before, change.After); err != nil {
 				return err
+			}
+		}
+	}
+	return nil
+}
+
+// WriteAnnotationShifts spells out which way each changed tool's annotations
+// moved, loosening first. "annotations changed" says that something did, and
+// whether a client now trusts the tool more than anyone approved is the part
+// worth reading. Shared by diff and by check, so the two cannot describe the
+// same change two ways.
+func WriteAnnotationShifts(w io.Writer, drift store.ToolDrift) error {
+	names := make([]string, 0, len(drift.Shifts))
+	for name := range drift.Shifts {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, direction := range []string{"loosened", "tightened"} {
+		for _, name := range names {
+			changes := drift.Shifts[name].Tightened
+			if direction == "loosened" {
+				changes = drift.Shifts[name].Loosened
+			}
+			for _, c := range changes {
+				if _, err := fmt.Fprintf(w, "  annotations %s, %s: %s %s → %s\n", direction,
+					wiretext.OneLine(name), c.Hint, wiretext.OneLine(c.From), wiretext.OneLine(c.To)); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -270,7 +302,13 @@ func CompareToolDefinitions(before, after []ToolDefinition, skip ...store.ToolDr
 			return comparableSchema(trusted.OutputSchema) != comparableSchema(observed.OutputSchema)
 		})
 		compare(store.DriftAnnotations, name, func() bool {
-			return comparableAnnotations(trusted.Annotations) != comparableAnnotations(observed.Annotations)
+			if comparableAnnotations(trusted.Annotations) == comparableAnnotations(observed.Annotations) {
+				return false
+			}
+			// Which way it moved is what decides whether a client starts trusting the
+			// tool more than anyone approved, so it rides along with the kind.
+			drift.SetShift(name, store.CompareToolHints(trusted.Annotations, observed.Annotations))
+			return true
 		})
 		compare(store.DriftIcons, name, func() bool {
 			// Order-sensitive on purpose. A consumer that takes the first usable

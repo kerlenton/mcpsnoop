@@ -14,6 +14,7 @@ import (
 
 	"github.com/kerlenton/mcpsnoop/internal/exporter"
 	"github.com/kerlenton/mcpsnoop/internal/store"
+	"github.com/kerlenton/mcpsnoop/internal/wiretext"
 )
 
 const (
@@ -217,6 +218,13 @@ func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 			fmt.Sprintf("session %s: %s", sessionID, why),
 			"baseline-unverified", 0)
 	}
+	if why := summary.loosenedUnverified(); why != "" && b.selected[checkLoosened] {
+		// The same reasoning as drift. The gate counts an unverified baseline for a
+		// run that asked about loosening, so the report has to carry a result for it.
+		b.add(sessionID, sarifRuleID(checkLoosened), b.level(checkLoosened),
+			fmt.Sprintf("session %s: %s", sessionID, why),
+			"baseline-unverified", 0)
+	}
 
 	var toolListSeq uint64
 	pending := make(map[string]bool)
@@ -291,6 +299,21 @@ func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 		}
 	}
 
+	// One result per loosened tool, the unit the gate counts, with every hint that
+	// moved spelled out, so the alert says what changed rather than that something did.
+	loosenedLevel := b.level(checkLoosened)
+	for _, name := range summary.drift.LoosenedNames() {
+		var moved []string
+		for _, c := range summary.drift.Shifts[name].Loosened {
+			// A malformed value is quoted from the wire, so it is escaped here the way
+			// every text report escapes it.
+			moved = append(moved, fmt.Sprintf("%s %s → %s", c.Hint, wiretext.OneLine(c.From), wiretext.OneLine(c.To)))
+		}
+		b.add(sessionID, sarifRuleID(checkLoosened), loosenedLevel,
+			fmt.Sprintf("session %s: tool %q annotations loosened since the baseline, %s", sessionID, name, strings.Join(moved, ", ")),
+			"loosened/"+name, toolListSeq)
+	}
+
 	// Looped over store.ObservationalSchemaKinds for the reason the drift loop
 	// above is looped over store.ToolDriftKinds: a kind the gate counts must not
 	// go unreported here. Anchored at the tools/list response, since that is the
@@ -300,6 +323,18 @@ func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 		for _, name := range summary.schema.Names(kind) {
 			b.add(sessionID, sarifRuleID(checkSchema), schemaLevel,
 				fmt.Sprintf("session %s: tool %q schema uses %s", sessionID, name, kind),
+				string(kind)+"/"+name, toolListSeq)
+		}
+	}
+
+	// Looped over store.ObservationalAnnotationKinds for the same reason, and
+	// anchored at the tools/list response that advertised the annotations. The
+	// violation is not among them, since it is already a warning on that frame.
+	annotationsLevel := b.level(checkAnnotations)
+	for _, kind := range store.ObservationalAnnotationKinds {
+		for _, name := range summary.annotations.Names(kind) {
+			b.add(sessionID, sarifRuleID(checkAnnotations), annotationsLevel,
+				fmt.Sprintf("session %s: tool %q %s", sessionID, name, annotationFindingPhrase(kind)),
 				string(kind)+"/"+name, toolListSeq)
 		}
 	}
@@ -450,6 +485,14 @@ func checkSARIFSignalRule(signal checkSignal) (name, short, full, help string) {
 		return "SchemaFinding", "An advertised tool schema uses something that travels badly",
 			"A tool's inputSchema or outputSchema declares a dialect other than the 2020-12 the revision defaults to, or uses a composition keyword, a reference, or a property with no way of saying what it accepts. None of it is a violation, which is why it is not in the default gate; each one is a place two clients can read the same schema differently.",
 			"The result names the tool and what it uses. Nothing here is wrong on the wire, so treat it as portability rather than a bug: a schema that only your own client has to read can keep all of it. An inputSchema with no object root is the one real violation and is reported as a warning on the tools/list frame instead."
+	case checkLoosened:
+		return "AnnotationsLoosened", "A tool's annotations now claim less risk than the baseline trusted",
+			"Since the baseline was approved, a tool turned read-only, stopped calling itself destructive, became safe to retry, narrowed itself to a closed world, or sent a hint that is no longer a boolean. Clients act on these hints. VS Code skips its confirmation for a read-only tool, Codex in its default approval mode runs one without asking, and Claude Code runs it beside other calls, so a loosened hint can switch off a check nobody agreed to switch off.",
+			"The result names the tool and each hint with its old and new value. If the server really changed what the tool does, review it and run mcpsnoop baseline --accept. If the tool still does what it did, the server is now understating it, and the hint is what to fix. A change that only adds risk is reported by drift and never here."
+	case checkAnnotations:
+		return "AnnotationFinding", "A tool declares its behaviour badly or not at all",
+			"A tool carries no behaviour hint, leaves out one of readOnlyHint, destructiveHint and openWorldHint, or claims to be read-only and destructive at once. None of it is a protocol violation, which is why it is not in the default gate. Each one changes what clients do, since a tool without hints is taken to write, to destroy and to reach the open world. A hint of the wrong type is a violation, and is reported as a warning instead.",
+			"The result names the tool and what it is missing or gets wrong. Declaring every hint as a boolean, true or false, is what lets clients skip confirmations for tools that only read and run them side by side, and ChatGPT's app review requires readOnlyHint, destructiveHint and openWorldHint explicitly."
 	case checkIncomplete:
 		return "IncompleteCapture", "Frames were dropped, so the capture understates the session",
 			"Envelopes were dropped upstream, inferred from gaps in the per-session sequence numbers. Every other signal is then a floor rather than a total, because the dropped frames were never judged.",
@@ -598,4 +641,18 @@ func sarifArtifactURI(path string) string {
 // legitimate "..data" directory.
 func sarifEscapes(rel string) bool {
 	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// annotationFindingPhrase is how a result describes one annotation finding,
+// written to follow the tool's name.
+func annotationFindingPhrase(kind store.AnnotationFindingKind) string {
+	switch kind {
+	case store.AnnotationsMissing:
+		return "declares no behaviour hint, so clients take it to write, to destroy and to reach the open world"
+	case store.AnnotationsImplicit:
+		return "leaves one of readOnlyHint, destructiveHint and openWorldHint to its default"
+	case store.AnnotationsContradictory:
+		return "claims readOnlyHint and destructiveHint at once, which clients resolve differently"
+	}
+	return string(kind)
 }

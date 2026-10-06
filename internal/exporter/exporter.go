@@ -11,15 +11,16 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
+	"github.com/kerlenton/mcpsnoop/internal/wiretext"
 )
 
 type Format string
@@ -163,6 +164,9 @@ type ToolCostExport struct {
 	DescriptionBytes int      `json:"description_bytes"`
 	SchemaBytes      int      `json:"schema_bytes"`
 	Findings         []string `json:"findings,omitempty"`
+	// AnnotationFindings names how the tool declares its behaviour, by the kinds
+	// mcpsnoop check reports, malformedAnnotations included.
+	AnnotationFindings []string `json:"annotation_findings,omitempty"`
 }
 
 type ToolStatsExport struct {
@@ -783,12 +787,17 @@ func exportToolListCost(cost store.ToolListCost) *ToolListCostExport {
 		for _, kind := range tool.FindingKinds {
 			findings = append(findings, string(kind))
 		}
+		var annotations []string
+		for _, kind := range tool.AnnotationKinds {
+			annotations = append(annotations, string(kind))
+		}
 		out.PerTool = append(out.PerTool, ToolCostExport{
-			Name:             tool.Name,
-			Bytes:            tool.Bytes,
-			DescriptionBytes: tool.DescriptionBytes,
-			SchemaBytes:      tool.SchemaBytes,
-			Findings:         findings,
+			Name:               tool.Name,
+			Bytes:              tool.Bytes,
+			DescriptionBytes:   tool.DescriptionBytes,
+			SchemaBytes:        tool.SchemaBytes,
+			Findings:           findings,
+			AnnotationFindings: annotations,
 		})
 	}
 	return out
@@ -1699,20 +1708,20 @@ func writeText(w io.Writer, data SessionExport) error {
 					who = in.Method + " " + in.ToolName
 				}
 				if _, err := fmt.Fprintf(w, "  %s: %d round trips, %s total, %s server, %s client\n",
-					oneLine(who), in.RoundTrips,
+					wiretext.OneLine(who), in.RoundTrips,
 					msDuration(in.DurationMS), msDuration(in.ServerTimeMS), msDuration(in.ClientTurnaroundMS)); err != nil {
 					return err
 				}
 				for i, hop := range in.Hops {
 					asked := ""
 					if len(hop.Asked) > 0 {
-						asked = "  asked " + oneLine(strings.Join(hop.Asked, ", "))
+						asked = "  asked " + wiretext.OneLine(strings.Join(hop.Asked, ", "))
 					}
 					state := ""
 					if hop.Pending {
 						state = "  (no answer)"
 					}
-					if _, err := fmt.Fprintf(w, "    hop %d id=%s  %s server", i+1, oneLine(hop.RequestID), msDuration(hop.ServerTimeMS)); err != nil {
+					if _, err := fmt.Fprintf(w, "    hop %d id=%s  %s server", i+1, wiretext.OneLine(hop.RequestID), msDuration(hop.ServerTimeMS)); err != nil {
 						return err
 					}
 					if hop.ClientTurnaroundMS > 0 {
@@ -1747,7 +1756,7 @@ func writeText(w io.Writer, data SessionExport) error {
 			// The message is what the server wrote for a human to read, so it is on
 			// every row rather than standing in for the fields when there are none.
 			if e.Message != "" {
-				if _, err := fmt.Fprintf(w, "    %s\n", oneLine(e.Message)); err != nil {
+				if _, err := fmt.Fprintf(w, "    %s\n", wiretext.OneLine(e.Message)); err != nil {
 					return err
 				}
 			}
@@ -1761,27 +1770,15 @@ func writeText(w io.Writer, data SessionExport) error {
 			return err
 		}
 	}
-	if data.Summary.Definitions != nil && len(data.Summary.Definitions.PerTool) > 0 {
-		hasFindings := false
-		for _, tool := range data.Summary.Definitions.PerTool {
-			if len(tool.Findings) > 0 {
-				hasFindings = true
-				break
-			}
-		}
-		if hasFindings {
-			if _, err := fmt.Fprintln(w, "schema findings:"); err != nil {
-				return err
-			}
-			for _, tool := range data.Summary.Definitions.PerTool {
-				if len(tool.Findings) == 0 {
-					continue
-				}
-				if _, err := fmt.Fprintf(w, "  %s: %s\n", tool.Name, strings.Join(tool.Findings, ", ")); err != nil {
-					return err
-				}
-			}
-			if _, err := fmt.Fprintln(w); err != nil {
+	if data.Summary.Definitions != nil {
+		for _, section := range []struct {
+			title string
+			kinds func(ToolCostExport) []string
+		}{
+			{"schema findings:", func(tool ToolCostExport) []string { return tool.Findings }},
+			{"annotation findings:", func(tool ToolCostExport) []string { return tool.AnnotationFindings }},
+		} {
+			if err := writeToolFindings(w, data.Summary.Definitions.PerTool, section.title, section.kinds); err != nil {
 				return err
 			}
 		}
@@ -1940,7 +1937,7 @@ func elicitationLine(e ElicitationExport) string {
 			answer += fmt.Sprintf(" after %s", time.Duration(*e.ElapsedMS*float64(time.Millisecond)).Round(time.Millisecond))
 		}
 	}
-	return fmt.Sprintf("%s [%s] %s: %s", oneLine(who), oneLine(e.Mode), oneLine(e.Key), answer)
+	return fmt.Sprintf("%s [%s] %s: %s", wiretext.OneLine(who), wiretext.OneLine(e.Mode), wiretext.OneLine(e.Key), answer)
 }
 
 // elicitationDetail is what was asked for. A form names its fields and their
@@ -1949,9 +1946,9 @@ func elicitationLine(e ElicitationExport) string {
 func elicitationDetail(e ElicitationExport) string {
 	switch {
 	case e.URL != "":
-		out := oneLine(e.URL)
+		out := wiretext.OneLine(e.URL)
 		if e.Host != "" {
-			out += " (host " + oneLine(e.Host) + ")"
+			out += " (host " + wiretext.OneLine(e.Host) + ")"
 		}
 		return out
 	case len(e.Fields) > 0:
@@ -1961,7 +1958,7 @@ func elicitationDetail(e ElicitationExport) string {
 			if typ == "" {
 				typ = "unknown"
 			}
-			parts = append(parts, oneLine(f.Name)+" "+oneLine(typ))
+			parts = append(parts, wiretext.OneLine(f.Name)+" "+wiretext.OneLine(typ))
 		}
 		return strings.Join(parts, ", ")
 	default:
@@ -1969,18 +1966,25 @@ func elicitationDetail(e ElicitationExport) string {
 	}
 }
 
-// oneLine keeps a value the wire supplied from ending the line it is printed on.
-//
-// A key, a message, a field name and a url are all written by the server, and a
-// newline in one of them closes the line it lands in, so the lines after it read
-// as more ledger rows in a document somebody diffs. Quoting rather than dropping
-// keeps the value recoverable, and matches what inventory and stats already do
-// with the values they print.
-func oneLine(s string) string {
-	if strings.ContainsFunc(s, unicode.IsControl) {
-		return strconv.Quote(s)
+// writeToolFindings writes one per-tool findings section of the text export, or
+// nothing when no tool has any. A tool name came from the server, so it goes
+// through wiretext.OneLine like every other wire value printed here.
+func writeToolFindings(w io.Writer, tools []ToolCostExport, title string, kinds func(ToolCostExport) []string) error {
+	if !slices.ContainsFunc(tools, func(tool ToolCostExport) bool { return len(kinds(tool)) > 0 }) {
+		return nil
 	}
-	return s
+	if _, err := fmt.Fprintln(w, title); err != nil {
+		return err
+	}
+	for _, tool := range tools {
+		if found := kinds(tool); len(found) > 0 {
+			if _, err := fmt.Fprintf(w, "  %s: %s\n", wiretext.OneLine(tool.Name), strings.Join(found, ", ")); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := fmt.Fprintln(w)
+	return err
 }
 
 // msDuration renders a millisecond figure the way the rest of the text export

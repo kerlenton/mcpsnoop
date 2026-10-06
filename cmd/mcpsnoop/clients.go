@@ -14,6 +14,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/hub"
 	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
+	"github.com/kerlenton/mcpsnoop/internal/wiretext"
 )
 
 func newClientsCmd() *cobra.Command {
@@ -199,12 +200,12 @@ func writeClientsText(w io.Writer, rep clientsReport) error {
 	}
 	for i, p := range rep.Clients {
 		// Every value below came off the wire, from a client name to a warning, so
-		// each goes through oneLine before it reaches a terminal.
-		if _, err := fmt.Fprintf(w, "\n%s\n", oneLine(p.Name())); err != nil {
+		// each goes through wiretext.OneLine before it reaches a terminal.
+		if _, err := fmt.Fprintf(w, "\n%s\n", wiretext.OneLine(p.Name())); err != nil {
 			return err
 		}
 		for _, r := range rows {
-			if _, err := fmt.Fprintf(w, "  %s  %s\n", pad(r.Label, labelW), oneLine(r.Cells[i])); err != nil {
+			if _, err := fmt.Fprintf(w, "  %s  %s\n", pad(r.Label, labelW), wiretext.OneLine(r.Cells[i])); err != nil {
 				return err
 			}
 		}
@@ -242,8 +243,8 @@ func writeClientsMarkdown(w io.Writer, rep clientsReport) error {
 }
 
 // markdownCell makes a wire value safe inside a table cell. A pipe would end the
-// cell and a newline the row, and the quoting oneLine does keeps an escape
+// cell and a newline the row, and the quoting wiretext.OneLine does keeps an escape
 // sequence from reaching whatever renders the page.
 func markdownCell(s string) string {
-	return strings.ReplaceAll(oneLine(s), "|", `\|`)
+	return strings.ReplaceAll(wiretext.OneLine(s), "|", `\|`)
 }
