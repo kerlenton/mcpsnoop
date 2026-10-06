@@ -23,7 +23,7 @@ func TestCheckFailsOnSelectedSessionSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 late_results=0 deprecated=0 missing_frames=0 schema_findings=0\ncheck failed: error,invalid,warn\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 late_results=0 deprecated=0 missing_frames=0 schema_findings=0 annotation_findings=0\ncheck failed: error,invalid,warn\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -68,7 +68,7 @@ func TestCheckFailsOnlyOnSelectedSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 because the fixture contains an invalid frame", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 late_results=0 deprecated=0 missing_frames=0 schema_findings=0\ncheck failed: invalid\n" {
+	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 late_results=0 deprecated=0 missing_frames=0 schema_findings=0 annotation_findings=0\ncheck failed: invalid\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -83,7 +83,7 @@ func TestCheckIgnoresUnselectedSignals(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=2 invalid=0 warnings=0 mismatches=0 pending=0 late_results=0 deprecated=0 missing_frames=0 schema_findings=0\ncheck passed\n" {
+	if stdout != "session s1: errors=2 invalid=0 warnings=0 mismatches=0 pending=0 late_results=0 deprecated=0 missing_frames=0 schema_findings=0 annotation_findings=0\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -102,7 +102,7 @@ func TestCheckPassesCleanSessionFromStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0 late_results=0 deprecated=0 missing_frames=0 schema_findings=0\nrecorded first-seen tool baseline (trusted, not verified)\ncheck passed\n" {
+	if stdout != "session s1: errors=0 invalid=0 warnings=0 mismatches=0 pending=0 late_results=0 deprecated=0 missing_frames=0 schema_findings=0 annotation_findings=0\nrecorded first-seen tool baseline (trusted, not verified)\ncheck passed\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -121,8 +121,8 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
 		t.Fatalf("exit = %d, want 1", code)
 	}
 	const want = `<?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="mcpsnoop check" tests="11" failures="3" errors="0" skipped="0" time="0">
-  <testsuite name="s1" tests="11" failures="3" errors="0" skipped="0" time="0">
+<testsuites name="mcpsnoop check" tests="13" failures="3" errors="0" skipped="0" time="0">
+  <testsuite name="s1" tests="13" failures="3" errors="0" skipped="0" time="0">
     <testcase classname="mcpsnoop.check" name="s1/error" time="0">
       <failure message="session s1 has 2 errors" type="mcpsnoop.check.error">session s1 has 2 errors</failure>
     </testcase>
@@ -136,9 +136,11 @@ func TestCheckWritesJUnitGolden(t *testing.T) {
     <testcase classname="mcpsnoop.check" name="s1/pending" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/late-result" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/drift" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/loosened" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/deprecated" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/incomplete" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/schema" time="0"></testcase>
+    <testcase classname="mcpsnoop.check" name="s1/annotations" time="0"></testcase>
     <testcase classname="mcpsnoop.check" name="s1/assertions" time="0"></testcase>
   </testsuite>
 </testsuites>
@@ -159,7 +161,7 @@ func TestCheckJUnitHonorsFailOn(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 because errors are not selected", code)
 	}
-	for _, want := range []string{`tests="11"`, `failures="0"`, `name="s1/error"`} {
+	for _, want := range []string{`tests="13"`, `failures="0"`, `name="s1/error"`} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q\n%s", want, stdout)
 		}

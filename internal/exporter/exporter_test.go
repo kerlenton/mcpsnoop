@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -2103,5 +2104,71 @@ func TestHopsCarryWhetherAnAnswerWasReadable(t *testing.T) {
 				t.Fatalf("hop %s is marked unreadable in a batch read", h.RequestID)
 			}
 		}
+	}
+}
+
+// TestExportCarriesAnnotationFindingsPerTool. The export is where the findings
+// live once the run is over, so each tool carries the kinds check reports for
+// it, the violation included, next to its schema findings.
+func TestExportCarriesAnnotationFindingsPerTool(t *testing.T) {
+	st := store.New()
+	ingest(t, st,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"tools":[`+
+			`{"name":"search","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":true}},`+
+			`{"name":"bare","inputSchema":{"type":"object"}},`+
+			`{"name":"odd","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":"true"}}`+
+			`]}}`,
+	)
+	out, err := Build(st, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string][]string)
+	for _, tool := range out.Summary.Definitions.PerTool {
+		got[tool.Name] = tool.AnnotationFindings
+	}
+	want := map[string][]string{
+		"search": nil,
+		"bare":   {"unannotated"},
+		"odd":    {"malformedAnnotations", "implicitHints"},
+	}
+	for name, kinds := range want {
+		if !slices.Equal(got[name], kinds) {
+			t.Errorf("%s annotation_findings = %v, want %v", name, got[name], kinds)
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := Write(&buf, out, Options{Format: FormatJSON}); err != nil {
+		t.Fatal(err)
+	}
+	// omitempty, so a tool with nothing to say carries no key rather than null.
+	if !strings.Contains(buf.String(), `"annotation_findings": [`) || strings.Count(buf.String(), `"annotation_findings"`) != 2 {
+		t.Fatalf("json export:\n%s", buf.String())
+	}
+}
+
+// TestTextExportFindingsCannotForgeRows. A tool name is the server's to choose,
+// and printing it raw let a name carrying a newline start a row of its own under
+// either findings section.
+func TestTextExportFindingsCannotForgeRows(t *testing.T) {
+	data := SessionExport{Summary: ToolSummaryExport{Definitions: &ToolListCostExport{PerTool: []ToolCostExport{{
+		Name:               "x\n  forged: oneOf",
+		Findings:           []string{"oneOf"},
+		AnnotationFindings: []string{"unannotated"},
+	}}}}}
+	var buf bytes.Buffer
+	if err := Write(&buf, data, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"schema findings:\n", "annotation findings:\n", `"x\n  forged: oneOf": unannotated`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("text export missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\n  forged") {
+		t.Fatalf("a forged row reached the output:\n%s", out)
 	}
 }

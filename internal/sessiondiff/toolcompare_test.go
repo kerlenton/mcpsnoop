@@ -281,3 +281,65 @@ func TestWriteTextPrintsEveryDriftKind(t *testing.T) {
 		}
 	}
 }
+
+// TestDiffSaysWhichWayAnnotationsMoved. diff reaches the comparison through the
+// export rather than the baseline file, so the direction has to survive that path
+// as well, and read the way check prints it.
+func TestDiffSaysWhichWayAnnotationsMoved(t *testing.T) {
+	list := func(annotations string) exporter.SessionExport {
+		return exporter.SessionExport{
+			Session: exporter.SessionSummary{ID: "s"},
+			Calls: []exporter.CallExport{listCall(
+				`{"tools":[{"name":"delete_file","inputSchema":{"type":"object"},"annotations":` + annotations + `}]}`)},
+		}
+	}
+	report := Compare(list(`{"readOnlyHint":false,"destructiveHint":true}`), list(`{"readOnlyHint":true}`), Options{})
+	var buf bytes.Buffer
+	if err := WriteText(&buf, report); err != nil {
+		t.Fatal(err)
+	}
+	const want = "tools:\n  annotations changed: delete_file\n  annotations loosened, delete_file: readOnlyHint false → true\n"
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("diff output:\n%s\nwant it to contain:\n%s", buf.String(), want)
+	}
+}
+
+// TestWriteTextCannotForgeRows. Every name and argument here is the server's or
+// the client's to choose, and printing them raw let a newline start a row of its
+// own and a bidi control draw one tool name as another.
+func TestWriteTextCannotForgeRows(t *testing.T) {
+	var drift store.ToolDrift
+	drift.Add(store.DriftAnnotations, "x\n  removed: search")
+	drift.SetShift("x\n  removed: search", store.AnnotationShift{Loosened: []store.HintChange{{Hint: store.HintReadOnly, From: "false", To: "true"}}})
+	report := Report{BeforeSession: "a", AfterSession: "b", Tools: drift,
+		CallChanges: []CallChange{{ToolName: "admin\U0000202Etxt.exe", Arguments: "{}", Before: "ok", After: "error"}}}
+	var buf bytes.Buffer
+	if err := WriteText(&buf, report); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "\n  removed: search") || strings.ContainsRune(out, '\U0000202E') {
+		t.Fatalf("a wire value reached the output raw:\n%q", out)
+	}
+	if strings.Count(out, `"x\n  removed: search"`) != 2 {
+		t.Fatalf("the name should be quoted on both its lines:\n%s", out)
+	}
+}
+
+// TestAnnotationShiftsLeadWithLoosening. A reader skimming a long drift report
+// should meet the changes that let a client trust a tool more before the ones
+// that make it more careful, whatever order the tools sort in.
+func TestAnnotationShiftsLeadWithLoosening(t *testing.T) {
+	var drift store.ToolDrift
+	drift.SetShift("alpha", store.AnnotationShift{Tightened: []store.HintChange{{Hint: store.HintReadOnly, From: "true", To: "false"}}})
+	drift.SetShift("beta", store.AnnotationShift{Loosened: []store.HintChange{{Hint: store.HintOpenWorld, From: "true (default)", To: "false"}}})
+	var buf bytes.Buffer
+	if err := WriteAnnotationShifts(&buf, drift); err != nil {
+		t.Fatal(err)
+	}
+	const want = "  annotations loosened, beta: openWorldHint true (default) → false\n" +
+		"  annotations tightened, alpha: readOnlyHint true → false\n"
+	if buf.String() != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", buf.String(), want)
+	}
+}

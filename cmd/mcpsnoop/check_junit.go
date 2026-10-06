@@ -104,6 +104,11 @@ func buildCheckJUnit(summaries []checkSummary, selected map[checkSignal]bool, as
 						reason = why
 					}
 				}
+				if signal == checkLoosened && len(summary.drift.LoosenedNames()) == 0 {
+					if why := summary.loosenedUnverified(); why != "" {
+						reason = why
+					}
+				}
 				testcase.Failure = &checkJUnitFailure{
 					Message: reason,
 					Type:    "mcpsnoop.check." + string(signal),
@@ -160,6 +165,10 @@ func checkSignalFailureReason(sessionID string, signal checkSignal, count int) s
 		singular, plural = "dropped frame", "dropped frames"
 	case checkSchema:
 		singular, plural = "schema finding", "schema findings"
+	case checkLoosened:
+		singular, plural = "tool whose annotations loosened since the baseline", "tools whose annotations loosened since the baseline"
+	case checkAnnotations:
+		singular, plural = "annotation finding", "annotation findings"
 	default:
 		singular, plural = "signal", "signals"
 	}

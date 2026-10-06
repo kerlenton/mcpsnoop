@@ -313,6 +313,10 @@ type session struct {
 	// drained the same way as paramHeaderInvalid so a partly paginated listing
 	// still reports the violation on the frame that carried it.
 	schemaRootInvalid []paramHeaderViolation
+	// typeInvalid holds the values of the latest tools/list result whose JSON type
+	// is not the one the specification gives them. Parked and drained the same
+	// way, onto the same frame.
+	typeInvalid []typeViolation
 
 	command []string
 	cwd     string
@@ -634,6 +638,18 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 					`, and 2026-07-28 requires one whose root type is "object"`)
 		}
 		sess.schemaRootInvalid = nil
+		// The same frame, for the same reason and more so. The official SDK clients
+		// reject the whole listing over one value they cannot read as its type, so a
+		// client built on them sees no tool from this server at all. Each field is
+		// held to its type from the revision that introduced it, so the only session
+		// excused is one known to speak an older revision.
+		version := definitionRevision(sess, c)
+		for _, invalid := range sess.typeInvalid {
+			if version == "" || atLeastRevision(version, invalid.from) {
+				ev.warning = appendWarning(ev.warning, invalid.warning())
+			}
+		}
+		sess.typeInvalid = nil
 		if c != nil {
 			hint, cacheWarnings := sess.recordCacheFromResponse(c, msg.Result, e.TS)
 			if !hint.Empty() {
@@ -1588,10 +1604,15 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 	// itself. Decoding straight into a typed slice did neither: it discarded the
 	// whole list on a single bad element and left no handle on what was sent.
 	var r struct {
-		Tools      []json.RawMessage `json:"tools"`
-		NextCursor string            `json:"nextCursor"`
+		Tools []json.RawMessage `json:"tools"`
+		// Raw for the reason the tools are, so a cursor of the wrong type costs the
+		// listing its completeness rather than every tool on the page.
+		NextCursor json.RawMessage `json:"nextCursor"`
 	}
 
+	// Judged before the decode below, which gives up on exactly these, so a
+	// listing no client can read still says why on the frame that carried it.
+	sess.typeInvalid = append(sess.typeInvalid, listingTypeViolations(result)...)
 	if json.Unmarshal(result, &r) != nil {
 		return
 	}
@@ -1605,9 +1626,11 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 
 	var invalidParamHeaderTools []paramHeaderViolation
 	var invalidSchemaRootTools []paramHeaderViolation
-	for _, rawTool := range r.Tools {
+	for i, rawTool := range r.Tools {
 		var tool struct {
-			Name string `json:"name"`
+			// Raw, like Description below, so a name of the wrong type is reported
+			// rather than failing the decode and taking the whole entry with it.
+			Name json.RawMessage `json:"name"`
 			// Kept raw, not decoded to a string, because the cost below has to
 			// measure the bytes the server actually spelled. Re-encoding a decoded
 			// string cannot reproduce them in either direction: it would escape a
@@ -1622,7 +1645,13 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 			Annotations  json.RawMessage `json:"annotations"`
 			Icons        json.RawMessage `json:"icons"`
 		}
-		if json.Unmarshal(rawTool, &tool) != nil || tool.Name == "" {
+		_ = json.Unmarshal(rawTool, &tool)
+		name, bad := entryTypeViolation(rawTool, tool.Name, i)
+		if bad != nil {
+			sess.typeInvalid = append(sess.typeInvalid, *bad)
+			continue
+		}
+		if name == "" {
 			continue
 		}
 		var description string
@@ -1636,12 +1665,12 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 		_ = json.Unmarshal(tool.Description, &description)
 		var title string
 		_ = json.Unmarshal(tool.Title, &title)
-		if _, ok := sess.advertisedSet[tool.Name]; ok {
+		if _, ok := sess.advertisedSet[name]; ok {
 			continue
 		}
 
-		sess.advertisedSet[tool.Name] = struct{}{}
-		sess.advertisedTools = append(sess.advertisedTools, tool.Name)
+		sess.advertisedSet[name] = struct{}{}
+		sess.advertisedTools = append(sess.advertisedTools, name)
 		schema := append(json.RawMessage(nil), tool.InputSchema...)
 		// The validity verdict is reported, not discarded. The spec makes an
 		// x-mcp-header violating its constraints a definition a client MUST reject,
@@ -1658,7 +1687,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 		paramHeaders, violation := mcpParamHeaderBindings(schema)
 		if violation != "" {
 			invalidParamHeaderTools = append(invalidParamHeaderTools,
-				paramHeaderViolation{tool: tool.Name, reason: violation})
+				paramHeaderViolation{tool: name, reason: violation})
 		}
 
 		// Measured from the raw bytes, not gated on the decoded string being
@@ -1676,31 +1705,52 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 			analyzeOutputSchema(tool.OutputSchema, redacted))
 		if reason := schemaRootViolation(schema, redacted); reason != "" {
 			invalidSchemaRootTools = append(invalidSchemaRootTools,
-				paramHeaderViolation{tool: tool.Name, reason: reason})
+				paramHeaderViolation{tool: name, reason: reason})
 		}
+		sess.typeInvalid = append(sess.typeInvalid,
+			definitionTypeViolations(name, tool.Title, tool.Description, tool.Annotations, redacted)...)
 
-		sess.toolDefinitions[tool.Name] = ToolDefinition{
-			Name:         tool.Name,
-			Description:  description,
-			InputSchema:  schema,
-			Title:        title,
-			OutputSchema: append(json.RawMessage(nil), tool.OutputSchema...),
-			Annotations:  append(json.RawMessage(nil), tool.Annotations...),
-			Icons:        append(json.RawMessage(nil), tool.Icons...),
-			Findings:     findings,
-			paramHeaders: paramHeaders,
+		annotationKinds := analyzeAnnotations(tool.Annotations, redacted)
+		sess.toolDefinitions[name] = ToolDefinition{
+			Name:               name,
+			Description:        description,
+			InputSchema:        schema,
+			Title:              title,
+			OutputSchema:       append(json.RawMessage(nil), tool.OutputSchema...),
+			Annotations:        append(json.RawMessage(nil), tool.Annotations...),
+			Icons:              append(json.RawMessage(nil), tool.Icons...),
+			Findings:           findings,
+			AnnotationFindings: annotationKinds,
+			paramHeaders:       paramHeaders,
 			Cost: ToolCost{
-				Name:             tool.Name,
+				Name:             name,
 				Bytes:            compactJSONLen(rawTool),
 				DescriptionBytes: compactJSONLen(tool.Description),
 				SchemaBytes:      compactJSONLen(tool.InputSchema),
 				FindingKinds:     findingKinds(findings),
+				AnnotationKinds:  annotationKinds,
 			},
 		}
 	}
-	sess.toolListComplete = r.NextCursor == ""
+	sess.toolListComplete = lastToolsPage(r.NextCursor)
 	sess.paramHeaderInvalid = append(sess.paramHeaderInvalid, invalidParamHeaderTools...)
 	sess.schemaRootInvalid = append(sess.schemaRootInvalid, invalidSchemaRootTools...)
+}
+
+// lastToolsPage reports whether a tools/list result's nextCursor ends the
+// listing, which absent, null and an empty string all do. Anything else that is
+// not a string was reported as a type violation, and is not taken as the end,
+// since a page the cursor cannot name may still exist and a baseline taken from
+// half a listing would report the other half as removed.
+func lastToolsPage(cursor json.RawMessage) bool {
+	switch jsonKind(cursor) {
+	case 0, 'n':
+		return true
+	case '"':
+		var next string
+		return json.Unmarshal(cursor, &next) == nil && next == ""
+	}
+	return false
 }
 
 // hasListCursor reports whether a tools/list request carries a pagination cursor,

@@ -6,12 +6,14 @@ This page is everything underneath it, which is `mcpsnoop check` and the signals
 it can fail on.
 
 Gate a recorded agent run on errors, stream corruption, protocol warnings,
-routing-header mismatches, calls that never got a response, dropped frames that
-leave the capture incomplete, tool-definition drift, or use of deprecated
-protocol features.
+routing-header mismatches, calls that never got a response, results that came
+back after a cancel, tool-definition drift, tool annotations that loosened after
+approval, use of deprecated protocol features, dropped frames that leave the
+capture incomplete, schemas that travel badly across clients, or tools that
+declare their behaviour badly or not at all.
 
 ```bash
-mcpsnoop check [--format text|junit|sarif] [--fail-on error,invalid,warn,mismatch,pending,late-result,drift,deprecated,incomplete,schema] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit|sarif] [--fail-on error,invalid,warn,mismatch,pending,late-result,drift,loosened,deprecated,incomplete,schema,annotations] [session-id|log.jsonl|-]
 ```
 
 `error`, `invalid` and `warn` fail the check on their own. The rest are opt-in.
@@ -27,15 +29,17 @@ session to check the newest capture, or use `-` to read JSONL from stdin.
 | `pending` | a request still open when the capture ended, so the caller was left waiting |
 | `late-result` | a response that arrived after its request was cancelled |
 | `drift` | an advertised tool definition changing after the baseline was approved |
+| `loosened` | a tool's annotations claiming less risk than the approved baseline, such as a write that now says it is read-only |
 | `deprecated` | a feature the specification has deprecated |
 | `incomplete` | frames dropped upstream, which makes every other count a floor rather than a total |
 | `schema` | an advertised schema using a construct or a dialect that travels badly across clients |
+| `annotations` | a tool that declares no behaviour hint, leaves one of the three main hints to its default, or claims to be read-only and destructive at once |
 
 Every signal is counted whether or not it is gating, so a run says what it found
 before you decide what should fail on it.
 
 ```
-session build-agent: errors=1 invalid=0 warnings=0 mismatches=0 pending=0 late_results=0 deprecated=0 missing_frames=0 schema_findings=1
+session build-agent: errors=1 invalid=0 warnings=0 mismatches=0 pending=0 late_results=0 deprecated=0 missing_frames=0 schema_findings=1 annotation_findings=0
 schema findings:
   oneOf: search
 check failed: error
@@ -375,6 +379,63 @@ mcpsnoop check --fail-on drift --baseline .mcpsnoop/baselines session.jsonl
 
 `drift` is opt-in for `check`. The default `error,invalid,warn` gate is unchanged.
 
+### Catch annotations that loosened after approval
+
+Drift says that a tool's annotations changed. It also says which way they moved,
+because clients act on the direction.
+
+```
+definition drift:
+  annotations changed: delete_file
+  annotations loosened, delete_file: readOnlyHint false → true
+```
+
+`mcpsnoop diff` prints the same lines between two captures, and the tool summary,
+opened with `s`, lists them as `loosened` and `tightened` rows.
+
+A tool's annotations loosen when they claim less risk than the baseline trusted.
+The tool turned read-only, stopped calling itself destructive, became safe to
+retry, narrowed itself to a closed world, or started sending a hint that is not a
+boolean. A client that acts on hints trusts such a tool more, and these three
+already do.
+
+| Client | What a loosened hint switches off |
+|---|---|
+| VS Code | the confirmation it shows before any tool not marked `readOnlyHint`, per its [MCP developer guide](https://code.visualstudio.com/api/extension-guides/ai/mcp) |
+| Codex | in its default `auto` approval mode, the approval it asks for before a tool its hints call destructive or open-world, per [`requires_mcp_tool_approval`](https://github.com/openai/codex/blob/main/codex-rs/core/src/mcp_tool_call.rs) |
+| Claude Code | running the tool alone. Measured with 2.1.292 through the [client matrix](../clientmatrix/README.md), it ran read-only tools side by side and unannotated ones one call at a time, so a write that claims to be read-only can race the calls beside it |
+
+No client here is known to act on `idempotentHint` yet. It is counted because it
+is the hint a client would consult before retrying a call whose answer never
+arrived, the case spec issue
+[#3394](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/3394)
+raises, and a tool that only claims to be safe to retry may then run twice.
+
+Only hints a client can act on count. The spec makes `destructiveHint` and
+`idempotentHint` meaningful only for a tool that is not read-only, so editing
+them on a read-only tool is drift and never loosening. The exception is an
+explicit `destructiveHint: true`, which Codex asks about on any tool, so dropping
+one from a read-only tool does loosen it. Spelling out a default the tool already
+relied on, the way ChatGPT's app review asks servers to, moves nothing.
+
+The other direction is reported as tightened, and that is not a clean bill of
+health. Codex remembers an approval by server and tool name, so an approval given
+while a tool said it was read-only goes on covering it after it admits to
+destroying things. Catching that is what `drift` is for.
+
+`loosened` fails a run on the one direction alone, so a gate can hold every tool
+to what it was approved with while a server that starts declaring more risk still
+passes. It needs a baseline for the reason drift does. A run gated on it that only
+recorded one does not pass, and neither does one whose baseline predates
+annotation tracking, since that baseline cannot say whether anything loosened.
+Re-record it with `mcpsnoop baseline --accept`.
+
+```bash
+mcpsnoop check --fail-on loosened --baseline .mcpsnoop/baselines session.jsonl
+```
+
+`loosened` is opt-in, and the default `error,invalid,warn` gate is unchanged.
+
 ### Catch a feature neither side negotiated
 
 SEP-2133 moved optional features out of the core protocol and into extensions,
@@ -468,6 +529,84 @@ mcpsnoop still changes nothing about the traffic it forwards.
 
 Nothing is resolved or fetched. An external `$ref` is recognized by its form
 alone, and the schema it points at is never read.
+
+### Lint tool annotations
+
+Annotations are how a server tells a client what a tool does, so the client can
+decide how careful to be. `readOnlyHint` says the tool changes nothing,
+`destructiveHint` that a write may destroy something, `idempotentHint` that
+repeating a call does nothing more, and `openWorldHint` that the tool reaches
+beyond a closed set of things. A hint left out takes the spec's default, and every
+default assumes the worst. A tool with no annotations is taken to write, to
+destroy, and to reach the open world.
+
+A server pays for that without seeing it. VS Code confirms every call to such a
+tool, Codex asks for approval in its default mode, and Claude Code runs its calls
+one at a time where it runs read-only tools side by side. ChatGPT's
+[app submission guidelines](https://developers.openai.com/apps-sdk/app-submission-guidelines)
+go further and ask for `readOnlyHint`, `destructiveHint` and `openWorldHint` as
+explicit booleans on every tool.
+
+| Kind | Means |
+|---|---|
+| `unannotated` | no behaviour hint at all. A `title` alone counts as none, since it names the tool and says nothing about what it does |
+| `implicitHints` | at least one of `readOnlyHint`, `destructiveHint` and `openWorldHint` left to its default |
+| `contradictoryHints` | `readOnlyHint` and `destructiveHint` both true, which VS Code runs without asking and Codex stops to ask about |
+
+None of these breaks a rule, so `annotations` is opt-in. A default run counts them
+as `annotation_findings` and lists them under `annotation findings:`, and only
+fails when you add `annotations` to `--fail-on`. They reach `--format junit` and
+`--format sarif`, and `export` carries the per-tool list under
+`summary.definitions.per_tool[].annotation_findings`.
+
+```bash
+mcpsnoop check --fail-on annotations session.jsonl
+```
+
+The spec says clients should never make tool use decisions from the annotations
+of a server they do not trust. Declaring them well is still what decides how a
+client that trusts the server treats each tool, and `loosened` above is what
+watches a trusted server for claiming less over time.
+
+### Catch a tool list no client can read
+
+mcpsnoop reads a tool listing leniently and shows every tool it can. The official
+SDK clients do not. They check each value against the type the specification
+gives it and reject the whole listing over one they cannot read, so a single bad
+value costs the client every tool the server offers, and nothing on the wire says
+why.
+
+Measured with one well-formed tool beside one whose `readOnlyHint` was the string
+`"true"`.
+
+| Client | What it got |
+|---|---|
+| TypeScript SDK 1.32.1 | a validation error and no tools |
+| Go SDK 1.8.0 | a decode error and no tools |
+| Python SDK 2.3.0 | both tools, reading `"true"` as true |
+| Claude Code 2.1.292 | no tools from that server, after asking for the list four times |
+
+The Python SDK is lenient where it can be. It reads `"true"`, `"yes"` and `1` as
+true and `null` as absent, and still rejects a string it cannot read as a
+boolean, or annotations that are not an object. The TypeScript SDK rejects `null`
+as well.
+
+So mcpsnoop warns on the `tools/list` response, naming each value and what it
+should have been, and a default `check` run fails on it.
+
+```
+tool "odd" sends annotations.readOnlyHint as a string instead of a boolean
+the result sends nextCursor as null instead of a string
+tools[3] sends name as a number instead of a string
+```
+
+The values judged are the ones mcpsnoop reads. That is each entry of `tools` and
+its `name`, `title` and `description`, its annotations, and the listing's own
+`tools` array and `nextCursor`. The input schema has its own rule, `no root`
+above. Each field is held to its type from the revision that introduced it, so a
+session that negotiated 2024-11-05 is not held to annotations, which arrived in
+2025-03-26, or to a tool `title`, which arrived in 2025-06-18. A value mcpsnoop's
+own redaction replaced is never reported.
 
 ### Detect a client that mangles server state
 

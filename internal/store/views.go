@@ -190,7 +190,10 @@ type ToolDefinition struct {
 	Annotations  json.RawMessage
 	Icons        json.RawMessage
 	Findings     []SchemaFinding
-	paramHeaders []paramHeaderBinding
+	// AnnotationFindings is how the tool declares its behaviour, worked out at
+	// ingest beside Findings, where the frame's redaction is still known.
+	AnnotationFindings []AnnotationFindingKind
+	paramHeaders       []paramHeaderBinding
 	// Cost is what advertising this tool weighs, measured once at ingest.
 	Cost ToolCost
 }
@@ -222,6 +225,9 @@ type ToolCost struct {
 	// FindingKinds lists the schema finding kinds detected on this tool, keyed
 	// structurally for export and check rather than by display text.
 	FindingKinds []SchemaFindingKind
+	// AnnotationKinds lists the annotation finding kinds detected on this tool,
+	// the violation included, keyed the same way.
+	AnnotationKinds []AnnotationFindingKind
 }
 
 // ToolListCost is the fixed context cost of a session's advertised tool list,
@@ -307,6 +313,34 @@ type ToolDrift struct {
 	// not fail a drift-gated run over our own upgrade.
 	Unverified    []ToolDriftKind
 	BaselineError string
+	// Shifts says which way each tool's annotations moved, keyed by the tools
+	// listed under DriftAnnotations. It refines that kind rather than adding to
+	// it, so Count is unchanged and a drift gate fails exactly as before.
+	Shifts map[string]AnnotationShift
+}
+
+// SetShift records which way one tool's annotations moved.
+func (d *ToolDrift) SetShift(tool string, shift AnnotationShift) {
+	if len(shift.Loosened) == 0 && len(shift.Tightened) == 0 {
+		return
+	}
+	if d.Shifts == nil {
+		d.Shifts = make(map[string]AnnotationShift)
+	}
+	d.Shifts[tool] = shift
+}
+
+// LoosenedNames returns the tools whose annotations now claim less risk than the
+// baseline trusted, sorted, or nil for none.
+func (d ToolDrift) LoosenedNames() []string {
+	var names []string
+	for name, shift := range d.Shifts {
+		if len(shift.Loosened) > 0 {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
 }
 
 func (d ToolDrift) Empty() bool { return d.Count() == 0 && d.BaselineError == "" }
@@ -533,6 +567,8 @@ func (s *Store) ToolDefinitions(sessionID string) ([]ToolDefinition, bool) {
 		definition.Annotations = append(json.RawMessage(nil), definition.Annotations...)
 		definition.Icons = append(json.RawMessage(nil), definition.Icons...)
 		definition.Findings = slices.Clone(definition.Findings)
+		definition.AnnotationFindings = slices.Clone(definition.AnnotationFindings)
+		definition.Cost = cloneToolCost(definition.Cost)
 		definitions = append(definitions, definition)
 	}
 	return definitions, true
@@ -561,7 +597,7 @@ func (s *Store) ToolCosts(sessionID string) (ToolListCost, bool) {
 	for _, name := range sess.advertisedTools {
 		definition := sess.toolDefinitions[name]
 		cost.Bytes += definition.Cost.Bytes
-		cost.PerTool = append(cost.PerTool, definition.Cost)
+		cost.PerTool = append(cost.PerTool, cloneToolCost(definition.Cost))
 	}
 	// Heaviest first, then by name for a stable order among equals. Alphabetical
 	// would bury the answer, which is which tools the cost is actually in.
@@ -572,6 +608,14 @@ func (s *Store) ToolCosts(sessionID string) (ToolListCost, bool) {
 		return cmp.Compare(a.Name, b.Name)
 	})
 	return cost, true
+}
+
+// cloneToolCost copies a cost's slices, so a reader holding one cannot reach
+// into the definition the store keeps.
+func cloneToolCost(cost ToolCost) ToolCost {
+	cost.FindingKinds = slices.Clone(cost.FindingKinds)
+	cost.AnnotationKinds = slices.Clone(cost.AnnotationKinds)
+	return cost
 }
 
 // SetToolDrift attaches the current baseline comparison to a session.
@@ -658,6 +702,15 @@ func cloneToolDrift(drift ToolDrift) ToolDrift {
 		out.Changes = make(map[ToolDriftKind][]string, len(drift.Changes))
 		for kind, names := range drift.Changes {
 			out.Changes[kind] = slices.Clone(names)
+		}
+	}
+	if drift.Shifts != nil {
+		out.Shifts = make(map[string]AnnotationShift, len(drift.Shifts))
+		for name, shift := range drift.Shifts {
+			out.Shifts[name] = AnnotationShift{
+				Loosened:  slices.Clone(shift.Loosened),
+				Tightened: slices.Clone(shift.Tightened),
+			}
 		}
 	}
 	return out

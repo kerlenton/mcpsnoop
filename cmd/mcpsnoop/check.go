@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,12 +23,19 @@ const (
 	checkPending    checkSignal = "pending"
 	checkLateResult checkSignal = "late-result"
 	checkDrift      checkSignal = "drift"
+	// checkLoosened is the part of drift that matters most, a tool whose
+	// annotations now claim less risk than the baseline trusted, which is what
+	// lets a client skip a confirmation nobody approved skipping.
+	checkLoosened   checkSignal = "loosened"
 	checkDeprecated checkSignal = "deprecated"
 	checkIncomplete checkSignal = "incomplete"
 	checkSchema     checkSignal = "schema"
+	// checkAnnotations reports tools that declare their behaviour badly or not at
+	// all. Opt-in like schema, since every hint is optional.
+	checkAnnotations checkSignal = "annotations"
 )
 
-var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLateResult, checkDrift, checkDeprecated, checkIncomplete, checkSchema}
+var checkSignalOrder = []checkSignal{checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLateResult, checkDrift, checkLoosened, checkDeprecated, checkIncomplete, checkSchema, checkAnnotations}
 
 type checkOutputFormat string
 
@@ -49,6 +57,7 @@ type checkSummary struct {
 	missingFrames   uint64
 	drift           store.ToolDrift
 	schema          store.SchemaReport
+	annotations     store.AnnotationReport
 	baselineCreated bool
 }
 
@@ -59,7 +68,7 @@ func newCheckCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "check [session-id|log.jsonl|-]",
 		Short: "Fail when a captured session violates a signal or an assertion",
-		Long:  "Check a captured session against signals (errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, results that arrived after cancellation, dropped frames that leave the capture incomplete, tool-definition drift) and assertions (a tool-call latency budget, and tools that must or must not have been called). With no session, the newest session log is checked. Use - to read from stdin.",
+		Long:  "Check a captured session against signals (errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, results that arrived after cancellation, tool-definition drift, tool annotations loosened since the baseline, deprecated protocol features, dropped frames that leave the capture incomplete, schemas that travel badly across clients, tools that declare their behaviour badly or not at all) and assertions (a tool-call latency budget, a round-trip budget, and tools that must or must not have been called). With no session, the newest session log is checked. Use - to read from stdin.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			signals, err := parseCheckSignals(failOn)
@@ -126,8 +135,8 @@ func newCheckCmd() *cobra.Command {
 				}
 			default:
 				for i, summary := range summaries {
-					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d late_results=%d deprecated=%d missing_frames=%d schema_findings=%d\n",
-						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.lateResults, summary.deprecated, summary.missingFrames, summary.schema.Count())
+					fmt.Fprintf(cmd.OutOrStdout(), "session %s: errors=%d invalid=%d warnings=%d mismatches=%d pending=%d late_results=%d deprecated=%d missing_frames=%d schema_findings=%d annotation_findings=%d\n",
+						summary.sessionID, summary.errors, summary.invalid, summary.warnings, summary.mismatches, summary.pending, summary.lateResults, summary.deprecated, summary.missingFrames, summary.schema.Count(), summary.annotations.Count())
 					if summary.baselineCreated {
 						// No baseline existed, so this run trusted the current definitions
 						// rather than verifying them. Say so, or an ephemeral CI reads green
@@ -144,6 +153,9 @@ func newCheckCmd() *cobra.Command {
 					}
 					if !summary.schema.Empty() {
 						writeSchemaFindings(cmd.OutOrStdout(), summary.schema)
+					}
+					if !summary.annotations.Empty() {
+						writeAnnotationFindings(cmd.OutOrStdout(), summary.annotations)
 					}
 					if failed := summary.failed(signals); len(failed) > 0 {
 						fmt.Fprintf(cmd.OutOrStdout(), "check failed: %s\n", strings.Join(failed, ","))
@@ -165,7 +177,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().SortFlags = false
-	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, late-result, drift, deprecated, incomplete, schema")
+	cmd.Flags().StringVar(&failOn, "fail-on", "error,invalid,warn", "comma-separated signals to fail on, any of error, invalid, warn, mismatch, pending, late-result, drift, loosened, deprecated, incomplete, schema, annotations")
 	cmd.Flags().StringVar(&formatFlag, "format", string(checkFormatText), "output format, one of text, junit, or sarif")
 	cmd.Flags().StringVar(&baselineDir, "baseline", "", "tool-baseline directory to compare against (default: the mcpsnoop state dir); point CI at a persisted or checked-in directory")
 	cmd.Flags().DurationVar(&assertions.maxDuration, "max-duration", 0, "fail if any completed tool call exceeds this wall-clock duration, including time a user spent answering an elicitation (e.g. 500ms), disabled when zero")
@@ -315,10 +327,10 @@ func parseCheckSignals(value string) (map[checkSignal]bool, error) {
 	for _, part := range strings.Split(value, ",") {
 		signal := checkSignal(strings.TrimSpace(part))
 		switch signal {
-		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLateResult, checkDrift, checkDeprecated, checkIncomplete, checkSchema:
+		case checkError, checkInvalid, checkWarn, checkMismatch, checkPending, checkLateResult, checkDrift, checkLoosened, checkDeprecated, checkIncomplete, checkSchema, checkAnnotations:
 			signals[signal] = true
 		default:
-			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, late-result, drift, deprecated, incomplete, or schema, got %q", part)
+			return nil, fmt.Errorf("--fail-on must contain error, invalid, warn, mismatch, pending, late-result, drift, loosened, deprecated, incomplete, schema, or annotations, got %q", part)
 		}
 	}
 	return signals, nil
@@ -411,6 +423,9 @@ func summarizeCheck(st *store.Store, baselines *toolbaseline.Manager) []checkSum
 		if report, ok := st.SchemaFindings(header.ID); ok {
 			summary.schema = report
 		}
+		if report, ok := st.AnnotationFindings(header.ID); ok {
+			summary.annotations = report
+		}
 		for _, event := range st.Timeline(header.ID) {
 			if event.Kind == store.EventInvalid {
 				summary.invalid++
@@ -461,6 +476,21 @@ func (s checkSummary) driftUnverified() string {
 	return ""
 }
 
+// loosenedUnverified is driftUnverified for the loosened signal, which has one
+// more way to have compared nothing. A baseline recorded before mcpsnoop kept
+// annotations has no record of them, so it cannot say whether any loosened, and
+// a run gated on exactly that question has to hear so rather than pass.
+func (s checkSummary) loosenedUnverified() string {
+	if why := s.driftUnverified(); why != "" {
+		return why
+	}
+	if slices.Contains(s.drift.Unverified, store.DriftAnnotations) {
+		return "the tool baseline predates annotation tracking, so no annotation was verified; " +
+			"re-record it with mcpsnoop baseline --accept once you trust the current definitions"
+	}
+	return ""
+}
+
 func (s checkSummary) count(signal checkSignal) int {
 	switch signal {
 	case checkError:
@@ -483,12 +513,22 @@ func (s checkSummary) count(signal checkSignal) int {
 			n++
 		}
 		return n
+	case checkLoosened:
+		// The drift rule for the same reason. A run that asked to fail on loosening
+		// and then compared against nothing has not shown that nothing loosened.
+		n := len(s.drift.LoosenedNames())
+		if s.loosenedUnverified() != "" {
+			n++
+		}
+		return n
 	case checkDeprecated:
 		return s.deprecated
 	case checkIncomplete:
 		return int(s.missingFrames)
 	case checkSchema:
 		return s.schema.Count()
+	case checkAnnotations:
+		return s.annotations.Count()
 	default:
 		return 0
 	}

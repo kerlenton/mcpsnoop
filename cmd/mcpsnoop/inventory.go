@@ -19,6 +19,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/wiretext"
 )
 
 func newInventoryCmd() *cobra.Command {
@@ -357,18 +358,18 @@ func writeInventoryText(w io.Writer, inv inventory, withTools bool) error {
 	}
 
 	for _, row := range inv.Servers {
-		name := oneLine(row.Label)
+		name := wiretext.OneLine(row.Label)
 		if name == "" {
 			name = "(unlabelled)"
 		}
 		if len(row.Labels) > 1 {
 			names := make([]string, 0, len(row.Labels))
 			for _, l := range row.Labels {
-				names = append(names, oneLine(l))
+				names = append(names, wiretext.OneLine(l))
 			}
 			name = strings.Join(names, ", ")
 		}
-		transport := oneLine(row.Transport)
+		transport := wiretext.OneLine(row.Transport)
 		if transport == "" {
 			transport = "unknown"
 		}
@@ -456,7 +457,7 @@ func seenRange(row serverRow) string {
 func renderCommand(argv []string) string {
 	parts := make([]string, 0, len(argv))
 	for _, arg := range argv {
-		if arg == "" || strings.ContainsAny(arg, " \t\"'\\") || unprintable(arg) {
+		if arg == "" || strings.ContainsAny(arg, " \t\"'\\") || wiretext.Unprintable(arg) {
 			parts = append(parts, strconv.Quote(arg))
 			continue
 		}
@@ -466,41 +467,17 @@ func renderCommand(argv []string) string {
 }
 
 // field renders one labelled line of a server block, padded so the values line
-// up under each other.
+// up under each other. The value goes through wiretext.OneLine. A command
+// argument, a working directory and a derived label are written by whatever
+// installed the server rather than by mcpsnoop, and none of them is checked for
+// control characters on the way in. labelFor only trims at the last separator,
+// and a working directory comes off the filesystem, so a directory whose name
+// holds a newline is enough to close the field and make every following line
+// read as a fresh server block. paths.CheckLabel refuses a control character for
+// this reason and the TUI quotes one for it too.
 func field(w io.Writer, name, value string) error {
-	_, err := fmt.Fprintf(w, "  %-9s %s\n", name, oneLine(value))
+	_, err := fmt.Fprintf(w, "  %-9s %s\n", name, wiretext.OneLine(value))
 	return err
-}
-
-// oneLine keeps a value the log supplied from ending the line it is printed on.
-//
-// A command argument, a working directory and a derived label are written by
-// whatever installed the server rather than by mcpsnoop, and none of them is
-// checked for control characters on the way in: labelFor only trims at the last
-// separator, and a working directory comes off the filesystem, so a directory
-// whose name holds a newline is enough. Printed raw, that newline closes the
-// field and every following line reads as a fresh server block, so a baseline
-// somebody diffs against names servers that never ran while the header above it
-// still counts one. An escape sequence in the same position drives the terminal.
-//
-// paths.CheckLabel refuses a control character for this reason and the TUI drops
-// them for it too. Quoting rather than dropping keeps the value recoverable.
-//
-// The test is everything strconv.Quote would escape, the same line the TUI's
-// safeCell draws, rather than unicode.IsControl. The runes between the two are
-// the ones that lie without breaking a line. U+202E and the other bidi controls
-// reorder the glyphs after them, so a tool can be named to read as a different
-// tool, and the zero-width formatters let two different names print identically.
-func oneLine(s string) string {
-	if unprintable(s) {
-		return strconv.Quote(s)
-	}
-	return s
-}
-
-// unprintable reports whether s holds a rune strconv.Quote would escape.
-func unprintable(s string) bool {
-	return strings.ContainsFunc(s, func(r rune) bool { return !strconv.IsPrint(r) })
 }
 
 // plural renders a count with its noun, so a summary reads as a sentence rather

@@ -18,6 +18,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/store"
+	"github.com/kerlenton/mcpsnoop/internal/wiretext"
 )
 
 func newStatsCmd() *cobra.Command {
@@ -407,7 +408,7 @@ func writeStatsText(w io.Writer, roll rollup) error {
 	serverW := len("SERVER")
 	toolW := len("TOOL")
 	for i, row := range roll.Rows {
-		tools[i] = oneLine(row.Tool)
+		tools[i] = wiretext.OneLine(row.Tool)
 		serverW = max(serverW, width(names[i]))
 		toolW = max(toolW, width(tools[i]))
 	}
@@ -472,15 +473,15 @@ func serverNames(rows []toolRow) []string {
 	}
 	out := make([]string, len(rows))
 	for i, row := range rows {
-		name := oneLine(row.Server)
+		name := wiretext.OneLine(row.Server)
 		if len(byLabel[row.Server]) > 1 {
 			switch {
 			case row.CWD != "":
-				name += " (" + oneLine(row.CWD) + ")"
+				name += " (" + wiretext.OneLine(row.CWD) + ")"
 			case row.Endpoint != "":
-				name += " (" + oneLine(row.Endpoint) + ")"
+				name += " (" + wiretext.OneLine(row.Endpoint) + ")"
 			case len(row.Command) > 0:
-				name += " (" + oneLine(strings.Join(row.Command, " ")) + ")"
+				name += " (" + wiretext.OneLine(strings.Join(row.Command, " ")) + ")"
 			}
 		}
 		out[i] = name

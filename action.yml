@@ -31,8 +31,9 @@ inputs:
   fail-on:
     description: |
       Comma-separated signals to fail on, any of error, invalid, warn, mismatch,
-      pending, late-result, drift, deprecated, incomplete, schema. Defaults to
-      what the CLI defaults to, which is error,invalid,warn.
+      pending, late-result, drift, loosened, deprecated, incomplete, schema,
+      annotations. Defaults to what the CLI defaults to, which is
+      error,invalid,warn.
     default: ""
   args:
     description: |

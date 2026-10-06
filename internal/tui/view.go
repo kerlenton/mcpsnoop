@@ -19,6 +19,7 @@ import (
 	"github.com/kerlenton/mcpsnoop/internal/paths"
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
 	"github.com/kerlenton/mcpsnoop/internal/store"
+	"github.com/kerlenton/mcpsnoop/internal/wiretext"
 )
 
 // View is the frame bubbletea writes to the terminal. Everything in it went
@@ -1846,13 +1847,43 @@ func (m Model) definitionDriftSection(drift store.ToolDrift, width int) string {
 	// Driven by store.ToolDriftKinds, not a literal table: a kind missing here
 	// while Count sees it lights the drift marker over a panel that says nothing
 	// is wrong, which is worse than not detecting it.
+	indent := strings.Repeat(" ", driftLabelW)
 	for _, kind := range store.ToolDriftKinds {
 		names := drift.Names(kind)
 		if len(names) == 0 {
 			continue
 		}
-		indent := strings.Repeat(" ", driftLabelW)
-		lines = append(lines, m.styles.dim.Render(cellL(driftRowLabel(kind), driftLabelW))+m.styles.warn.Render(wrapWords(names, indent, width)))
+		// A new slice, since Names hands back the drift's own, and every name went
+		// through safeCell because the server chose it.
+		shown := make([]string, len(names))
+		for i, name := range names {
+			shown[i] = safeCell(name)
+		}
+		lines = append(lines, m.styles.dim.Render(cellL(driftRowLabel(kind), driftLabelW))+m.styles.warn.Render(wrapWords(shown, indent, width)))
+	}
+	// Which way the annotations moved, loosening first. A tool that now claims less
+	// than it was approved with is what can switch off a client's confirmation, so
+	// it carries the warning colour and the other direction does not.
+	shifted := make([]string, 0, len(drift.Shifts))
+	for name := range drift.Shifts {
+		shifted = append(shifted, name)
+	}
+	slices.Sort(shifted)
+	for _, loosened := range []bool{true, false} {
+		label, style := "tightened", m.styles.dim
+		if loosened {
+			label, style = "loosened", m.styles.warn
+		}
+		for _, name := range shifted {
+			changes := drift.Shifts[name].Tightened
+			if loosened {
+				changes = drift.Shifts[name].Loosened
+			}
+			for _, c := range changes {
+				words := []string{safeCell(name), c.Hint, safeCell(c.From), "→", safeCell(c.To)}
+				lines = append(lines, m.styles.dim.Render(cellL(label, driftLabelW))+style.Render(wrapWords(words, indent, width)))
+			}
+		}
 	}
 	if len(drift.Unverified) > 0 {
 		// Not drift and not an error. The baseline predates these fields, so we
@@ -1862,7 +1893,6 @@ func (m Model) definitionDriftSection(drift store.ToolDrift, width int) string {
 		for _, kind := range drift.Unverified {
 			kinds = append(kinds, driftRowLabel(kind))
 		}
-		indent := strings.Repeat(" ", driftLabelW)
 		lines = append(lines, m.styles.dim.Render(cellL("not covered", driftLabelW))+
 			m.styles.dim.Render(wrapWords(kinds, indent, width)))
 	}
@@ -2681,17 +2711,11 @@ func (m Model) interactContent() string {
 // character for the same reason, and the inventory and stats tables quote rather
 // than drop one so the value stays recoverable.
 func safeCell(s string) string {
-	// The test is the exact complement of what strconv.Quote escapes. Quoting on
-	// unicode.IsControl alone would miss everything outside Cc, and the runes it
-	// misses are the interesting ones: U+202E and the other bidi controls reorder
-	// the glyphs after them, so a tool can be named to render as a different tool,
-	// and the zero-width formatters let two different names draw identically. A
-	// wire debugger that shows one thing while the bytes say another has failed at
-	// the only job it has.
-	if strings.ContainsFunc(s, func(r rune) bool { return !strconv.IsPrint(r) }) {
-		return strconv.Quote(s)
-	}
-	return s
+	// wiretext.OneLine quotes everything strconv.Quote escapes rather than control
+	// characters alone, which is what keeps a bidi control or a zero-width
+	// formatter from drawing one tool name as another. A wire debugger that shows
+	// one thing while the bytes say another has failed at the only job it has.
+	return wiretext.OneLine(s)
 }
 
 // safeBody is safeCell for text that is allowed to be more than one row. Quoting
