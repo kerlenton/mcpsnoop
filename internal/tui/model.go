@@ -1803,6 +1803,11 @@ func (m *Model) overlayJump(dir int) {
 }
 
 func (m *Model) layoutOverlay() {
+	// The verdict lines wrap to the panel width, so a resize can change how many
+	// there are, and the viewport below them has to give up exactly that many.
+	if m.overlay == overlayInspector {
+		m.overlayHeaderH = m.inspectorHeaderH()
+	}
 	w, maxVpH := m.overlayDims()
 	if m.vp.Width == 0 {
 		m.vp = viewport.New(w, maxVpH)

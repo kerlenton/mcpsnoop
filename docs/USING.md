@@ -17,6 +17,11 @@
 
 Press `?` in the app for the full list.
 
+`enter` on a frame opens the inspector, which shows the frame's own bytes and,
+above them, everything mcpsnoop concluded about it, the warning, an observation,
+a deprecation or a cache refetch, each in full. The stream's detail column cuts
+a long one short, so the inspector is where to read it.
+
 ## Filtering the stream
 
 Press `/` in a session and combine space-separated tokens, ANDed. Plain text

@@ -842,11 +842,10 @@ func (m Model) streamCells(e store.EventView) streamCell {
 	// structured flag (never failing check) but reads the same in the row.
 	if e.Truncated {
 		c.status = "warn"
-		const msg = "observed copy truncated at the frame cap, forwarding unaffected"
 		if c.detail == "" {
-			c.detail = msg
+			c.detail = truncatedNote
 		} else {
-			c.detail = msg + " · " + c.detail
+			c.detail = truncatedNote + " · " + c.detail
 		}
 	}
 	if e.Deprecated != "" {
@@ -1261,18 +1260,74 @@ func (m Model) inspectorHeader(w int) string {
 		}
 		head += "\n" + bar(w, strings.Join(rp, sep), "")
 	}
+	if verdicts := m.inspectorVerdicts(e, w); len(verdicts) > 0 {
+		head += "\n" + strings.Join(verdicts, "\n")
+	}
 	return head
 }
 
-// inspectorHeaderH is the number of fixed chrome lines above the inspector body:
-// the meta line, plus a routing-headers line when the inspected frame has them.
-func (m Model) inspectorHeaderH() int {
-	if m.inspect >= 0 && m.inspect < len(m.full) {
-		if hasTransportMeta(m.full[m.inspect]) {
-			return 2
+// truncatedNote is how a frame whose observed copy hit the frame cap is described,
+// in the stream and in the inspector alike.
+const truncatedNote = "observed copy truncated at the frame cap, forwarding unaffected"
+
+// maxVerdictLines bounds the verdict lines above the inspector body, so a frame
+// carrying a great many warnings still leaves room for the body it describes.
+const maxVerdictLines = 8
+
+// inspectorVerdicts are what mcpsnoop concluded about the inspected frame, its
+// protocol warning, a truncated copy, a deprecation, a cache refetch and an
+// observation, one labelled entry each and wrapped to w. The stream carries them
+// in a column that cuts a long one short, and the body below is the frame's own
+// bytes, so without these lines a warning longer than the column could not be
+// read anywhere in the TUI.
+func (m Model) inspectorVerdicts(e store.EventView, w int) []string {
+	const labelW = 13 // "observation" and two spaces
+	var out []string
+	add := func(label, text string, style lipgloss.Style) {
+		if text == "" {
+			return
+		}
+		for i, line := range strings.Split(softWrap(safeCell(text), max(w-labelW, 1)), "\n") {
+			head := strings.Repeat(" ", labelW)
+			if i == 0 {
+				head = m.styles.dim.Render(cellL(label, labelW))
+			}
+			out = append(out, head+style.Render(line))
 		}
 	}
-	return 1
+	// Invalid frames are explained by what they are, as in the stream.
+	if e.Kind != store.EventInvalid {
+		add("warning", e.Warning, m.styles.warn)
+	}
+	if e.Truncated {
+		add("truncated", truncatedNote, m.styles.warn)
+	}
+	add("deprecated", e.Deprecated, m.styles.warn)
+	add("cache", e.CacheStaleRefetch, m.styles.warn)
+	add("observation", e.Observation, m.styles.neutral)
+	if len(out) > maxVerdictLines {
+		out = append(out[:maxVerdictLines-1], strings.Repeat(" ", labelW)+
+			m.styles.dim.Render("… the rest is in the export, which carries every frame's warning whole"))
+	}
+	return out
+}
+
+// inspectorHeaderH is the number of fixed chrome lines above the inspector body,
+// the meta line, a routing-headers line when the inspected frame has them, and
+// one line per wrapped verdict.
+func (m Model) inspectorHeaderH() int {
+	if m.inspect < 0 || m.inspect >= len(m.full) {
+		return 1
+	}
+	e := m.full[m.inspect]
+	h := 1
+	if hasTransportMeta(e) {
+		h++
+	}
+	// Sized at the width the header is drawn at, which overlayDims gives without
+	// depending on this height.
+	w, _ := m.overlayDims()
+	return h + len(m.inspectorVerdicts(e, w))
 }
 
 // hasTransportMeta reports whether a frame carries a second chrome line. The

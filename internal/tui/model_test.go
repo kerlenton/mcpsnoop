@@ -3165,3 +3165,63 @@ func TestAnEmptySessionIdStillAsksBeforeReplaying(t *testing.T) {
 		t.Fatal("no confirmation was asked for")
 	}
 }
+
+// TestInspectorShowsTheWholeWarning. The stream gives a frame's warning one
+// column, which cuts a long one short, and the inspector body is the frame's own
+// bytes, so the inspector chrome is the one place the whole warning can be read.
+// The height the layout reserves has to be exactly the lines drawn, at any width.
+func TestInspectorShowsTheWholeWarning(t *testing.T) {
+	const warning = `tool "odd" sends annotations.readOnlyHint as a string instead of a boolean`
+	m := New(store.New())
+	m.width, m.height = 80, 40
+	m.full = []store.EventView{{
+		Kind:        store.EventResponse,
+		Raw:         json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`),
+		Warning:     warning,
+		Observation: "repeats the call on frame 3, which the client had cancelled, so it may have run twice",
+	}}
+	m.inspect = 0
+
+	w, _ := m.overlayDims()
+	header := ansi.Strip(m.inspectorHeader(w))
+	lines := strings.Split(header, "\n")
+	if got := m.inspectorHeaderH(); got != len(lines) {
+		t.Fatalf("inspectorHeaderH() = %d, but the header draws %d lines:\n%s", got, len(lines), header)
+	}
+	var joined strings.Builder
+	for _, line := range lines[1:] {
+		joined.WriteString(strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "warning"), "observation")))
+	}
+	for _, want := range []string{strings.ReplaceAll(warning, " ", ""), "itmayhaverun", "twice"} {
+		if !strings.Contains(strings.ReplaceAll(joined.String(), " ", ""), want) {
+			t.Fatalf("the inspector lost part of a verdict, want %q in:\n%s", want, header)
+		}
+	}
+	if !strings.HasPrefix(lines[1], "warning") || !strings.Contains(header, "observation") {
+		t.Fatalf("each verdict should be labelled:\n%s", header)
+	}
+
+	// A resize while the inspector is open re-wraps the verdicts, so the height
+	// reserved for them follows.
+	m.overlay = overlayInspector
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
+	m = updated.(Model)
+	if m.overlayHeaderH != m.inspectorHeaderH() || m.overlayHeaderH != 3 {
+		t.Fatalf("after a resize the header height is %d, want %d and 3 lines at this width", m.overlayHeaderH, m.inspectorHeaderH())
+	}
+}
+
+// TestInspectorBoundsItsVerdicts. A frame can carry many warnings at once, and the
+// verdict lines must still leave room for the body they describe.
+func TestInspectorBoundsItsVerdicts(t *testing.T) {
+	m := New(store.New())
+	m.width, m.height = 60, 40
+	m.full = []store.EventView{{Kind: store.EventResponse, Warning: strings.Repeat("a warning that goes on, ", 40)}}
+	m.inspect = 0
+	if got := m.inspectorHeaderH(); got != 1+maxVerdictLines {
+		t.Fatalf("inspectorHeaderH() = %d, want the meta line and %d verdict lines", got, maxVerdictLines)
+	}
+	if !strings.Contains(ansi.Strip(m.inspectorHeader(56)), "the rest is in the export") {
+		t.Fatal("a cut verdict should say where the rest is")
+	}
+}
