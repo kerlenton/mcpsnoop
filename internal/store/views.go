@@ -35,6 +35,9 @@ type CallView struct {
 	LateResult   bool
 	TaskID       string
 	TaskStatus   string
+	// HTTPStatus is the failed HTTP status that settled the call when its response
+	// carried no JSON-RPC answer of its own, a 401 say, and zero otherwise.
+	HTTPStatus int
 }
 
 // Failed reports a protocol error, a tool-level error (result.isError), or any
@@ -406,10 +409,11 @@ type ToolStats struct {
 	// the summary it also sorts above one.
 	//
 	// ToolErrors counts result.isError. ProtocolErrors counts everything else that
-	// was an error, which is a JSON-RPC error object and a task that ended failed
-	// without one. It is deliberately the complement rather than its own tally, so
-	// the two always add up to Errors and a failure mode added later lands in it
-	// instead of disappearing from both.
+	// was an error, which is a JSON-RPC error object, a task that ended failed
+	// without one, and an HTTP failure that answered the call, a 401 say. It is
+	// deliberately the complement rather than its own tally, so the two always add
+	// up to Errors and a failure mode added later lands in it instead of
+	// disappearing from both.
 	Errors         int
 	ProtocolErrors int
 	ToolErrors     int
@@ -454,7 +458,7 @@ type SessionToolSummary struct {
 }
 
 // view builds the snapshot for an event. Caller holds at least the read lock.
-func (e *event) view(_ *session) EventView {
+func (e *event) view(sess *session) EventView {
 	v := EventView{
 		Seq:                e.seq,
 		TS:                 e.ts,
@@ -487,12 +491,28 @@ func (e *event) view(_ *session) EventView {
 	if e.call != nil {
 		cv := e.call.view()
 		v.Call = &cv
+		// Judged when the frame is read rather than when it arrived, since whether a
+		// repeat may have done the work twice depends on answers that come after it.
+		if e.kind == EventRequest && e.call.retryOf != nil && e.call.requestSeq == e.seq && sess != nil {
+			if d, ok := sess.duplicateOf(e.call); ok {
+				v.Observation = joinObservations(v.Observation, d.Observation())
+			}
+		}
 	}
 	if e.taskCall != nil {
 		cv := e.taskCall.view()
 		v.TaskCall = &cv
 	}
 	return v
+}
+
+// joinObservations puts a second observation after the first, the way warnings
+// are joined.
+func joinObservations(first, second string) string {
+	if first == "" {
+		return second
+	}
+	return first + "; " + second
 }
 
 func (c *call) view() CallView {
@@ -516,6 +536,7 @@ func (c *call) view() CallView {
 		LateResult:   c.lateResult,
 		TaskID:       c.taskID,
 		TaskStatus:   c.taskStatus,
+		HTTPStatus:   c.transportStatus,
 	}
 }
 

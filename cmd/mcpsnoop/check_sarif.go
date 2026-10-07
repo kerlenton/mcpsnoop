@@ -278,6 +278,13 @@ func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 		}
 	}
 
+	// One result per repeated call, the unit the gate counts, anchored at the
+	// request that repeated it.
+	for _, d := range summary.duplicates {
+		b.frame(sessionID, checkDuplicate,
+			fmt.Sprintf("session %s frame %d: tool %q %s", sessionID, d.Seq, d.Tool, d.Phrase()), d.Seq)
+	}
+
 	// Drift and a baseline error both concern the advertised tool list, so both
 	// anchor at the response that carried it. A stdin run, or one whose log holds
 	// no tools/list response, simply gets no region.
@@ -473,6 +480,10 @@ func checkSARIFSignalRule(signal checkSignal) (name, short, full, help string) {
 		return "LateResult", "A response arrived after its request was cancelled",
 			"The client cancelled a request and the server answered it anyway. The spec says a server receiving a cancellation SHOULD not send a response for it and that a client SHOULD ignore one that arrives, so this is wasted work on both sides rather than a protocol violation, which is why it is not in the default gate.",
 			"The message carries how long after the cancellation the answer arrived. A short delay is the race the specification allows for, since a cancellation can reach a server that has already replied. A long one means the server carried on working after being told to stop."
+	case checkDuplicate:
+		return "DuplicateCall", "A tool call was repeated before the first attempt's outcome was known",
+			"The client sent a tool call again, with the same arguments, after cancelling an identical call or while one was still unanswered. A server may finish work it was asked to cancel, and an answer can be lost on the way back, so a tool that does not declare idempotentHint may have done its work twice. MCP says nothing about retrying a tool call. Tools declared read-only or idempotent are not reported, and neither is a retry the wire shows did no extra work.",
+			"The result names the tool, the frame that repeated the call and the attempt it repeated, and says it ran twice when the server answered both. Make the tool safe to repeat and declare idempotentHint, have the server recognise a repeat by a key carried in the arguments, or have the client learn the first attempt's outcome before sending it again."
 	case checkDrift:
 		return "ToolDefinitionDrift", "An advertised tool definition changed after approval",
 			"An advertised tool differs from the trusted first-seen baseline for its server label in its description, title, input or output schema, annotations or icons, or a tool was added or removed. A baseline that could not be read is reported here too, since drift could not be verified.",

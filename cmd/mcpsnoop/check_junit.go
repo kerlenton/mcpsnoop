@@ -165,6 +165,8 @@ func checkSignalFailureReason(sessionID string, signal checkSignal, count int) s
 		singular, plural = "dropped frame", "dropped frames"
 	case checkSchema:
 		singular, plural = "schema finding", "schema findings"
+	case checkDuplicate:
+		singular, plural = "tool call that may have run twice", "tool calls that may have run twice"
 	case checkLoosened:
 		singular, plural = "tool whose annotations loosened since the baseline", "tools whose annotations loosened since the baseline"
 	case checkAnnotations:

@@ -64,6 +64,23 @@ type Profile struct {
 	// ProgressTokens counts the tool calls that offered a progressToken.
 	ToolCalls      int `json:"tool_calls"`
 	ProgressTokens int `json:"progress_tokens"`
+	// Effects counts the tool calls by what the called tool declares, read-only,
+	// additive or destructive, or no hints for a tool that declares none or was
+	// never listed. The client chooses none of this, but the two counts below
+	// only read sensibly beside it.
+	Effects map[string]int `json:"tool_call_effects"`
+	// ReadOnlyAtOnce is the most calls to read-only tools the client had in flight
+	// at the same time, and OthersAtOnce the most calls in flight at any moment one
+	// of them went to a tool not marked read-only, both among calls the server
+	// answered. A client that runs only read-only tools side by side shows 1 for
+	// the second.
+	ReadOnlyAtOnce int `json:"read_only_at_once"`
+	OthersAtOnce   int `json:"others_at_once"`
+	// Repeated counts the tool calls the client sent again before it could know
+	// what became of an identical earlier one, and RanTwice the ones the server
+	// answered both times.
+	Repeated int `json:"repeated_calls"`
+	RanTwice int `json:"ran_twice"`
 
 	// InputRequired counts the interim results the server answered this client
 	// with under multi round-trip requests, Retries the retries that continued
@@ -97,6 +114,7 @@ func newProfile() Profile {
 		Revisions:      []string{},
 		Handshakes:     []string{},
 		Methods:        map[string]int{},
+		Effects:        map[string]int{},
 		Capabilities:   []string{},
 		Answers:        map[string]int{},
 		ServerRequests: map[string]int{},
@@ -117,6 +135,7 @@ func Fold(st *store.Store, header store.SessionHeader) (Profile, bool) {
 		p.Transports = append(p.Transports, header.Transport)
 	}
 
+	definitions := listedTools(st, header.ID)
 	revisions := map[string]struct{}{}
 	discoverAt, initializeAt, stateless := -1, -1, 0
 	for i, ev := range st.Timeline(header.ID) {
@@ -163,6 +182,10 @@ func Fold(st *store.Store, header store.SessionHeader) (Profile, bool) {
 				}
 			case "tools/call":
 				p.ToolCalls++
+				if ev.Call != nil {
+					definition, listed := definitions[ev.Call.ToolName]
+					p.Effects[effectOf(definition, listed)]++
+				}
 				if req.hasMeta("progressToken") {
 					p.ProgressTokens++
 				}
@@ -207,6 +230,14 @@ func Fold(st *store.Store, header store.SessionHeader) (Profile, bool) {
 		p.Answers[action]++
 	}
 
+	p.ReadOnlyAtOnce, p.OthersAtOnce = callsAtOnce(st, header.ID, definitions)
+	for _, d := range st.Duplicates(header.ID) {
+		p.Repeated++
+		if d.RanTwice {
+			p.RanTwice++
+		}
+	}
+
 	p.Revisions = slices.Sorted(maps.Keys(revisions))
 	p.Handshakes = append(p.Handshakes, handshake(discoverAt, initializeAt, stateless))
 	return p, p.Requests > 0
@@ -240,12 +271,17 @@ func Merge(in []Profile) []Profile {
 		acc.TraceMalformed += p.TraceMalformed
 		acc.ToolCalls += p.ToolCalls
 		acc.ProgressTokens += p.ProgressTokens
+		acc.ReadOnlyAtOnce = max(acc.ReadOnlyAtOnce, p.ReadOnlyAtOnce)
+		acc.OthersAtOnce = max(acc.OthersAtOnce, p.OthersAtOnce)
+		acc.Repeated += p.Repeated
+		acc.RanTwice += p.RanTwice
 		acc.InputRequired += p.InputRequired
 		acc.Retries += p.Retries
 		acc.StateIssues += p.StateIssues
 		acc.Cancellations += p.Cancellations
 		acc.CacheRefetches += p.CacheRefetches
 		addCounts(acc.Methods, p.Methods)
+		addCounts(acc.Effects, p.Effects)
 		addCounts(acc.Answers, p.Answers)
 		addCounts(acc.ServerRequests, p.ServerRequests)
 		addCounts(acc.Deprecated, p.Deprecated)
@@ -302,11 +338,14 @@ func Table(profiles []Profile) []Row {
 		{Label: "lists"},
 		{Label: "re-fetches inside ttlMs"},
 		{Label: "trace context"},
+		{Label: "tool calls"},
 		{Label: "progress tokens"},
 		{Label: "multi round-trip"},
 		{Label: "elicitation answers"},
 		{Label: "server requests"},
 		{Label: "cancellations"},
+		{Label: "calls in flight"},
+		{Label: "repeated calls"},
 		{Label: "deprecated in use"},
 		{Label: "protocol warnings"},
 	}
@@ -320,11 +359,14 @@ func Table(profiles []Profile) []Row {
 			listsCell(p.Methods),
 			countOrNone(p.CacheRefetches),
 			traceCell(p),
+			toolCallsCell(p),
 			progressCell(p),
 			mrtrCell(p),
 			orNone(counted(p.Answers, " "), "none"),
 			orNone(counted(p.ServerRequests, " ×"), "none"),
 			countOrNone(p.Cancellations),
+			inFlightCell(p),
+			repeatedCell(p),
 			orNone(counted(p.Deprecated, " ×"), "none"),
 			warningsCell(p.Warnings),
 		}

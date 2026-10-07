@@ -119,6 +119,32 @@ func main() {
 	// returns, and the capture would blame it for one it never had time to send.
 	_, err = session.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "still here"}})
 	step("echo after giving up", err)
+
+	// A retry after a timeout, the case spec issue #3394 reproduces. add_note adds
+	// its note before it answers, so giving up on it and sending it again with the
+	// same arguments adds the note twice, which count_notes then shows.
+	_, err = session.CallTool(ctx, &mcp.CallToolParams{Name: "clear_notes"})
+	step("clear_notes", err)
+	note := map[string]any{"text": "retried", "delay_ms": 1000}
+	short, cancel = context.WithTimeout(ctx, 300*time.Millisecond)
+	_, err = session.CallTool(short, &mcp.CallToolParams{Name: "add_note", Arguments: note})
+	cancel()
+	if errors.Is(err, context.DeadlineExceeded) {
+		log.Print("add_note given up after 0.3s: ok")
+	} else {
+		step("add_note given up after 0.3s", err)
+	}
+	_, err = session.CallTool(ctx, &mcp.CallToolParams{Name: "add_note", Arguments: note})
+	step("add_note sent again", err)
+	res, err = session.CallTool(ctx, &mcp.CallToolParams{Name: "count_notes"})
+	step("count_notes", err)
+	if err == nil {
+		for _, c := range res.Content {
+			if t, ok := c.(*mcp.TextContent); ok {
+				log.Printf("count_notes answered: %s", t.Text)
+			}
+		}
+	}
 	time.Sleep(500 * time.Millisecond)
 
 	if failed {

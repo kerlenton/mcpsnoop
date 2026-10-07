@@ -138,6 +138,15 @@ func writeAnnotationFindings(w io.Writer, report store.AnnotationReport) {
 	}
 }
 
+// writeDuplicateCalls lists the tool calls a session repeated before it could
+// know what became of the first attempt, each with the frame it was sent on.
+func writeDuplicateCalls(w io.Writer, duplicates []store.DuplicateCall) {
+	fmt.Fprintln(w, "duplicate calls:")
+	for _, d := range duplicates {
+		fmt.Fprintf(w, "  frame %d, %s %s\n", d.Seq, wiretext.OneLine(d.Tool), d.Phrase())
+	}
+}
+
 // driftLabel is the per-line phrasing, singular, since it precedes tool names.
 func driftLabel(kind store.ToolDriftKind) string {
 	switch kind {

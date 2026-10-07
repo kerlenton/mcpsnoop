@@ -164,6 +164,18 @@ for (const [title, key] of [["Schema findings", "findings"], ["Annotation findin
     document.querySelector("main").insertBefore(block, document.getElementById("events"));
   }
 }
+if ((data.summary?.duplicates || []).length) {
+  const block = document.createElement("div");
+  block.innerHTML = "<div class=\"section-title\">Repeated calls</div>";
+  const list = document.createElement("div");
+  list.className = "grid";
+  data.summary.duplicates.forEach(d => {
+    list.innerHTML += "<div class=\"pill\">" + esc(d.tool) + "<br><b>frame " + esc(String(d.seq)) + " repeats frame " +
+      esc(String(d.earlier_seq)) + (d.ran_twice ? ", ran twice" : ", may have run twice") + "</b></div>";
+  });
+  block.appendChild(list);
+  document.querySelector("main").insertBefore(block, document.getElementById("events"));
+}
 const calls = data.calls || [];
 const events = data.events || [];
 // Filter grammar mirrors the TUI stream filter, space-separated tokens (ANDed),
