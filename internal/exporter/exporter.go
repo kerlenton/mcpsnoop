@@ -144,6 +144,30 @@ type ToolSummaryExport struct {
 	Definitions  *ToolListCostExport `json:"definitions,omitempty"`
 	Tools        []ToolStatsExport   `json:"tools"`
 	SlowestCalls []SlowCallExport    `json:"slowest_calls"`
+	// Duplicates are the tool calls sent again with the same arguments before the
+	// client could know what became of the first attempt, the ones check
+	// --fail-on duplicate reports.
+	Duplicates []DuplicateExport `json:"duplicates,omitempty"`
+}
+
+// DuplicateExport is one repeated tool call. Seq and ID are the request that
+// repeated it, EarlierSeq and EarlierID the attempt it repeated.
+type DuplicateExport struct {
+	Tool       string `json:"tool"`
+	Seq        uint64 `json:"seq"`
+	ID         string `json:"id"`
+	EarlierSeq uint64 `json:"earlier_seq"`
+	EarlierID  string `json:"earlier_id"`
+	// AfterCancel says the client cancelled the earlier attempt first, and
+	// RanTwice that the server answered both, so the work happened twice as far
+	// as the wire shows. Without it the earlier attempt's outcome is unknown.
+	AfterCancel bool `json:"after_cancel,omitempty"`
+	RanTwice    bool `json:"ran_twice,omitempty"`
+}
+
+func (d DuplicateExport) call() store.DuplicateCall {
+	return store.DuplicateCall{Tool: d.Tool, Seq: d.Seq, ID: d.ID, EarlierSeq: d.EarlierSeq, EarlierID: d.EarlierID,
+		AfterCancel: d.AfterCancel, RanTwice: d.RanTwice}
 }
 
 // ToolListCostExport is the fixed context cost of the advertised tool list. All
@@ -173,9 +197,10 @@ type ToolStatsExport struct {
 	Name  string `json:"name"`
 	Calls int    `json:"calls"`
 	// Errors is the total, and the two below split it. A tool answering isError
-	// is reporting a domain outcome, a server returning a JSON-RPC error is
-	// broken, and a consumer that gates on one of those should not have to guess
-	// which it is looking at. They always sum to Errors.
+	// is reporting a domain outcome, a server returning a JSON-RPC error, or an
+	// HTTP failure answering the call, is broken, and a consumer that gates on one
+	// of those should not have to guess which it is looking at. They always sum to
+	// Errors.
 	Errors         int     `json:"errors"`
 	ProtocolErrors int     `json:"protocol_errors"`
 	ToolErrors     int     `json:"tool_errors"`
@@ -265,6 +290,10 @@ type CallExport struct {
 	// is one the spec leaves to implementations. A sibling rather than a field
 	// inside Error, so the error object stays the wire shape.
 	ErrorName string `json:"error_name,omitempty"`
+	// HTTPStatus is the failed HTTP status that answered the call when no JSON-RPC
+	// answer came with it, a 401 say, which is why a call can read error with no
+	// Error beside it.
+	HTTPStatus int `json:"http_status,omitempty"`
 }
 
 type EventExport struct {
@@ -645,6 +674,12 @@ func Build(st *store.Store, sessionID string) (SessionExport, error) {
 	// called still charged for them, and that is exactly the case worth seeing.
 	if costs, ok := st.ToolCosts(sessionID); ok {
 		out.Summary.Definitions = exportToolListCost(costs)
+	}
+	for _, d := range st.Duplicates(sessionID) {
+		out.Summary.Duplicates = append(out.Summary.Duplicates, DuplicateExport{
+			Tool: d.Tool, Seq: d.Seq, ID: d.ID, EarlierSeq: d.EarlierSeq, EarlierID: d.EarlierID,
+			AfterCancel: d.AfterCancel, RanTwice: d.RanTwice,
+		})
 	}
 	out.Capabilities = capabilitiesOf(st, sessionID)
 	return out, nil
@@ -1635,6 +1670,7 @@ func exportCall(index int, c store.CallView) CallExport {
 		Result:       c.Result,
 		Error:        c.Err,
 		ErrorName:    errorName(c.Err),
+		HTTPStatus:   c.HTTPStatus,
 	}
 	if !c.CancelledAt.IsZero() {
 		cancelledAt := c.CancelledAt
@@ -1781,6 +1817,19 @@ func writeText(w io.Writer, data SessionExport) error {
 			if err := writeToolFindings(w, data.Summary.Definitions.PerTool, section.title, section.kinds); err != nil {
 				return err
 			}
+		}
+	}
+	if len(data.Summary.Duplicates) > 0 {
+		if _, err := fmt.Fprintln(w, "duplicate calls:"); err != nil {
+			return err
+		}
+		for _, d := range data.Summary.Duplicates {
+			if _, err := fmt.Fprintf(w, "  frame %d, %s %s\n", d.Seq, wiretext.OneLine(d.Tool), d.call().Phrase()); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
 		}
 	}
 	for _, ev := range data.Events {

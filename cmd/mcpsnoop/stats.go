@@ -122,8 +122,8 @@ type toolRow struct {
 	Tool     string   `json:"tool"`
 	Calls    int      `json:"calls"`
 	// ToolErrors is result.isError, the tool reporting a failure a model can act
-	// on. ProtocolErrors is a JSON-RPC error, the request or the server being
-	// wrong. FailureRate is both over Calls.
+	// on. ProtocolErrors is a JSON-RPC error or an HTTP failure that answered the
+	// call, the request or the server being wrong. FailureRate is both over Calls.
 	ToolErrors     int     `json:"tool_errors"`
 	ProtocolErrors int     `json:"protocol_errors"`
 	FailureRate    float64 `json:"failure_rate"`

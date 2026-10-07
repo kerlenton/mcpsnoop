@@ -180,7 +180,7 @@ func TestRetryWithAChangedRequestStateIsAStateIssue(t *testing.T) {
 	if p.Retries != 1 || p.StateIssues != 1 {
 		t.Fatalf("retries %d, state issues %d, want 1 and 1", p.Retries, p.StateIssues)
 	}
-	if got := Table([]Profile{p})[9].Cells[0]; got != "1 input_required, 1 retried, 1 with a bad requestState" {
+	if got := cell(t, []Profile{p}, "multi round-trip"); got != "1 input_required, 1 retried, 1 with a bad requestState" {
 		t.Fatalf("multi round-trip cell = %q", got)
 	}
 }
@@ -335,5 +335,104 @@ func TestValidTraceparent(t *testing.T) {
 		if got := validTraceparent(tp); got != want {
 			t.Errorf("validTraceparent(%q) = %v, want %v", tp, got, want)
 		}
+	}
+}
+
+// cell is one row's value for the first profile, looked up by its label so a
+// row added above it does not move what a test reads.
+func cell(t *testing.T, profiles []Profile, label string) string {
+	t.Helper()
+	for _, row := range Table(profiles) {
+		if row.Label == label {
+			return row.Cells[0]
+		}
+	}
+	t.Fatalf("no row labelled %q", label)
+	return ""
+}
+
+// TestToolActivityShowsWhatTheClientRanSideBySide. Claude Code runs calls to
+// read-only tools side by side and everything else one at a time, and the rows
+// have to show exactly that line, two lookups overlapping, the write on its own,
+// and a write the client sent again after cancelling it.
+func TestToolActivityShowsWhatTheClientRanSideBySide(t *testing.T) {
+	call := func(id, tool, args string) frame {
+		return frame{proxy.ClientToServer, `{"jsonrpc":"2.0","id":` + id + `,"method":"tools/call","params":{"name":"` + tool + `","arguments":` + args + `,` + meta2026("") + `}}`}
+	}
+	answer := func(id string) frame {
+		return frame{proxy.ServerToClient, `{"jsonrpc":"2.0","id":` + id + `,"result":{"resultType":"complete","content":[]}}`}
+	}
+	st, h := capture(t, "activity",
+		frame{proxy.ClientToServer, `{"jsonrpc":"2.0","id":"l","method":"tools/list","params":{` + meta2026("") + `}}`},
+		frame{proxy.ServerToClient, `{"jsonrpc":"2.0","id":"l","result":{"resultType":"complete","tools":[` +
+			`{"name":"lookup","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}},` +
+			`{"name":"wipe","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":false,"destructiveHint":true}},` +
+			`{"name":"append","inputSchema":{"type":"object"}}]}}`},
+		call("1", "lookup", `{"q":"a"}`), call("2", "lookup", `{"q":"b"}`), answer("1"), answer("2"),
+		call("3", "wipe", `{}`), answer("3"),
+		call("4", "append", `{"line":"x"}`),
+		frame{proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":4}}`},
+		call("5", "append", `{"line":"x"}`), answer("4"), answer("5"),
+	)
+	p, _ := Fold(st, h)
+	for label, want := range map[string]string{
+		"tool calls":      "5 (2 no hints, 2 read-only, 1 destructive)",
+		"calls in flight": "read-only up to 2 at once, others 1 at a time",
+		"repeated calls":  "1, 1 of them ran twice",
+	} {
+		if got := cell(t, []Profile{p}, label); got != want {
+			t.Errorf("%s = %q, want %q", label, got, want)
+		}
+	}
+
+	// Two sessions of one client keep the busiest moment, not the sum.
+	merged := Merge([]Profile{p, p})
+	if len(merged) != 1 || merged[0].ReadOnlyAtOnce != 2 || merged[0].OthersAtOnce != 1 || merged[0].Repeated != 2 {
+		t.Fatalf("merged = %+v", merged)
+	}
+}
+
+// TestAWriteBesideAReadIsCountedWithTheOthers. A client that sends a write while
+// a read is still in flight has run a write beside another call, which is the
+// thing the second number exists to show.
+func TestAWriteBesideAReadIsCountedWithTheOthers(t *testing.T) {
+	st, h := capture(t, "overlap",
+		frame{proxy.ClientToServer, `{"jsonrpc":"2.0","id":"l","method":"tools/list","params":{` + meta2026("") + `}}`},
+		frame{proxy.ServerToClient, `{"jsonrpc":"2.0","id":"l","result":{"resultType":"complete","tools":[` +
+			`{"name":"lookup","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}},` +
+			`{"name":"append","inputSchema":{"type":"object"}}]}}`},
+		frame{proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lookup","arguments":{},` + meta2026("") + `}}`},
+		frame{proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"append","arguments":{},` + meta2026("") + `}}`},
+		frame{proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","content":[]}}`},
+		frame{proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[]}}`},
+	)
+	p, _ := Fold(st, h)
+	if got := cell(t, []Profile{p}, "calls in flight"); got != "read-only 1 at a time, others up to 2 at once" {
+		t.Fatalf("calls in flight = %q", got)
+	}
+}
+
+// TestACallSentTheMomentTheLastWasAnsweredIsNotBesideIt. Frames carry the time
+// they were seen, so an answer and the next request can share one, and a client
+// that waits for each answer must still read as running one call at a time.
+func TestACallSentTheMomentTheLastWasAnsweredIsNotBesideIt(t *testing.T) {
+	st := store.New()
+	t0 := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	for i, f := range []struct {
+		at  time.Duration
+		dir proxy.Direction
+		raw string
+	}{
+		{0, proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"a","arguments":{},` + meta2026("") + `}}`},
+		{time.Second, proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","content":[]}}`},
+		{time.Second, proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"b","arguments":{},` + meta2026("") + `}}`},
+		{2 * time.Second, proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[]}}`},
+	} {
+		st.Ingest(proxy.Envelope{SessionID: "instant", ServerLabel: "ref", Seq: uint64(i + 1), TS: t0.Add(f.at),
+			Direction: f.dir, Transport: proxy.TransportStdio, Raw: json.RawMessage(f.raw)})
+	}
+	p, _ := Fold(st, st.Sessions()[0])
+	if got := cell(t, []Profile{p}, "calls in flight"); got != "others 1 at a time" {
+		t.Fatalf("calls in flight = %q, want others 1 at a time", got)
 	}
 }

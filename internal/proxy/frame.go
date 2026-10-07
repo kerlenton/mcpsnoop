@@ -102,6 +102,17 @@ type Envelope struct {
 	// uniqueness to the sender, so two conforming clients both starting at id 1
 	// were reported for reusing an id in flight.
 	ConnID string `json:"conn_id,omitempty"`
+	// Exchange numbers the HTTP request this frame belongs to, the same on the
+	// request and on every frame of its response, so a response with no JSON-RPC
+	// message of its own, a 401 or a gateway's 502, can still be tied to the call
+	// it answered. ConnID cannot do that, since one connection carries one request
+	// after another. Zero on stdio and in a log written before mcpsnoop recorded it.
+	Exchange uint64 `json:"exchange,omitempty"`
+	// Undelivered marks mcpsnoop's own 502 for a request it could not deliver at
+	// all, the target refusing the connection say, so the call it answers is known
+	// never to have run. A timeout is not undelivered, since the target may have
+	// received the request before it stopped answering.
+	Undelivered bool `json:"undelivered,omitempty"`
 	// Truncated marks a frame whose observed copy was cut at the frame-size cap.
 	// The bytes still forwarded to the other side in full; only this copy is short.
 	Truncated bool `json:"truncated,omitempty"`

@@ -6,14 +6,17 @@
 // new clients connect to the same server. Each tool exists to make a client
 // show one behaviour. echo is the baseline call, confirm_action asks the user
 // a question back, and slow_task reports progress and can be cancelled. The
-// list results carry a one-minute ttlMs, so a client that re-lists sooner is
-// ignoring the hint.
+// note tools declare one effect each, read-only, additive and destructive, and
+// add_note records its note before it answers, so a client that gives up on it
+// and sends it again adds the note twice. The list results carry a one-minute
+// ttlMs, so a client that re-lists sooner is ignoring the hint.
 package main
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -26,6 +29,11 @@ type echoIn struct {
 
 type confirmIn struct {
 	Action string `json:"action" jsonschema:"the action to ask the user to confirm"`
+}
+
+type noteIn struct {
+	Text    string `json:"text" jsonschema:"the note to add"`
+	DelayMS int    `json:"delay_ms,omitempty" jsonschema:"how long to wait before answering, in milliseconds, at most 10000"`
 }
 
 type slowIn struct {
@@ -50,6 +58,17 @@ func main() {
 	mcp.AddTool(server, &mcp.Tool{Name: "echo_read", Description: "Return the text it is given. Read-only.", Annotations: readOnly}, echo)
 	mcp.AddTool(server, &mcp.Tool{Name: "slow_read", Description: "Work for a few seconds while reporting progress, then finish. Read-only.", Annotations: readOnly}, slow)
 	mcp.AddTool(server, &mcp.Tool{Name: "list_roots", Description: "Ask the client for its roots and report them."}, listRoots)
+	// One tool per declared effect, every hint spelled out. add_note is the one a
+	// retry hurts. It adds a note each time it runs, so it is neither read-only
+	// nor idempotent, and it does its work before it answers.
+	no, yes := false, true
+	var notes noteBook
+	mcp.AddTool(server, &mcp.Tool{Name: "add_note", Description: "Add a note to this server's notebook and report how many it holds.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &no, IdempotentHint: false, OpenWorldHint: &no}}, notes.add)
+	mcp.AddTool(server, &mcp.Tool{Name: "count_notes", Description: "Report how many notes the notebook holds.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: &no, OpenWorldHint: &no}}, notes.count)
+	mcp.AddTool(server, &mcp.Tool{Name: "clear_notes", Description: "Remove every note from the notebook.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &yes, IdempotentHint: true, OpenWorldHint: &no}}, notes.clear)
 	mcp.AddTool(server, &mcp.Tool{Name: "unlock_tool", Description: "Make a new tool, bonus_tool, available on this server."}, unlock(server))
 	server.AddPrompt(&mcp.Prompt{
 		Name:        "greeting",
@@ -127,6 +146,38 @@ func slow(ctx context.Context, req *mcp.CallToolRequest, in slowIn) (*mcp.CallTo
 		}
 	}
 	return text(fmt.Sprintf("worked for %d seconds", seconds)), nil, nil
+}
+
+// noteBook is the state the note tools share.
+type noteBook struct {
+	mu    sync.Mutex
+	notes []string
+}
+
+// add records the note first and only then waits, ignoring cancellation, which
+// is what a handler that commits before it answers looks like from outside. A
+// client that gives up during the wait cannot tell whether the note was added,
+// and it was.
+func (b *noteBook) add(_ context.Context, _ *mcp.CallToolRequest, in noteIn) (*mcp.CallToolResult, any, error) {
+	b.mu.Lock()
+	b.notes = append(b.notes, in.Text)
+	n := len(b.notes)
+	b.mu.Unlock()
+	time.Sleep(time.Duration(min(max(in.DelayMS, 0), 10_000)) * time.Millisecond)
+	return text(fmt.Sprintf("the notebook holds %d note(s)", n)), nil, nil
+}
+
+func (b *noteBook) count(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return text(fmt.Sprintf("the notebook holds %d note(s)", len(b.notes))), nil, nil
+}
+
+func (b *noteBook) clear(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.notes = nil
+	return text("the notebook is empty"), nil, nil
 }
 
 // listRoots asks for the client's roots the same way confirm asks a question.

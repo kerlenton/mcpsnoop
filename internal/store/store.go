@@ -216,6 +216,21 @@ type call struct {
 	// remembered so completion can close it and a later notification under the
 	// same token is read as reuse rather than a violation.
 	progressToken string
+	// exchange is the HTTP exchange the request arrived on, zero on stdio, and
+	// transportStatus the failed HTTP status that settled the call when the
+	// response carried no JSON-RPC answer of its own, a 401 or a 502 say.
+	// undelivered says that status was mcpsnoop's own, for a request it never
+	// managed to send on.
+	exchange        uint64
+	transportStatus int
+	undelivered     bool
+	// signature identifies a tool call by its tool and arguments, empty for any
+	// other call and for one whose arguments cannot be compared. retryOf is the
+	// identical earlier call whose outcome the client could not yet know when it
+	// sent this one, and retryAfterCancel says the client had cancelled it.
+	signature        string
+	retryOf          *call
+	retryAfterCancel bool
 }
 
 // event is the mutable internal timeline entry.
@@ -337,6 +352,11 @@ type session struct {
 	dropped   int
 	toolStats toolStats
 	tasks     map[string]*call
+	// openAttempts holds, for each tool and its arguments, the latest identical
+	// tool call still waiting on an answer, and retries the calls that repeated
+	// one before it came. See Duplicates.
+	openAttempts map[string]*call
+	retries      []*call
 	// awaiting holds operations that answered with an InputRequiredResult and are
 	// waiting for the client to retry, and retiredExchanges counts the ones the
 	// parking cap dropped. A dropped operation can no longer be linked to, so a
@@ -541,6 +561,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		if httpFailed(e.Status) {
 			sess.errors++
 			ev.errored = true
+			sess.failExchange(e.Exchange, e.Status, e.Undelivered, e.TS)
 		}
 		s.appendEvent(sess, ev)
 		return ev.view(sess)
@@ -564,6 +585,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			ev.kind = EventTransport
 			sess.errors++
 			ev.errored = true
+			sess.failExchange(e.Exchange, e.Status, e.Undelivered, e.TS)
 		} else {
 			ev.kind = EventInvalid
 		}
@@ -688,6 +710,11 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			if msg.Error != nil {
 				sess.errors++
 				ev.errored = true
+				// An error that names no request, often an id of null beside a 401,
+				// still answered the request its exchange carried.
+				if httpFailed(e.Status) {
+					sess.failExchange(e.Exchange, e.Status, e.Undelivered, e.TS)
+				}
 			}
 		case !matched:
 			ev.warning = appendWarning(ev.warning, "duplicate response for the same id")
@@ -1085,6 +1112,14 @@ func (sess *session) dropOldestFrame() int {
 				delete(sess.calls, key)
 			}
 		}
+		sess.forgetAttempt(ev.call)
+	}
+	// A retry is reported by its request frame, so once that frame is gone the
+	// retry goes too. Retries arrive in request order and frames leave oldest
+	// first, so the one leaving is always at the front.
+	if ev.kind == EventRequest && len(sess.retries) > 0 && sess.retries[0] == ev.call {
+		sess.retries[0] = nil
+		sess.retries = sess.retries[1:]
 	}
 	return dropped
 }
@@ -1170,6 +1205,7 @@ func (s *Store) sessionFor(e proxy.Envelope) *session {
 			toolDefinitions: make(map[string]ToolDefinition),
 			calls:           make(map[callKey]*call),
 			tasks:           make(map[string]*call),
+			openAttempts:    make(map[string]*call),
 		}
 		s.sessions[e.SessionID] = sess
 		s.order = append(s.order, e.SessionID)
@@ -1226,14 +1262,62 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 	if msg.Method == "tools/call" {
 		c.isTool = true
 		c.toolName = toolName(msg.Params)
+		// Arguments mcpsnoop's own redaction rewrote cannot be compared, since two
+		// different secrets read the same once both are the placeholder.
+		if e.Direction == proxy.ClientToServer && !e.Redacted {
+			c.signature = callSignature(c.toolName, msg.Params)
+		}
 	}
 	if isTaskMethod(msg.Method) {
 		c.taskID = taskID(msg.Params)
 	}
 	c.opName = operationName(msg)
 	c.protocolVersion = requestProtocolVersion(msg.Params, e.MCPProtocolVersion)
+	c.exchange = e.Exchange
 	sess.calls[key] = c
+	sess.noteAttempt(c)
 	return c, reused
+}
+
+// failExchange settles the calls an HTTP failure answered. A 401, a 403 or a
+// gateway's 502 carries no JSON-RPC id, so before the proxy numbered exchanges a
+// refused call stayed pending for the rest of the capture and read as a request
+// the server never answered, when the server, or something in front of it, had
+// answered it plainly. The frame that carried the failure already counted the
+// error, so the calls take Failed without counting it again.
+func (sess *session) failExchange(exchange uint64, status int, undelivered bool, ts time.Time) {
+	if exchange == 0 {
+		return
+	}
+	for _, c := range sess.calls {
+		if c.exchange != exchange || c.reqDir != proxy.ClientToServer {
+			continue
+		}
+		switch c.state {
+		case Pending:
+			if c.taskID != "" {
+				continue // answered already, with the handle the task continues under
+			}
+			sess.pending--
+		case Streaming:
+			// A stream the failure stopped from ever opening. It never held a pending
+			// slot, so it gives none back.
+		default:
+			continue
+		}
+		c.state = Failed
+		c.end = ts
+		c.markHop(ts, &c.serverTime)
+		c.transportStatus = status
+		c.undelivered = undelivered
+		c.errored = true
+		// A refusal tells the client the call never ran, and so does a request
+		// mcpsnoop never delivered. A 5xx from something in front of the server does
+		// not, so that attempt is still one a retry can repeat.
+		if status < 500 || undelivered {
+			sess.forgetAttempt(c)
+		}
+	}
 }
 
 func requestCallKey(id string, rawID json.RawMessage, e proxy.Envelope) callKey {
@@ -1327,6 +1411,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 			c.taskID = state.TaskID
 			c.taskStatus = state.Status
 			sess.tasks[state.TaskID] = c
+			sess.forgetAttempt(c)
 			return c, true
 		}
 	}
@@ -1349,6 +1434,7 @@ func (sess *session) completeCall(id string, respDir proxy.Direction, conn strin
 	if wasPending {
 		sess.pending--
 	}
+	sess.forgetAttempt(c)
 	sess.applyResponseSideEffects(c, msg, redacted)
 	return c, true
 }

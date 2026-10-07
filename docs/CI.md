@@ -7,13 +7,14 @@ it can fail on.
 
 Gate a recorded agent run on errors, stream corruption, protocol warnings,
 routing-header mismatches, calls that never got a response, results that came
-back after a cancel, tool-definition drift, tool annotations that loosened after
+back after a cancel, tool calls sent again before anyone knew whether the first
+attempt ran, tool-definition drift, tool annotations that loosened after
 approval, use of deprecated protocol features, dropped frames that leave the
 capture incomplete, schemas that travel badly across clients, or tools that
 declare their behaviour badly or not at all.
 
 ```bash
-mcpsnoop check [--format text|junit|sarif] [--fail-on error,invalid,warn,mismatch,pending,late-result,drift,loosened,deprecated,incomplete,schema,annotations] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit|sarif] [--fail-on error,invalid,warn,mismatch,pending,late-result,duplicate,drift,loosened,deprecated,incomplete,schema,annotations] [session-id|log.jsonl|-]
 ```
 
 `error`, `invalid` and `warn` fail the check on their own. The rest are opt-in.
@@ -28,6 +29,7 @@ session to check the newest capture, or use `-` to read JSONL from stdin.
 | `mismatch` | a routing header disagreeing with the body, riding a batch, or missing where the revision requires it |
 | `pending` | a request still open when the capture ended, so the caller was left waiting |
 | `late-result` | a response that arrived after its request was cancelled |
+| `duplicate` | a tool call sent again with the same arguments before the client knew what became of the first attempt, so it may have run twice |
 | `drift` | an advertised tool definition changing after the baseline was approved |
 | `loosened` | a tool's annotations claiming less risk than the approved baseline, such as a write that now says it is read-only |
 | `deprecated` | a feature the specification has deprecated |
@@ -39,7 +41,7 @@ Every signal is counted whether or not it is gating, so a run says what it found
 before you decide what should fail on it.
 
 ```
-session build-agent: errors=1 invalid=0 warnings=0 mismatches=0 pending=0 late_results=0 deprecated=0 missing_frames=0 schema_findings=1 annotation_findings=0
+session build-agent: errors=1 invalid=0 warnings=0 mismatches=0 pending=0 late_results=0 deprecated=0 missing_frames=0 schema_findings=1 annotation_findings=0 duplicates=0
 schema findings:
   oneOf: search
 check failed: error
@@ -313,6 +315,78 @@ facts is its own problem and putting a bearer token on disk is not the answer to
 it. `Mcp-Session-Id` and `Last-Event-ID` are not captured either. The
 2026-07-28 revision removed both and tells a server to ignore them, so there is
 no rule left to check.
+
+### Catch a call that may have run twice
+
+A client that times out on a tool call cancels it, and often sends it again. MCP
+says nothing about what should happen then. Its cancellation page warns that
+"cancellation notifications may arrive after request processing has completed",
+and lets a server ignore a cancellation for work it has already finished. So after a timeout the
+client cannot know whether the work happened, and sending the call again runs
+it again. A tool that adds a row, sends a message or charges a card then does it
+twice. Spec issue
+[#3394](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/3394)
+reproduces exactly that on an SDK path.
+
+The official SDK clients cancel on a timeout, TypeScript 1.32.1, Python 2.3.0
+and Go 1.8.0 alike, so on stdio a retry usually follows a `notifications/cancelled`
+for the call it repeats. mcpsnoop reports the second call when it repeats an
+identical earlier one, the same tool with the same arguments, whose outcome the
+client could not know yet. The earlier call was cancelled, or had no answer when
+the repeat went out and never got one. When the server answered both, the report
+says the call ran twice.
+
+```
+duplicate calls:
+  frame 41, add_note was called again with the same arguments after the client cancelled the call on frame 39, and the server answered both, so it ran twice
+```
+
+That one is a real capture. The Go SDK 1.8.0 client in the
+[client matrix](../clientmatrix/README.md) gave up on `add_note` after 300ms and
+sent it again. The Go SDK 1.8.0 server answered the cancelled call anyway, and
+`count_notes` then reported two notes.
+
+A repeat is left out when the wire shows it did no extra work.
+
+- The tool declares `readOnlyHint` or `idempotentHint`, which is what the hints are for.
+- The earlier call was answered before the repeat went out.
+- The earlier call was answered after all and never cancelled. That is what two
+  identical calls sent in parallel on purpose look like, and a client that gave
+  up without cancelling looks the same, so neither is reported.
+- The earlier call was refused, or the repeat itself failed.
+- The earlier call was waiting on the user or had become a task, since the server
+  had said it had not done the work yet, or was doing it.
+- The arguments went through mcpsnoop's own redaction, since two different
+  secrets read the same once both are the placeholder.
+
+An error answering a call the client had already cancelled does not count as a
+failure, because it is usually the cancellation reported back. The Go SDK turns
+a cancelled handler into an `isError` result, and that says nothing about
+whether the work was done before the handler noticed.
+
+On Streamable HTTP closing the response stream is the cancellation, and it leaves
+no frame. A call abandoned that way reads as never answered, so a repeat of it is
+reported as one that may have run twice. mcpsnoop numbers every HTTP exchange,
+so a 401 or a 403 settles the call it refused. A repeat after authorizing again,
+which the authorization spec tells a client to do, is not reported, and the
+refused call reads as failed rather than as one still waiting for an answer. A
+5xx from something in front of the server says nothing about whether the server
+ran the call, so a repeat after one is reported.
+
+Repeats are matched within one session. A stdio server that crashed and was
+restarted is a new capture, and the spec says requests in flight are lost and
+may be retried against the fresh process, so such a retry is not compared with
+the call it repeats.
+
+```bash
+mcpsnoop check --fail-on duplicate session.jsonl
+```
+
+`duplicate` is opt-in, since the wire can only ever show that the work may have
+happened twice and sometimes that it did. The fix is on the server. Make the
+tool safe to repeat and declare `idempotentHint`, or have it recognise a repeat
+by a key carried in the arguments. `mcpsnoop clients` counts the repeats each
+client made, and `export` carries them under `summary.duplicates`.
 
 ### Detect tool definition drift
 

@@ -16,6 +16,7 @@ Each part of it exists to make a client show one behaviour.
 | `confirm_action` tool | an elicitation, through multi round-trip requests under 2026-07-28 and through `elicitation/create` under older revisions |
 | `slow_task` tool | progress tokens, and cancellation when a client gives up |
 | `echo_read` and `slow_read` tools | the same two marked `readOnlyHint`, so whether calls asked for at once are sent at once shows |
+| `add_note`, `count_notes` and `clear_notes` tools | one declared effect each, additive, read-only and destructive, every hint spelled out. `add_note` records its note before it answers, so a client that gives up on it and sends it again adds the note twice |
 | `list_roots` tool | what a client reports as its roots, through multi round-trip requests or `roots/list` |
 | `unlock_tool` and the `bonus_tool` it adds | whether a tool added mid-conversation is picked up, through `subscriptions/listen` under 2026-07-28 |
 | `greeting` prompt and `ref://about` resource | whether a client lists and reads them |
@@ -28,7 +29,12 @@ of the measurement, so the table reports what happened rather than what was
 asked.
 
 `goclient` is the official Go SDK client running a fixed scenario. It is the
-column that needs no account, and it checks the harness end to end.
+column that needs no account, and it checks the harness end to end. It also
+gives up on an `add_note` call after 300ms and sends it again, which is the
+retry spec issue
+[#3394](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/3394)
+reproduces, so `mcpsnoop check --fail-on duplicate` has a real capture to
+report on.
 
 ## Run it
 

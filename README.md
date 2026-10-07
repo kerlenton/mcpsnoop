@@ -132,7 +132,8 @@ a notification, and the 502 when the target cannot be reached at all. A 401's
 `WWW-Authenticate` header is kept verbatim and shown in the inspector, since it
 names the auth scheme and the resource metadata to go to next. Filter by status
 with `status:401` in the TUI, or by any failure with `status:err`. A 4xx or 5xx
-counts as an error, so a default `mcpsnoop check` run fails on it.
+counts as an error, so a default `mcpsnoop check` run fails on it, and the call it
+answered reads as failed rather than as one still waiting.
 
 No server of your own? [Try it for real](docs/TRY_IT.md) against a published
 test server, driven by your own client. To inspect a session after it happened,
@@ -181,7 +182,7 @@ completion and the install path for your OS.
 | `mcpsnoop --metrics-listen <addr>` | run a headless hub and expose live Prometheus metrics |
 | `mcpsnoop http --target <url>` | proxy a streamable-HTTP server |
 | `mcpsnoop export` | render a session to json, html, text, har, or otlp |
-| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, hung calls, late results, tool drift, annotations that loosened or say nothing, or a latency budget |
+| `mcpsnoop check` | fail CI on errors, invalid frames, warnings, routing mismatches, hung calls, late results, calls that may have run twice, tool drift, annotations that loosened or say nothing, or a latency budget |
 | `mcpsnoop baseline` | inspect, accept, or reset trusted tool definitions |
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |

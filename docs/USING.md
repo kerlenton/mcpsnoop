@@ -331,11 +331,14 @@ oldie 0.9
   lists                    tools/list ×1
   re-fetches inside ttlMs  none
   trace context            0 of 4 requests
+  tool calls               1 (1 no hints)
   progress tokens          0 of 1 tool calls
   multi round-trip         not exercised
   elicitation answers      decline 1
   server requests          elicitation/create answered ×1, roots/list error -32601 ×1
   cancellations            none
+  calls in flight          others 1 at a time
+  repeated calls           none
   deprecated in use        logging ×1
   protocol warnings        none
 
@@ -348,11 +351,14 @@ probe 1.4.0
   lists                    tools/list ×2
   re-fetches inside ttlMs  1
   trace context            4 of 5 requests
+  tool calls               2 (2 no hints)
   progress tokens          1 of 2 tool calls
   multi round-trip         1 input_required, 1 retried
   elicitation answers      accept 1
   server requests          none
   cancellations            none
+  calls in flight          others 1 at a time
+  repeated calls           none
   deprecated in use        none
   protocol warnings        none
 ```
@@ -377,6 +383,16 @@ what lets a client's own spans and mcpsnoop's join one trace. `re-fetches inside
 ttlMs` counts list and read requests repeated inside the freshness window the
 server declared, so a client ignoring the caching hints is visible. `deprecated
 in use` names features 2026-07-28 deprecated and the client still exercised.
+
+`tool calls` breaks the calls down by what each called tool declares,
+read-only, additive or destructive, or no hints for a tool that declares none or
+was never listed. `calls in flight` is the most calls the client had going at
+once among the ones the server answered, read-only tools apart from the rest,
+because that is the line clients draw. Claude Code 2.1.292 reads `read-only up to
+2 at once, others 1 at a time`. `repeated calls` counts the calls a client sent
+again before it could know what became of the first attempt, the ones
+`check --fail-on duplicate` reports, and how many of them the server answered
+twice.
 
 With no arguments it walks the sessions directory the way `stats` does, with the
 same `--since`, `--label` and `--limit`. Name logs to read exactly those, which

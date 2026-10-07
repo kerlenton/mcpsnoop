@@ -2172,3 +2172,70 @@ func TestTextExportFindingsCannotForgeRows(t *testing.T) {
 		t.Fatalf("a forged row reached the output:\n%s", out)
 	}
 }
+
+// TestExportCarriesRepeatedCalls. The export is what outlives the run, so a call
+// the client sent again before it knew the first attempt's outcome travels in it
+// with both frames and what the server answered, worded the way check words it.
+func TestExportCarriesRepeatedCalls(t *testing.T) {
+	st := store.New()
+	now := time.Now()
+	for i, f := range []struct {
+		dir proxy.Direction
+		raw string
+	}{
+		{proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_note","arguments":{"text":"x"}}}`},
+		{proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}`},
+		{proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add_note","arguments":{"text":"x"}}}`},
+		{proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`},
+		{proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`},
+	} {
+		st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: uint64(i + 1),
+			TS: now.Add(time.Duration(i) * time.Millisecond), Direction: f.dir, Raw: json.RawMessage(f.raw)})
+	}
+	out, err := Build(st, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []DuplicateExport{{Tool: "add_note", Seq: 3, ID: "2", EarlierSeq: 1, EarlierID: "1", AfterCancel: true, RanTwice: true}}
+	if !slices.Equal(out.Summary.Duplicates, want) {
+		t.Fatalf("duplicates = %+v, want %+v", out.Summary.Duplicates, want)
+	}
+
+	var buf bytes.Buffer
+	if err := Write(&buf, out, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	const line = "duplicate calls:\n  frame 3, add_note was called again with the same arguments after the client cancelled the call on frame 1, and the server answered both, so it ran twice\n"
+	if !strings.Contains(buf.String(), line) {
+		t.Fatalf("text export does not list the repeat:\n%s", buf.String())
+	}
+
+	forged := SessionExport{Summary: ToolSummaryExport{Duplicates: []DuplicateExport{{Tool: "x\nduplicate calls:", Seq: 2, EarlierSeq: 1}}}}
+	buf.Reset()
+	if err := Write(&buf, forged, Options{Format: FormatText}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `frame 2, "x\nduplicate calls:" was called again`) {
+		t.Fatalf("a tool name reached the text export raw:\n%s", buf.String())
+	}
+}
+
+// TestExportCarriesTheStatusThatRefusedACall. A call an HTTP failure answered
+// reads as an error with no error object beside it, so the status is what says
+// why, and a reader of the export should not have to find the frame to learn it.
+func TestExportCarriesTheStatusThatRefusedACall(t *testing.T) {
+	st := store.New()
+	now := time.Now()
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 1, TS: now, Direction: proxy.ClientToServer,
+		Transport: proxy.TransportHTTP, Exchange: 3,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write"}}`)})
+	st.Ingest(proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: now, Direction: proxy.ServerToClient,
+		Transport: proxy.TransportHTTP, Exchange: 3, Status: 401})
+	out, err := Build(st, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Calls) != 1 || out.Calls[0].Status != "error" || out.Calls[0].HTTPStatus != 401 {
+		t.Fatalf("calls = %+v, want the refused call as an error with HTTP 401", out.Calls)
+	}
+}

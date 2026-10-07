@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/jsonwire"
@@ -85,10 +86,16 @@ type route struct {
 	// process carries every client that connects to it, and JSON-RPC id
 	// uniqueness is scoped to the sender rather than to the wire, so two
 	// conforming clients both starting at id 1 collided in one id space.
-	conn      string
-	truncated bool   // the observed copy was cut at the frame-size cap
-	status    int    // HTTP status of the response carrying this frame
-	challenge string // WWW-Authenticate on that response
+	conn string
+	// exchange numbers the HTTP request this frame belongs to. See
+	// Envelope.Exchange.
+	exchange uint64
+	// undelivered marks the proxy's own 502 for a request that never reached the
+	// target. See Envelope.Undelivered.
+	undelivered bool
+	truncated   bool   // the observed copy was cut at the frame-size cap
+	status      int    // HTTP status of the response carrying this frame
+	challenge   string // WWW-Authenticate on that response
 	// headers are the spec-mandated transport headers of this frame. A pointer so
 	// a frame mcpsnoop captured with none is distinguishable from a log written
 	// before it recorded them at all.
@@ -140,6 +147,8 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 			MCPParamHeaders:    slices.Clone(r.params),
 			Batch:              r.batch,
 			ConnID:             r.conn,
+			Exchange:           r.exchange,
+			Undelivered:        r.undelivered,
 			Truncated:          r.truncated,
 			Status:             r.status,
 			AuthChallenge:      r.challenge,
@@ -236,6 +245,16 @@ func (t *bodyTap) Read(p []byte) (int, error) {
 }
 
 func (t *bodyTap) Close() error {
+	// A transport that gives up before sending, a target that refused the
+	// connection say, closes the body without reading it. The client still sent
+	// the request, so the copy is read before letting go, as far as the cap, or
+	// the 502 that follows answers a request nobody can see.
+	t.mu.Lock()
+	unread := !t.done && t.buf.Len() == 0 && !t.cut
+	t.mu.Unlock()
+	if unread {
+		_, _ = io.Copy(io.Discard, io.LimitReader(t, int64(t.cap)+1))
+	}
 	t.finish()
 	return t.rc.Close()
 }
@@ -345,6 +364,7 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			}
 			if resp.Request != nil {
 				rt.conn = resp.Request.RemoteAddr
+				rt.exchange = exchangeOf(resp.Request)
 			}
 			// Defensive fallback. If the target ignored the identity request and
 			// still compressed the body, skip observation rather than push binary
@@ -391,15 +411,28 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			// session, which is the failure mode this whole change exists to avoid.
 			// A deadline is not excluded: a target that timed out did fail.
 			if !errors.Is(err, context.Canceled) {
-				emit(ServerToClient, nil, route{status: http.StatusBadGateway, conn: req.RemoteAddr})
+				// A dial that failed means the request never left mcpsnoop, so the target
+				// cannot have run it. Anything later, a timeout or garbage back, may have
+				// reached it.
+				var dial *net.OpError
+				undelivered := errors.As(err, &dial) && dial.Op == "dial"
+				emit(ServerToClient, nil, route{status: http.StatusBadGateway, conn: req.RemoteAddr,
+					exchange: exchangeOf(req), undelivered: undelivered})
 			}
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
 
+	var exchanges atomic.Uint64
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Numbered before anything is observed and carried on the context, which the
+		// reverse proxy hands to both the outgoing request and the error handler, so
+		// the request and whatever comes back for it share one number.
+		exchange := exchanges.Add(1)
+		r = r.WithContext(context.WithValue(r.Context(), exchangeKey{}, exchange))
 		if r.Body != nil && r.Method == http.MethodPost {
 			rt := route{
+				exchange:        exchange,
 				method:          r.Header.Get(mcpMethodHeader),
 				name:            r.Header.Get(mcpNameHeader),
 				protocolVersion: r.Header.Get(mcpProtocolVersionHeader),
@@ -419,6 +452,16 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 		}
 		rp.ServeHTTP(w, r)
 	})
+}
+
+// exchangeKey carries an exchange's number on its request context.
+type exchangeKey struct{}
+
+// exchangeOf returns the number the handler gave the exchange r belongs to, or
+// zero for a request that never passed through it.
+func exchangeOf(r *http.Request) uint64 {
+	exchange, _ := r.Context().Value(exchangeKey{}).(uint64)
+	return exchange
 }
 
 // emitFrames emits one envelope per JSON-RPC message in body, splitting a batch
@@ -442,7 +485,7 @@ func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte,
 				// element. Dropping them here would make a batched response the one
 				// place the transport layer went missing again.
 				er := route{batch: true, protocolVersion: rt.protocolVersion, status: rt.status,
-					challenge: rt.challenge, conn: rt.conn}
+					challenge: rt.challenge, conn: rt.conn, exchange: rt.exchange}
 				if i == 0 {
 					er.method, er.name, er.params = rt.method, rt.name, rt.params
 				}

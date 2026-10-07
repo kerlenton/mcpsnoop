@@ -53,7 +53,7 @@ func TestCheckSARIFCleanSessionDeclaresEveryRuleAndNoResults(t *testing.T) {
 	// closes.
 	want := []string{
 		"mcpsnoop/error", "mcpsnoop/invalid", "mcpsnoop/warn", "mcpsnoop/mismatch",
-		"mcpsnoop/pending", "mcpsnoop/late-result", "mcpsnoop/drift", "mcpsnoop/loosened",
+		"mcpsnoop/pending", "mcpsnoop/late-result", "mcpsnoop/duplicate", "mcpsnoop/drift", "mcpsnoop/loosened",
 		"mcpsnoop/deprecated", "mcpsnoop/incomplete", "mcpsnoop/schema", "mcpsnoop/annotations",
 		"mcpsnoop/assertion", "mcpsnoop/report-truncated",
 	}
@@ -754,6 +754,8 @@ func checkTextCountField(signal checkSignal) string {
 		return "schema_findings"
 	case checkAnnotations:
 		return "annotation_findings"
+	case checkDuplicate:
+		return "duplicates"
 	case checkError:
 		return "errors"
 	}
@@ -793,6 +795,12 @@ func everySignalEnvelopes() []proxy.Envelope {
 		checkEnvelope(14, proxy.ServerToClient, `{"jsonrpc":"2.0","id":6,"result":{"tools":[{"name":"search","inputSchema":{"type":"object","properties":{"q":{"oneOf":[{"type":"string"},{"type":"integer"}]}}}}]}}`),
 		// pending: a call still open when the capture ends.
 		checkEnvelope(15, proxy.ClientToServer, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"hang"}}`),
+		// duplicate: a call cancelled and sent again with the same arguments, to a
+		// tool that never said it was safe to repeat.
+		checkEnvelope(16, proxy.ClientToServer, `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"append","arguments":{"line":"x"}}}`),
+		checkEnvelope(17, proxy.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":8}}`),
+		checkEnvelope(18, proxy.ClientToServer, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"append","arguments":{"line":"x"}}}`),
+		checkEnvelope(19, proxy.ServerToClient, `{"jsonrpc":"2.0","id":9,"result":{"content":[]}}`),
 	}
 }
 

@@ -193,11 +193,11 @@ at a 71 MB response, which Prometheus drops whole.
 
 `mcpsnoop_tool_errors_total` counts errors that arrive as a JSON-RPC error or as
 `result.isError`. A failure that never became a JSON-RPC message, such as a 502
-from a gateway or a 401 challenge, cannot be attributed to a tool, because
-nothing in the response says which request it answered. Those go to
-`mcpsnoop_transport_errors_total` with the status, and the family is exported
-even when it is empty, so a graph of it on a healthy hub is flat rather than
-absent.
+from a gateway or a 401 challenge, goes to `mcpsnoop_transport_errors_total`
+with the status instead. The stream and `check` mark the call it answered as
+failed, but the metric keeps the two apart, since a gateway's 502 says something
+about the gateway rather than about the tool. The family is exported even when
+it is empty, so a graph of it on a healthy hub is flat rather than absent.
 
 The endpoint reports what this hub has seen since it started. It is not a store
 of record, and a hub restart starts the counters again, which Prometheus reads

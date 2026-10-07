@@ -1076,3 +1076,100 @@ func TestHTTPTargetFragmentReachesNeitherTheServerNorTheLog(t *testing.T) {
 		t.Fatalf("meta = %+v, want exactly one frame with no fragment", meta)
 	}
 }
+
+// TestEveryFrameOfAnExchangeCarriesItsNumber. A 401 or a 502 carries no JSON-RPC
+// id, so without a number shared with the request it answers, the call it
+// refused stayed pending for the rest of the capture and read as hung. The
+// number has to reach every path a response can take, a plain body, a bodiless
+// status, a batch split into elements, and the proxy's own 502.
+func TestEveryFrameOfAnExchangeCarriesItsNumber(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case strings.Contains(string(body), `"refuse"`):
+			w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
+			w.WriteHeader(http.StatusUnauthorized)
+		case strings.HasPrefix(string(body), "["):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `[{"jsonrpc":"2.0","id":2,"result":{}},{"jsonrpc":"2.0","id":3,"result":{}}]`)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		}
+	}))
+	u, err := url.Parse(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type frame struct {
+		dir         Direction
+		exchange    uint64
+		status      int
+		undelivered bool
+	}
+	var mu sync.Mutex
+	var frames []frame
+	front := httptest.NewServer(httpProxyHandler(u, func(dir Direction, _ []byte, rt route) {
+		mu.Lock()
+		frames = append(frames, frame{dir, rt.exchange, rt.status, rt.undelivered})
+		mu.Unlock()
+	}))
+	defer front.Close()
+
+	post := func(body string) {
+		t.Helper()
+		resp, err := http.Post(front.URL+"/mcp", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	post(`{"jsonrpc":"2.0","id":1,"method":"ping"}`)
+	post(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"refuse"}}`)
+	post(`[{"jsonrpc":"2.0","id":2,"method":"ping"},{"jsonrpc":"2.0","id":3,"method":"ping"}]`)
+	// The target goes away, so the proxy answers this one itself.
+	target.Close()
+	post(`{"jsonrpc":"2.0","id":4,"method":"ping"}`)
+
+	mu.Lock()
+	defer mu.Unlock()
+	byExchange := make(map[uint64][]frame)
+	for _, f := range frames {
+		if f.exchange == 0 {
+			t.Fatalf("a frame carried no exchange number: %+v", f)
+		}
+		byExchange[f.exchange] = append(byExchange[f.exchange], f)
+	}
+	if len(byExchange) != 4 {
+		t.Fatalf("exchanges = %d, want one per request: %+v", len(byExchange), frames)
+	}
+	statuses := map[int]bool{}
+	for exchange, fs := range byExchange {
+		requests, responses := 0, 0
+		for _, f := range fs {
+			if f.dir == ClientToServer {
+				requests++
+			} else {
+				responses++
+				statuses[f.status] = true
+			}
+		}
+		if requests == 0 || responses == 0 {
+			t.Errorf("exchange %d has %d request and %d response frames, want both sides", exchange, requests, responses)
+		}
+	}
+	for _, status := range []int{http.StatusOK, http.StatusUnauthorized, http.StatusBadGateway} {
+		if !statuses[status] {
+			t.Errorf("no response with status %d was tied to its request: %+v", status, frames)
+		}
+	}
+	// The one request mcpsnoop never delivered, because the target was gone, is
+	// the one marked so, and its 502 is the only frame carrying the mark.
+	for _, f := range frames {
+		if f.undelivered != (f.status == http.StatusBadGateway) {
+			t.Errorf("frame %+v: undelivered should mark exactly the proxy's own 502 for a refused connection", f)
+		}
+	}
+}
