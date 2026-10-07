@@ -12,11 +12,6 @@ import (
 	"time"
 )
 
-// readerFunc adapts a function to an io.Reader.
-type readerFunc func([]byte) (int, error)
-
-func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
-
 // captureSink collects envelopes for assertions.
 type captureSink struct {
 	mu   sync.Mutex

@@ -67,6 +67,81 @@ func TestBodyTapConcurrentReadAndClose(t *testing.T) {
 	}
 }
 
+// parkedReader holds every Read until released and records whether two Reads
+// ever ran at once, which is the state a Close racing the transport's first read
+// of a request body finds.
+type parkedReader struct {
+	release  chan struct{}
+	inFlight atomic.Int32
+	overlap  atomic.Bool
+	mu       sync.Mutex
+	data     []byte
+}
+
+func (r *parkedReader) Read(p []byte) (int, error) {
+	if r.inFlight.Add(1) > 1 {
+		r.overlap.Store(true)
+	}
+	defer r.inFlight.Add(-1)
+	<-r.release
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func (r *parkedReader) Close() error { return nil }
+
+// TestBodyTapNeverReadsBesideAReader. Close reads a body nobody has started on,
+// so a request the proxy never delivered is still recorded, but net/http can
+// Close from one goroutine while another sits in the first Read waiting for the
+// client. Reading then would run two reads of one body at once, which raced in CI
+// and splits the bytes between the two, and waiting for the reader could wait as
+// long as the client takes. Close has to do neither.
+func TestBodyTapNeverReadsBesideAReader(t *testing.T) {
+	r := &parkedReader{release: make(chan struct{}), data: []byte(`{"jsonrpc":"2.0","id":1,"method":"ping"}`)}
+	var fired atomic.Int32
+	tap := newBodyTap(r, 1024, func([]byte, bool) { fired.Add(1) })
+
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		_, _ = io.Copy(io.Discard, tap)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for r.inFlight.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the reader never reached its first Read")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		_ = tap.Close()
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		close(r.release)
+		t.Fatal("Close waited for a reader parked in Read")
+	}
+	close(r.release)
+	<-readerDone
+
+	if r.overlap.Load() {
+		t.Fatal("Close read the body beside a reader that was already in Read")
+	}
+	if got := fired.Load(); got != 1 {
+		t.Fatalf("onDone fired %d times, want exactly 1", got)
+	}
+}
+
 // emitterTo adapts a captureSink into the emit func httpProxyHandler expects.
 func emitterTo(sink *captureSink) func(Direction, []byte, route) {
 	return func(d Direction, raw []byte, rt route) {

@@ -212,12 +212,17 @@ type bodyTap struct {
 	cap    int
 	onDone func(observed []byte, truncated bool)
 
+	// readMu is held across every read of rc, so Close reading a body nobody has
+	// started on can never run beside a reader. Close only ever tries it, since a
+	// reader can sit in Read for as long as the client takes to send.
+	readMu sync.Mutex
 	// net/http may Close a request body from a goroutine other than the one
-	// reading it (e.g. on cancellation), so the buffer and done flag are guarded.
-	mu   sync.Mutex
-	buf  bytes.Buffer
-	cut  bool
-	done bool
+	// reading it (e.g. on cancellation), so the buffer and flags are guarded.
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	cut     bool
+	done    bool
+	started bool // some read of rc has begun
 }
 
 func newBodyTap(rc io.ReadCloser, cap int, onDone func([]byte, bool)) *bodyTap {
@@ -225,6 +230,16 @@ func newBodyTap(rc io.ReadCloser, cap int, onDone func([]byte, bool)) *bodyTap {
 }
 
 func (t *bodyTap) Read(p []byte) (int, error) {
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
+	return t.read(p)
+}
+
+// read is Read for a caller already holding readMu.
+func (t *bodyTap) read(p []byte) (int, error) {
+	t.mu.Lock()
+	t.started = true
+	t.mu.Unlock()
 	n, err := t.rc.Read(p)
 	if n > 0 {
 		t.mu.Lock()
@@ -249,15 +264,28 @@ func (t *bodyTap) Close() error {
 	// connection say, closes the body without reading it. The client still sent
 	// the request, so the copy is read before letting go, as far as the cap, or
 	// the 502 that follows answers a request nobody can see.
-	t.mu.Lock()
-	unread := !t.done && t.buf.Len() == 0 && !t.cut
-	t.mu.Unlock()
-	if unread {
-		_, _ = io.Copy(io.Discard, io.LimitReader(t, int64(t.cap)+1))
+	//
+	// Only a body no read has begun on, and only when no reader holds it. A Close
+	// racing a reader, which net/http does on cancellation, leaves the copy to that
+	// reader. Waiting for it instead could wait as long as the client takes to
+	// send, and reading beside it would split the bytes between the two.
+	if t.readMu.TryLock() {
+		t.mu.Lock()
+		unread := !t.started && !t.done
+		t.mu.Unlock()
+		if unread {
+			_, _ = io.Copy(io.Discard, io.LimitReader(readerFunc(t.read), int64(t.cap)+1))
+		}
+		t.readMu.Unlock()
 	}
 	t.finish()
 	return t.rc.Close()
 }
+
+// readerFunc adapts a read function to io.Reader.
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
 // finish delivers the observed copy exactly once, on EOF, a read error, or Close,
 // whichever comes first. The snapshot is taken under the lock so it is never read
