@@ -6,8 +6,10 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 # reused whatever staticcheck was already on PATH while CI installed @latest, so
 # a deprecation a newer release had learned about passed locally and failed in
 # CI. Bump this deliberately rather than discovering it on an unrelated pull
-# request.
-STATICCHECK_VERSION ?= v0.8.0
+# request. A Go point release can still outrun the pin, as Go 1.27.2 did by
+# changing its export data format, which v0.8.0 cannot decode and v0.8.2 can,
+# and the fix then is this bump too.
+STATICCHECK_VERSION ?= v0.8.2
 # Pinned for the same reason, one layer down. CI runners are UTC and a
 # contributor's machine is whatever they live in, so a test that renders a local
 # timestamp passes in one and fails in the other. It has: an inventory test took
