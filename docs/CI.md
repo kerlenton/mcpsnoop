@@ -267,8 +267,23 @@ entirely.
 In 2026-07-28 a missing routing header is a validation failure, and a compliant
 server rejects the request with `400` and `-32020`. mcpsnoop raises it only once
 the session is known to speak that revision or later, since earlier revisions do
-not define these headers at all and omitting them there is correct. A server's
-own `-32020` rejection counts as the same signal.
+not define these headers at all and omitting them there is correct.
+
+One header is older. From 2025-06-18 a client has to repeat the negotiated
+revision in `MCP-Protocol-Version` on every POST after the initialize handshake,
+notifications and its answers to the server included, and a POST without it is a
+`mismatch` as well. A legacy request names no revision of its own, so mcpsnoop
+goes by the handshake, and stays quiet when one capture holds handshakes that
+settled on different revisions, since it cannot tell which client sent what.
+
+A server's own `-32020` rejection counts as the same signal whenever mcpsnoop's
+checks agree with it or could not be made, as for a tool that was never listed,
+a header value the transport would not carry unencoded, a batch, or a frame
+redaction rewrote. When they compared every header and found each one
+consistent, the rejection is the server's mistake, such as expecting the
+`Mcp-Param` header of a null argument that the spec tells the client to leave
+out, and it is a `warn` on the response instead. So is a `-32020` that came with
+any HTTP status but `400`.
 
 A name or resource URI that will not fit in an HTTP field value travels Base64 in
 a `=?base64?…?=` sentinel, which is decoded before the comparison, so a client
@@ -302,7 +317,11 @@ Both sentences read the same in 2025-11-25 and 2026-07-28, so unlike the drift
 and extension checks these need no revision gate. `Origin` is recorded too, since
 servers MUST validate it and MUST answer `403` when it is invalid, but
 mcpsnoop cannot know your allowed origins so it shows the value rather than
-judging it.
+judging it. The same clause lets that `403` carry a JSON-RPC error with no `id`,
+since the server refuses before it reads the request, so such an error settles
+the request it refused and is not reported. An error with no `id` anywhere else
+still settles the one request its exchange carried, and is reported for leaving
+out an id that was there to be read.
 
 Wildcards count. A client sending `*/*` has offered both types and is never
 reported, and a `charset` parameter on a `Content-Type` is ignored. A log

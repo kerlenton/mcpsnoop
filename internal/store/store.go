@@ -118,6 +118,13 @@ const (
 // notification looks like.
 func httpFailed(status int) bool { return status >= 400 }
 
+// The two statuses a rule below names. The store reads statuses as numbers and
+// has no other use for net/http.
+const (
+	statusBadRequest = 400
+	statusForbidden  = 403
+)
+
 // callKey identifies a request awaiting its response. The response travels in
 // the opposite direction with the same id.
 type callKey struct {
@@ -224,6 +231,12 @@ type call struct {
 	exchange        uint64
 	transportStatus int
 	undelivered     bool
+	// origin says the request carried an Origin header, which is what lets a 403
+	// answering it come with an error that has no id. headersVerified says every
+	// header check mcpsnoop could run on the request ran and found nothing, so a
+	// HeaderMismatch the server answers with is the server's to explain.
+	origin          bool
+	headersVerified bool
 	// signature identifies a tool call by its tool and arguments, empty for any
 	// other call and for one whose arguments cannot be compared. retryOf is the
 	// identical earlier call whose outcome the client could not yet know when it
@@ -390,6 +403,11 @@ type session struct {
 	// request declaring 2026-07-28 or later, which is what makes the rules that
 	// revision introduced applicable to the frames around it.
 	stateless bool
+	// handshakes holds every revision an initialize response settled on. A legacy
+	// request names no revision of its own, so this is how its rules are known,
+	// and only while it holds exactly one: one proxy can carry clients that
+	// negotiated different revisions, and a request cannot be told apart by them.
+	handshakes map[string]struct{}
 }
 
 // Store is the concurrency-safe collector the hub feeds and the TUI reads.
@@ -595,6 +613,32 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		ev.warning = validationWarning(msg)
 		sess.caps.applyResponseMeta(msg.Result)
 		c, matched := sess.completeCall(ev.id, e.Direction, e.ConnID, e.TS, msg, e.Redacted)
+		// An error naming no request still answered the one its exchange carried,
+		// since it came back as the response to that very POST. Left unmatched, the
+		// request stayed in flight for the rest of the capture, and the client
+		// reusing its id afterwards was reported for reusing one in flight.
+		if c == nil && msg.Error != nil && e.Direction == proxy.ServerToClient && idless(msg.ID) {
+			if owner := sess.exchangeRequest(e.Exchange); owner != nil {
+				if httpFailed(e.Status) {
+					// The HTTP failure settles the call the way a bodiless one does, which
+					// keeps a 5xx's attempt open for the duplicate check, since a gateway's
+					// error does not say the call never ran.
+					sess.failExchange(e.Exchange, e.Status, e.Undelivered, e.TS)
+					owner.err = msg.Error
+					c, matched = owner, true
+				} else {
+					c, matched = sess.answerCall(owner, e.TS, msg, e.Redacted)
+				}
+				// Both transports let a server refusing an invalid Origin answer 403 with
+				// an error "that has no id", since it refuses before reading the request.
+				// Anywhere else the id was there to be read, and an error "MUST include
+				// the same ID as the request" it answers. A request whose own id was null
+				// has nothing better to echo.
+				if owner.id != "null" && !(e.Status == statusForbidden && owner.origin) {
+					ev.warning = appendWarning(ev.warning, "error response does not carry the id of the request it answers")
+				}
+			}
+		}
 		ev.call = c
 		if note := responseContentTypeWarning(e.Direction, e.TransportHeaders); note != "" {
 			ev.warning = appendWarning(ev.warning, note)
@@ -828,9 +872,8 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		}
 		if msg.Method == "notifications/cancelled" {
 			if id, reason := cancelledRequest(msg.Params); id != "" {
-				if note := serverCancelWarning(e.Direction, sess.calls[callKey{
-					dir: opposite(e.Direction), id: id, conn: e.ConnID,
-				}]); note != "" {
+				if note := serverCancelWarning(e.Direction, sess.findCall(opposite(e.Direction), id, e.ConnID,
+					func(c *call) bool { return c.state == Pending || c.state == Streaming })); note != "" {
 					ev.warning = appendWarning(ev.warning, note)
 				}
 				if c := sess.closeStreamingCall(id, e.ConnID, e.TS, reason); c != nil {
@@ -963,6 +1006,24 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		}
 	}
 
+	// The same header on a legacy session. From 2025-06-18 the client "MUST
+	// include the MCP-Protocol-Version: <protocol-version> HTTP header on all
+	// subsequent requests to the MCP server", meaning every POST after the
+	// handshake, notifications and answers to the server included. A legacy
+	// request names no revision of its own, so the handshake is what says which
+	// rules hold, and only while every handshake in the capture settled on the
+	// same revision. The initialize request itself is the one exempt, since it is
+	// what the header's value comes from.
+	if ev.transport == proxy.TransportHTTP && e.Direction == proxy.ClientToServer && !ev.batch &&
+		(ev.kind == EventRequest || ev.kind == EventNotification || ev.kind == EventResponse) &&
+		msg.Method != "initialize" && ev.mcpProtocolVersion == "" && metaProtocolVersion(msg.Params) == "" {
+		if version := sess.handshakeRevision(); requiresLegacyVersionHeader(version) {
+			ev.warning = appendWarning(ev.warning, "required header MCP-Protocol-Version is missing, and "+
+				version+" requires it on every request after initialization")
+			ev.mismatch = true
+		}
+	}
+
 	// io.modelcontextprotocol/clientCapabilities is REQUIRED in every request's
 	// _meta from 2026-07-28, alongside protocolVersion, and a server MUST reject a
 	// request missing a required field with -32602. Unlike the routing headers this
@@ -999,6 +1060,12 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		}
 	}
 
+	// Every header check has run by here, so this is where a request learns
+	// whether a HeaderMismatch answering it can be the client's fault.
+	if ev.kind == EventRequest && ev.call != nil && e.Direction == proxy.ClientToServer {
+		ev.call.headersVerified = headersVerified(sess, ev, msg, e.Redacted)
+	}
+
 	if note := deprecatedMethodNote(msg.Method); note != "" {
 		ev.deprecated = note
 	} else if state, ok := parseInputRequired(msg.Result); ok {
@@ -1023,8 +1090,25 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 	// routing one. It remains useful when mcpsnoop never observed the matching
 	// tool definition and therefore could not map an Mcp-Param-{Name} header
 	// back to its argument path.
+	//
+	// But only when mcpsnoop's own checks agree or could not run. When they ran
+	// on every header and found each one consistent, taking the server's word
+	// convicted a client that did what the spec asks, as when it omits the
+	// Mcp-Param header of a null argument, where the server "MUST NOT expect the
+	// header". The rejection is then the server's to explain, and that is said.
 	if msg.Error != nil && msg.Error.Code == ErrorCodeHeaderMismatch {
-		ev.mismatch = true
+		if ev.call != nil && ev.call.headersVerified {
+			ev.warning = appendWarning(ev.warning,
+				"server rejected the request with -32020 HeaderMismatch, but every header on it agrees with the body")
+		} else {
+			ev.mismatch = true
+		}
+		// "When rejecting a request due to header validation failure, servers MUST
+		// return HTTP status 400 Bad Request."
+		if e.Status != 0 && e.Status != statusBadRequest {
+			ev.warning = appendWarning(ev.warning,
+				"a HeaderMismatch rejection must come with HTTP 400, and this one came with "+strconv.Itoa(e.Status))
+		}
 	}
 
 	s.appendEvent(sess, ev)
@@ -1274,6 +1358,7 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 	c.opName = operationName(msg)
 	c.protocolVersion = requestProtocolVersion(msg.Params, e.MCPProtocolVersion)
 	c.exchange = e.Exchange
+	c.origin = e.TransportHeaders != nil && e.TransportHeaders.Origin != ""
 	sess.calls[key] = c
 	sess.noteAttempt(c)
 	return c, reused
@@ -1328,13 +1413,88 @@ func requestCallKey(id string, rawID json.RawMessage, e proxy.Envelope) callKey 
 	return key
 }
 
+// findCall returns the call a frame names by direction and id. The connection's
+// own key comes first, and on stdio it is the only one there is.
+//
+// On HTTP the frame naming a call can arrive on another connection. A client
+// holding one open for an event stream has to POST its answer to a server
+// request, or its cancellation of its own request, on a second, and over
+// HTTP/1.1 it always does. A JSON-RPC id is scoped to the session, never to a
+// connection, so when the frame's own connection has never carried a call under
+// that id, the one waiting under it on another connection is the one meant.
+//
+// The frame's own connection still wins whenever it has one, in any state, so a
+// duplicate stays a duplicate rather than finding another client's call under
+// the same number, which is the case keying by connection exists for. Two
+// calls waiting elsewhere are two clients whose ids overlap, and guessing
+// between them would pair an answer with the wrong question, so neither is
+// returned. waiting says which calls can still take what the frame brings.
+func (sess *session) findCall(dir proxy.Direction, id, conn string, waiting func(*call) bool) *call {
+	own := sess.calls[callKey{dir: dir, id: id, conn: conn}]
+	if own != nil || conn == "" {
+		return own
+	}
+	var elsewhere *call
+	for key, c := range sess.calls {
+		// key.seq is set only for a request whose own id was null, which nothing
+		// can name.
+		if key.dir != dir || key.id != id || key.seq != 0 || !waiting(c) {
+			continue
+		}
+		if elsewhere != nil && elsewhere != c {
+			return nil
+		}
+		elsewhere = c
+	}
+	return elsewhere
+}
+
+// awaitsAnswer is what a response can settle: a call still waiting, a stream
+// still open, or a cancelled call whose late result has not arrived.
+func awaitsAnswer(c *call) bool {
+	return c.state == Pending || c.state == Streaming || (c.state == Cancelled && !c.lateResult)
+}
+
+// exchangeRequest returns the one request the exchange carried that still
+// awaits an answer, nil on stdio, on an exchange that carried none, and on one
+// that carried several, since a batch gives a frame naming no id more than one
+// possible owner.
+func (sess *session) exchangeRequest(exchange uint64) *call {
+	if exchange == 0 {
+		return nil
+	}
+	var found *call
+	for _, c := range sess.calls {
+		if c.exchange != exchange || c.reqDir != proxy.ClientToServer || !awaitsAnswer(c) {
+			continue
+		}
+		if found != nil && found != c {
+			return nil
+		}
+		found = c
+	}
+	return found
+}
+
+// idless reports whether a response names no request, its id null or absent.
+func idless(id json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(id)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
+}
+
 // completeCall matches a response to a request. The bool is false for an
 // unmatched response or a duplicate of an already-observed result. Caller holds the lock.
 func (sess *session) completeCall(id string, respDir proxy.Direction, conn string, ts time.Time, msg proxy.RPCMessage, redacted bool) (*call, bool) {
-	c := sess.calls[callKey{dir: opposite(respDir), id: id, conn: conn}]
+	c := sess.findCall(opposite(respDir), id, conn, awaitsAnswer)
 	if c == nil {
 		return nil, false // unmatched response (request missed or before backfill)
 	}
+	return sess.answerCall(c, ts, msg, redacted)
+}
+
+// answerCall settles c with the response msg. It is completeCall once the call
+// is known, which an error naming no id reaches through its exchange instead.
+func (sess *session) answerCall(c *call, ts time.Time, msg proxy.RPCMessage, redacted bool) (*call, bool) {
 	if c.state == Cancelled {
 		if c.lateResult {
 			return c, false
@@ -1447,6 +1607,7 @@ func (sess *session) applyResponseSideEffects(c *call, msg proxy.RPCMessage, red
 	switch c.method {
 	case "initialize":
 		sess.caps.applyResponse(msg.Result)
+		sess.noteHandshake(msg.Result)
 	case "server/discover":
 		sess.caps.applyDiscover(msg.Result)
 	case "tools/list":
@@ -2170,7 +2331,7 @@ func cancelledRequest(params json.RawMessage) (string, string) {
 // could not say which of several such requests it meant, and #209 made those
 // deliberately unreachable by id alone.
 func (sess *session) cancelCall(id string, dir proxy.Direction, conn string, ts time.Time, reason string) *call {
-	c := sess.calls[callKey{dir: dir, id: id, conn: conn}]
+	c := sess.findCall(dir, id, conn, func(c *call) bool { return c.state == Pending })
 	if c == nil || c.state != Pending {
 		return nil
 	}
@@ -2202,8 +2363,7 @@ func (sess *session) cancelCall(id string, dir proxy.Direction, conn string, ts 
 // No pending slot is released, because a Streaming call never took one.
 func (sess *session) closeStreamingCall(id, conn string, ts time.Time, reason string) *call {
 	for _, dir := range []proxy.Direction{proxy.ClientToServer, proxy.ServerToClient} {
-		key := callKey{dir: dir, id: id, conn: conn}
-		c := sess.calls[key]
+		c := sess.findCall(dir, id, conn, func(c *call) bool { return c.state == Streaming })
 		if c != nil && c.state == Streaming {
 			c.end = ts
 			c.markHop(ts, &c.serverTime)
@@ -2259,6 +2419,90 @@ func atLeastRevision(version, from string) bool {
 // requiresRoutingHeaders reports whether a protocol version mandates them.
 func requiresRoutingHeaders(version string) bool {
 	return atLeastRevision(version, routingHeadersRequiredFrom)
+}
+
+// versionHeaderRequiredFrom is the revision that told a legacy HTTP client to
+// repeat the negotiated version in a header on every request after the
+// handshake. 2025-03-26 has no such rule.
+const versionHeaderRequiredFrom = "2025-06-18"
+
+// requiresLegacyVersionHeader reports whether a handshake revision holds its
+// requests to that rule. 2026-07-28 has no handshake, and its own rule is
+// judged per request by requiresRoutingHeaders.
+func requiresLegacyVersionHeader(version string) bool {
+	return atLeastRevision(version, versionHeaderRequiredFrom) && !atLeastRevision(version, statelessFrom)
+}
+
+// noteHandshake remembers the revision an initialize response settled on.
+func (sess *session) noteHandshake(result json.RawMessage) {
+	var r struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if json.Unmarshal(result, &r) != nil || r.ProtocolVersion == "" {
+		return
+	}
+	if sess.handshakes == nil {
+		sess.handshakes = make(map[string]struct{})
+	}
+	sess.handshakes[r.ProtocolVersion] = struct{}{}
+}
+
+// handshakeRevision is the one revision every handshake in the session settled
+// on, empty before the first and once two disagree.
+func (sess *session) handshakeRevision() string {
+	if len(sess.handshakes) != 1 {
+		return ""
+	}
+	for version := range sess.handshakes {
+		return version
+	}
+	return ""
+}
+
+// headersVerified reports whether mcpsnoop checked every header a server
+// validates on this request and found nothing wrong, which is what makes a
+// HeaderMismatch answering it the server's mistake rather than the client's.
+// Whatever mcpsnoop could not check leaves the server's word standing: a batch;
+// a frame its redaction rewrote, where some comparisons are skipped; a header
+// value the transport would not let travel unencoded, which a server rejects as
+// invalid and mcpsnoop does not judge; and a tool call whose tool was never
+// listed, so its Mcp-Param headers could not be tied to arguments.
+func headersVerified(sess *session, ev *event, msg proxy.RPCMessage, redacted bool) bool {
+	if ev.transport != proxy.TransportHTTP || ev.batch || ev.mismatch || redacted ||
+		!requiresRoutingHeaders(requestProtocolVersion(msg.Params, ev.mcpProtocolVersion)) {
+		return false
+	}
+	values := []string{ev.mcpMethod, ev.mcpName, ev.mcpProtocolVersion}
+	for _, header := range ev.mcpParamHeaders {
+		values = append(values, header.Value)
+	}
+	for _, value := range values {
+		if !travelsAsSent(value) {
+			return false
+		}
+	}
+	if msg.Method == "tools/call" {
+		var params struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(msg.Params, &params) != nil {
+			return false
+		}
+		if _, listed := sess.toolDefinitions[params.Name]; !listed {
+			return false
+		}
+	}
+	return true
+}
+
+// travelsAsSent reports whether a header value is one the transport lets travel,
+// either as it stands or wrapped in a Base64 sentinel that decodes.
+func travelsAsSent(value string) bool {
+	decoded, ok := proxy.DecodeHeaderValue(value)
+	if !ok {
+		return false
+	}
+	return decoded != value || proxy.EncodeHeaderValue(value) == value
 }
 
 // namedOperationMethods are the three methods whose target Mcp-Name must carry.

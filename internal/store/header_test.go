@@ -312,15 +312,16 @@ func TestIngestDoesNotJudgeAHandshakeByItsOwnProposal(t *testing.T) {
 		t.Fatalf("a proposal is not an agreement, got %q", ev.Warning)
 	}
 
-	// The server settles on a revision that has no routing headers at all, so
-	// everything after the handshake stays clean too.
+	// The server settles on a revision that has no routing headers at all, only
+	// the version header every request after the handshake repeats, so a request
+	// carrying that one stays clean too.
 	s.Ingest(proxy.Envelope{
 		SessionID: "s1", ServerLabel: "srv", Seq: 2, TS: time.Now(),
 		Direction: proxy.ServerToClient, Transport: proxy.TransportHTTP, Status: 200,
 		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25",` +
 			`"capabilities":{},"serverInfo":{"name":"old"}}}`),
 	})
-	call := httpRequest(3, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}`, "", "", "")
+	call := httpRequest(3, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}`, "", "", "2025-11-25")
 	if ev := s.Ingest(call); ev.Warning != "" || ev.RoutingMismatch {
 		t.Fatalf("a session negotiated down to 2025-11-25 must stay clean, got %q", ev.Warning)
 	}
@@ -428,4 +429,163 @@ func TestIngestDoesNotDemandClientCapabilitiesOfANotification(t *testing.T) {
 	if strings.Contains(ev.Warning, "clientCapabilities") {
 		t.Fatalf("a notification is not a request, got %q", ev.Warning)
 	}
+}
+
+// legacyHandshake records an initialize over HTTP that the server settled on
+// version, the way a 2025 client opens a session.
+func legacyHandshake(s *Store, seq uint64, version string) {
+	s.Ingest(httpRequest(seq, `{"jsonrpc":"2.0","id":0,"method":"initialize","params":`+
+		`{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cli"}}}`, "", "", ""))
+	s.Ingest(proxy.Envelope{
+		SessionID: "s1", ServerLabel: "srv", Seq: seq + 1, TS: time.Now(),
+		Direction: proxy.ServerToClient, Transport: proxy.TransportHTTP, Status: 200,
+		Raw: json.RawMessage(`{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"` + version + `",` +
+			`"capabilities":{},"serverInfo":{"name":"srv"}}}`),
+	})
+}
+
+// TestALegacySessionRepeatsItsVersionInAHeader. From 2025-06-18 the client "MUST
+// include the MCP-Protocol-Version: <protocol-version> HTTP header on all
+// subsequent requests to the MCP server". mcp-conformance recorded a 2025-11-25
+// session through mcpsnoop whose tools/list left it out, and check passed with
+// every signal on, because only 2026-07-28 was held to a missing header.
+func TestALegacySessionRepeatsItsVersionInAHeader(t *testing.T) {
+	list := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+
+	t.Run("every request after the handshake needs it", func(t *testing.T) {
+		for _, version := range []string{"2025-06-18", "2025-11-25"} {
+			s := New()
+			legacyHandshake(s, 1, version)
+			if ev := s.Ingest(httpRequest(3, `{"jsonrpc":"2.0","method":"notifications/initialized"}`, "", "", version)); ev.Warning != "" {
+				t.Fatalf("%s: a notification carrying the header warned: %q", version, ev.Warning)
+			}
+			ev := s.Ingest(httpRequest(4, list, "", "", ""))
+			if !ev.RoutingMismatch || !strings.Contains(ev.Warning, "MCP-Protocol-Version is missing, and "+version+" requires it") {
+				t.Fatalf("%s: warning = %q mismatch = %v, want the missing header", version, ev.Warning, ev.RoutingMismatch)
+			}
+			// An answer to a server request is a POST like any other.
+			answer := httpRequest(5, `{"jsonrpc":"2.0","id":0,"result":{}}`, "", "", "")
+			if ev := s.Ingest(answer); !strings.Contains(ev.Warning, "MCP-Protocol-Version is missing") {
+				t.Fatalf("%s: the client's answer without the header was not reported, got %q", version, ev.Warning)
+			}
+			if ev := s.Ingest(httpRequest(6, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`, "", "", version)); ev.Warning != "" || ev.RoutingMismatch {
+				t.Fatalf("%s: a request carrying the header warned: %q", version, ev.Warning)
+			}
+		}
+	})
+
+	t.Run("2025-03-26 has no such rule", func(t *testing.T) {
+		s := New()
+		legacyHandshake(s, 1, "2025-03-26")
+		if ev := s.Ingest(httpRequest(3, list, "", "", "")); ev.Warning != "" || ev.RoutingMismatch {
+			t.Fatalf("warning = %q", ev.Warning)
+		}
+	})
+
+	t.Run("the handshake request and anything before it are exempt", func(t *testing.T) {
+		s := New()
+		if ev := s.Ingest(httpRequest(1, list, "", "", "")); ev.Warning != "" {
+			t.Fatalf("before any handshake, got %q", ev.Warning)
+		}
+		legacyHandshake(s, 2, "2025-11-25")
+		again := httpRequest(4, `{"jsonrpc":"2.0","id":5,"method":"initialize","params":`+
+			`{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cli"}}}`, "", "", "")
+		if ev := s.Ingest(again); ev.Warning != "" {
+			t.Fatalf("a second initialize warned: %q", ev.Warning)
+		}
+	})
+
+	t.Run("two clients on different revisions cannot be told apart", func(t *testing.T) {
+		s := New()
+		legacyHandshake(s, 1, "2025-11-25")
+		legacyHandshake(s, 3, "2025-03-26")
+		if ev := s.Ingest(httpRequest(5, list, "", "", "")); ev.Warning != "" || ev.RoutingMismatch {
+			t.Fatalf("warning = %q", ev.Warning)
+		}
+	})
+
+	t.Run("stdio has no headers", func(t *testing.T) {
+		s := New()
+		legacyHandshake(s, 1, "2025-11-25")
+		frame := httpRequest(3, list, "", "", "")
+		frame.Transport = proxy.TransportStdio
+		if ev := s.Ingest(frame); ev.Warning != "" {
+			t.Fatalf("warning = %q", ev.Warning)
+		}
+	})
+}
+
+// headerMismatch is a server's -32020 answering id, on the status the case says.
+func headerMismatch(seq uint64, id, status int) proxy.Envelope {
+	e := errorResponse(seq, id, ErrorCodeHeaderMismatch, "Header mismatch")
+	e.Status = status
+	return e
+}
+
+// TestAHeaderMismatchTheChecksCannotExplainIsTheServers. mcpsnoop took a server's
+// -32020 as the client's routing mismatch every time, even when its own checks
+// had compared every header and found each one consistent. mcp-conformance
+// caught it on a tools/list with every header right and on a tools/call that
+// omitted the Mcp-Param header of a null argument, which is what the spec tells
+// a client to do and a server "MUST NOT expect the header". The server's word
+// still stands wherever mcpsnoop could not check for itself.
+func TestAHeaderMismatchTheChecksCannotExplainIsTheServers(t *testing.T) {
+	const list2026 = `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":` +
+		`{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`
+
+	t.Run("every header agrees", func(t *testing.T) {
+		s := New()
+		s.Ingest(httpRequest(1, list2026, "tools/list", "", "2026-07-28"))
+		ev := s.Ingest(headerMismatch(2, 1, 400))
+		if ev.RoutingMismatch {
+			t.Fatal("the client's headers all agree, so the mismatch is not the client's")
+		}
+		if !strings.Contains(ev.Warning, "server rejected the request with -32020 HeaderMismatch, but every header on it agrees with the body") {
+			t.Fatalf("warning = %q, want the server's rejection named", ev.Warning)
+		}
+	})
+
+	t.Run("a null argument's header left out", func(t *testing.T) {
+		s := New()
+		listExchangeView(s, toolsListResult("", paramHeaderTool))
+		s.Ingest(paramCall(3, proxy.TransportHTTP, false, `{"region":null}`))
+		ev := s.Ingest(headerMismatch(4, 9, 400))
+		if ev.RoutingMismatch || !strings.Contains(ev.Warning, "server rejected the request") {
+			t.Fatalf("mismatch = %v warning = %q, want the server's rejection", ev.RoutingMismatch, ev.Warning)
+		}
+	})
+
+	t.Run("a tool never listed leaves the server's word standing", func(t *testing.T) {
+		s := New()
+		s.Ingest(paramCall(1, proxy.TransportHTTP, false, `{"region":null}`))
+		if ev := s.Ingest(headerMismatch(2, 9, 400)); !ev.RoutingMismatch || strings.Contains(ev.Warning, "server rejected") {
+			t.Fatalf("mismatch = %v warning = %q, want the rejection trusted", ev.RoutingMismatch, ev.Warning)
+		}
+	})
+
+	t.Run("a header that cannot travel unencoded leaves it standing too", func(t *testing.T) {
+		s := New()
+		listExchangeView(s, toolsListResult("", paramHeaderTool))
+		s.Ingest(paramCall(3, proxy.TransportHTTP, false, `{"region":"Zürich"}`,
+			proxy.MCPParamHeader{Name: "Mcp-Param-Region", Value: "Zürich"}))
+		if ev := s.Ingest(headerMismatch(4, 9, 400)); !ev.RoutingMismatch {
+			t.Fatalf("a raw non-ASCII value is the server's to reject, warning = %q", ev.Warning)
+		}
+	})
+
+	t.Run("a mismatch mcpsnoop saw itself", func(t *testing.T) {
+		s := New()
+		s.Ingest(httpRequest(1, list2026, "tools/call", "", "2026-07-28"))
+		if ev := s.Ingest(headerMismatch(2, 1, 400)); !ev.RoutingMismatch || strings.Contains(ev.Warning, "server rejected") {
+			t.Fatalf("mismatch = %v warning = %q", ev.RoutingMismatch, ev.Warning)
+		}
+	})
+
+	t.Run("the rejection has to come with 400", func(t *testing.T) {
+		s := New()
+		s.Ingest(httpRequest(1, list2026, "tools/call", "", "2026-07-28"))
+		if ev := s.Ingest(headerMismatch(2, 1, 200)); !strings.Contains(ev.Warning, "must come with HTTP 400, and this one came with 200") {
+			t.Fatalf("warning = %q", ev.Warning)
+		}
+	})
 }
