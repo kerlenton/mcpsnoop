@@ -290,6 +290,7 @@ check without the action, the signals it can fail on and the exit codes are in
 | [How it works](docs/HOW_IT_WORKS.md) | memory bounds, the history limit, and pruning old logs |
 | [Try it for real](docs/TRY_IT.md) | a published test server, driven by your own client |
 | [Review past sessions](docs/POST_MORTEM.md) | where session logs live and how to open one after the fact |
+| [The capture format](docs/CAPTURE_FORMAT.md) | what each line of a session log holds and what will never change about it, with a JSON Schema for tools that read captures |
 
 ## Security
 

@@ -9,6 +9,12 @@
 // escaping also applies to the contents of a json.RawMessage, so it reaches
 // payloads that are only being passed through.
 //
+// Verbatim means the same tokens, not the same bytes. The encoder still drops a
+// RawMessage's insignificant whitespace, and with the JSON v2 backend that Go
+// 1.27 turns on it writes U+2028 and U+2029 as escapes whatever SetEscapeHTML
+// says. Neither changes a decoded value, and docs/CAPTURE_FORMAT.md promises no
+// more than that.
+//
 // Use this wherever captured bytes are written. Do not use it where the output
 // is embedded in HTML: there the escaping is what keeps a payload containing
 // </script> inside its script block, and writeHTML in the exporter depends on

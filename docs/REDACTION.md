@@ -93,8 +93,9 @@ and `x-mcp-header`.
 What each flag reaches differs, so check the result rather than assuming. All
 four scrub JSON-RPC payloads, and `--redact-key`, `--redact-path` and
 `--redact-secrets` reach only those. Only `--redact-value` also scrubs stderr,
-other non-JSON text, and the inside of a string. An `Mcp-Param-*` header is
-scrubbed alongside the body value it mirrors. The other envelope metadata,
-server labels, `Mcp-Name`, `Mcp-Method` and the HTTP status, is left as
+other non-JSON text, and the inside of a string. An `Mcp-Param-*` or `Mcp-Name`
+header is scrubbed alongside the body value it mirrors, since `Mcp-Name` repeats
+a tool or prompt name or a resource URI. The other envelope metadata, server
+labels, `Mcp-Method`, `MCP-Protocol-Version` and the HTTP status, is left as
 captured. Redaction is best effort, so use a separate output path and read the
 result before sharing it.
