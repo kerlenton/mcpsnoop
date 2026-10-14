@@ -17,6 +17,10 @@ Set `MCPSNOOP_HOME` to move that base directory somewhere else, or set
 `XDG_STATE_HOME` to keep sessions under `$XDG_STATE_HOME/mcpsnoop/sessions`.
 `MCPSNOOP_HOME` wins when both are set.
 
+Each line of a log is one envelope, and [The capture format](CAPTURE_FORMAT.md)
+says what every field holds, for reading a log with something other than
+mcpsnoop.
+
 ## Open a past session
 
 Run the TUI with no arguments.

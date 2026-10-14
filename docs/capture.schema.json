@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/kerlenton/mcpsnoop/main/docs/capture.schema.json",
+  "title": "mcpsnoop capture envelope",
+  "description": "One line of an mcpsnoop capture. A capture is JSON Lines with one envelope per line. Fields are only ever added and never change meaning, so a reader ignores the ones it does not know. docs/CAPTURE_FORMAT.md is the prose version of this contract.",
+  "type": "object",
+  "required": ["session_id", "server_label", "seq", "ts", "direction", "transport"],
+  "properties": {
+    "session_id": {
+      "description": "The session this envelope belongs to. An opaque name; one file can hold several sessions.",
+      "type": "string"
+    },
+    "server_label": {
+      "description": "The --label given to mcpsnoop, or a name taken from the server command on stdio and the target's host on HTTP.",
+      "type": "string"
+    },
+    "seq": {
+      "description": "Position in the session, from 1, rising by one per envelope in the order mcpsnoop observed them. A jump means envelopes never reached the file.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "ts": {
+      "description": "When mcpsnoop observed the envelope, RFC 3339 with the machine's UTC offset and up to nanosecond precision.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "direction": {
+      "description": "c2s is a frame from the client, s2c a frame from the server, stderr a line the server wrote to stderr, meta the session's description. A later release may add a value; skip an envelope whose direction you do not know.",
+      "enum": ["c2s", "s2c", "stderr", "meta"]
+    },
+    "transport": {
+      "description": "The channel the envelope was observed on. A later release may add a value.",
+      "enum": ["stdio", "http"]
+    },
+    "raw": {
+      "description": "The frame when it arrived as valid JSON, as a JSON value rather than a string, with insignificant whitespace removed. On a meta envelope it is the session's description."
+    },
+    "text": {
+      "description": "A stderr line, a protocol line that was not valid JSON, or the kept part of a frame cut at 16 MiB.",
+      "type": "string"
+    },
+    "mcp_method": {
+      "description": "The Mcp-Method header of an HTTP request.",
+      "type": "string"
+    },
+    "mcp_name": {
+      "description": "The Mcp-Name header of an HTTP request.",
+      "type": "string"
+    },
+    "mcp_protocol_version": {
+      "description": "The MCP-Protocol-Version header of an HTTP request.",
+      "type": "string"
+    },
+    "mcp_param_headers": {
+      "description": "The Mcp-Param-* headers of an HTTP request, sorted by name.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/mcpParamHeader" }
+    },
+    "batch": {
+      "description": "The frame was one element of a JSON-RPC batch on HTTP.",
+      "type": "boolean"
+    },
+    "conn_id": {
+      "description": "The client end of the TCP connection an HTTP frame travelled on, as host:port.",
+      "type": "string"
+    },
+    "exchange": {
+      "description": "Numbers the HTTP request a frame belongs to, from 1. The request's frame and every frame of its response share it.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "undelivered": {
+      "description": "On mcpsnoop's own 502, the target refused the connection, so the request never reached it.",
+      "type": "boolean"
+    },
+    "truncated": {
+      "description": "This copy of the frame was cut at 16 MiB and is in text. The whole frame still reached the other side.",
+      "type": "boolean"
+    },
+    "redacted": {
+      "description": "mcpsnoop's own redaction rewrote this envelope.",
+      "type": "boolean"
+    },
+    "status": {
+      "description": "The HTTP status of the response a server frame arrived on.",
+      "type": "integer"
+    },
+    "auth_challenge": {
+      "description": "That response's WWW-Authenticate header, every challenge joined with a comma and a space.",
+      "type": "string"
+    },
+    "transport_headers": {
+      "$ref": "#/$defs/transportHeaders"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "direction": { "const": "meta" } },
+        "required": ["direction"]
+      },
+      "then": {
+        "properties": { "raw": { "$ref": "#/$defs/sessionMeta" } },
+        "required": ["raw"]
+      }
+    }
+  ],
+  "$defs": {
+    "sessionMeta": {
+      "description": "The raw of a meta envelope, which is always the first envelope of a session.",
+      "type": "object",
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "description": "The server command on stdio, null on HTTP.",
+          "type": ["array", "null"],
+          "items": { "type": "string" }
+        },
+        "cwd": {
+          "description": "The directory the server ran in, on stdio.",
+          "type": "string"
+        },
+        "target": {
+          "description": "The HTTP endpoint with the userinfo, every query value and the fragment removed. It names the server and is not meant to be dialled.",
+          "type": "string"
+        }
+      }
+    },
+    "transportHeaders": {
+      "description": "The HTTP headers the transport specification makes rules about. A request carries what the client sent, a server frame carries the response's content_type, and an empty object is a response with no Content-Type.",
+      "type": "object",
+      "properties": {
+        "accept": { "type": "string" },
+        "content_type": { "type": "string" },
+        "origin": { "type": "string" }
+      }
+    },
+    "mcpParamHeader": {
+      "description": "One Mcp-Param-* request header. name is Go's canonical spelling whatever the client sent, so compare it case-insensitively.",
+      "type": "object",
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "type": "string" },
+        "value": { "type": "string" },
+        "redacted": {
+          "description": "mcpsnoop's own redaction replaced the value.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
