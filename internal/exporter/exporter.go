@@ -486,6 +486,40 @@ func LoadFileLines(path string) (*store.Store, string, FrameLines, error) {
 	return st, sessionID, lines, nil
 }
 
+// LoadFilesLines reads several logs into one store, as if they were one
+// concatenated capture, and says which file each session came from along with
+// the line of every frame. A session id that two files share is read from both
+// and attributed to the first, which only a copy of the same capture does.
+func LoadFilesLines(paths []string) (*store.Store, map[string]string, FrameLines, error) {
+	st := store.New()
+	files := map[string]string{}
+	lines := make(FrameLines)
+	for _, path := range paths {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		fileLines := make(FrameLines)
+		_, err = loadInto(st, f, path, proxy.RedactConfig{}, fileLines, func(sessionID string) {
+			if _, ok := files[sessionID]; !ok {
+				files[sessionID] = path
+			}
+		})
+		_ = f.Close()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		// Only the lines of sessions this file owns, so a line always points into
+		// the file the session is attributed to.
+		for ref, line := range fileLines {
+			if files[ref.SessionID] == path {
+				lines[ref] = line
+			}
+		}
+	}
+	return st, files, lines, nil
+}
+
 // FrameRef identifies one captured envelope inside a log. Seq alone would not:
 // it restarts per session, and a concatenated capture holds several.
 type FrameRef struct {
@@ -517,8 +551,20 @@ func Load(r io.Reader, source string) (*store.Store, string, error) {
 // reader, so the callers that do not need it pass nil.
 func load(r io.Reader, source string, redaction proxy.RedactConfig, lines FrameLines) (*store.Store, string, error) {
 	st := store.New()
+	firstSession, err := loadInto(st, r, source, redaction, lines, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	return st, firstSession, nil
+}
+
+// loadInto folds one JSONL envelope stream into st, which may already hold other
+// logs, and returns the first session the stream carried. seen, when set, is
+// told every session id the stream holds, once each.
+func loadInto(st *store.Store, r io.Reader, source string, redaction proxy.RedactConfig, lines FrameLines, seen func(sessionID string)) (string, error) {
 	redactor := proxy.NewRedactor(redaction)
 	var firstSession string
+	sessions := map[string]bool{}
 	var counter *newlineCounter
 	if lines != nil {
 		counter = &newlineCounter{r: r}
@@ -531,10 +577,14 @@ func load(r io.Reader, source string, redaction proxy.RedactConfig, lines FrameL
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return nil, "", fmt.Errorf("%s: invalid JSONL envelope: %w", source, err)
+			return "", fmt.Errorf("%s: invalid JSONL envelope: %w", source, err)
 		}
 		if firstSession == "" {
 			firstSession = env.SessionID
+		}
+		if seen != nil && !sessions[env.SessionID] {
+			sessions[env.SessionID] = true
+			seen(env.SessionID)
 		}
 		if counter != nil {
 			// InputOffset lands just past the envelope's closing brace, so it names
@@ -545,9 +595,9 @@ func load(r io.Reader, source string, redaction proxy.RedactConfig, lines FrameL
 		st.Ingest(redactor.RedactEnvelope(env))
 	}
 	if firstSession == "" {
-		return nil, "", fmt.Errorf("%s: no envelopes found", source)
+		return "", fmt.Errorf("%s: no envelopes found", source)
 	}
-	return st, firstSession, nil
+	return firstSession, nil
 }
 
 // newlineCounter records where every newline fell in the stream, so a decoded

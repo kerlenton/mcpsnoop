@@ -145,7 +145,7 @@ func buildCheckSARIF(log checkLog, summaries []checkSummary, selected map[checkS
 		ruleIndex[rule.ID] = i
 	}
 	b := &sarifBuilder{
-		uri:       sarifArtifactURI(log.path),
+		uriOf:     func(sessionID string) string { return sarifArtifactURI(log.fileOf(sessionID)) },
 		lines:     log.lines,
 		selected:  selected,
 		ruleIndex: ruleIndex,
@@ -195,7 +195,7 @@ func buildCheckSARIF(log checkLog, summaries []checkSummary, selected map[checkS
 
 // sarifBuilder accumulates the results of one run.
 type sarifBuilder struct {
-	uri       string
+	uriOf     func(sessionID string) string
 	lines     exporter.FrameLines
 	selected  map[checkSignal]bool
 	ruleIndex map[string]int
@@ -374,8 +374,8 @@ func (b *sarifBuilder) add(sessionID, ruleID, level, message, anchor string, seq
 			sarifFingerprintKey: sarifFingerprint(sessionID, ruleID, anchor),
 		},
 	}
-	if b.uri != "" {
-		physical := sarifPhysicalLocation{ArtifactLocation: sarifArtifactLocation{URI: b.uri}}
+	if uri := b.uriOf(sessionID); uri != "" {
+		physical := sarifPhysicalLocation{ArtifactLocation: sarifArtifactLocation{URI: uri}}
 		if seq != 0 {
 			if line, ok := b.lines.Line(sessionID, seq); ok {
 				physical.Region = &sarifRegion{StartLine: line}
