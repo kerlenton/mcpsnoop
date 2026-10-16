@@ -15,12 +15,12 @@
       "type": "string"
     },
     "seq": {
-      "description": "Position in the session, from 1, rising by one per envelope in the order mcpsnoop observed them. A jump means envelopes never reached the file.",
+      "description": "Position in the session, from 1, rising by one per envelope in the order mcpsnoop read them, so a frame comes before anything sent in answer to it. A jump means envelopes never reached the file.",
       "type": "integer",
       "minimum": 1
     },
     "ts": {
-      "description": "When mcpsnoop observed the envelope, RFC 3339 with the machine's UTC offset and up to nanosecond precision.",
+      "description": "When mcpsnoop read the frame, RFC 3339 with the machine's UTC offset and up to nanosecond precision.",
       "type": "string",
       "format": "date-time"
     },

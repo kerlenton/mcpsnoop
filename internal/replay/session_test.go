@@ -312,6 +312,50 @@ func TestReplayCarriesWhatTheServerHandedOut(t *testing.T) {
 	}
 }
 
+// TestReplayTakesAnAnswerRecordedAheadOfItsRequest. A stdio capture recorded
+// before 0.28.0 can hold a quick client's answer ahead of the server request it
+// answers, and the server's new id for that request is only known once the
+// request arrives. The answer goes out behind it, under that id.
+func TestReplayTakesAnAnswerRecordedAheadOfItsRequest(t *testing.T) {
+	rec := baseRecording(t).
+		client(1*time.Second, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"ask","arguments":{}}}`).
+		client(1010*time.Millisecond, `{"jsonrpc":"2.0","id":"q-old3","result":{"action":"accept","content":{}}}`).
+		server(1012*time.Millisecond, `{"jsonrpc":"2.0","id":"q-old3","method":"elicitation/create","params":{"message":"sure?","requestedSchema":{"type":"object","properties":{}}}}`).
+		server(1020*time.Millisecond, `{"jsonrpc":"2.0","id":6,"result":{"content":[{"type":"text","text":"the user said accept"}]}}`).
+		load()
+
+	sink, report := replayAgainst(t, rec, SessionOptions{})
+	if len(report.Missing) != 0 || len(report.Skipped) != 0 || len(report.Unanswered) != 0 {
+		t.Fatalf("missing %v, skipped %v, unanswered %v", report.Missing, report.Skipped, report.Unanswered)
+	}
+	if got := sink.answerTo(t, "tools/call", "ask"); !strings.Contains(got, "the user said accept") {
+		t.Fatalf("the early answer did not reach the server's question: %s", got)
+	}
+}
+
+func TestAnswersAfterRequestsLeavesAnOrderedCaptureAlone(t *testing.T) {
+	env := func(dir proxy.Direction, raw string) proxy.Envelope {
+		return proxy.Envelope{Direction: dir, Raw: json.RawMessage(raw)}
+	}
+	// A server that reuses an id once its first request is answered, which is
+	// legal, and an answer to the first must stay where it is.
+	frames := []proxy.Envelope{
+		env(proxy.ServerToClient, `{"jsonrpc":"2.0","id":0,"method":"ping"}`),
+		env(proxy.ClientToServer, `{"jsonrpc":"2.0","id":0,"result":{}}`),
+		env(proxy.ServerToClient, `{"jsonrpc":"2.0","id":0,"method":"roots/list"}`),
+		env(proxy.ClientToServer, `{"jsonrpc":"2.0","id":0,"result":{"roots":[]}}`),
+	}
+	if got := answersAfterRequests(frames); fmt.Sprint(got) != fmt.Sprint(frames) {
+		t.Fatalf("an ordered capture was reordered: %v", got)
+	}
+	// An answer ahead of its request moves just behind it, and nothing else does.
+	early := []proxy.Envelope{frames[1], frames[0], frames[2], frames[3]}
+	want := []proxy.Envelope{frames[0], frames[1], frames[2], frames[3]}
+	if got := answersAfterRequests(early); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
 // TestReplayKeepsTheClientsOrderButNotItsPauses. Two calls the client sent at
 // once go out at once, and a call the client sent only after an answer waits
 // for that answer, however long the server takes. The recorded gaps between

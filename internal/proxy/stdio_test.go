@@ -204,7 +204,7 @@ func TestPumpFramesFlagsTruncated(t *testing.T) {
 	var out bytes.Buffer
 	var truncated bool
 	var observed []byte
-	pumpFrames(strings.NewReader(line), &out, observeCap, func(l []byte, tr bool) {
+	pumpFrames(strings.NewReader(line), &out, observeCap, newRecorder(NopSink()), func(_ place, l []byte, tr bool) {
 		observed = append([]byte(nil), l...)
 		truncated = tr
 	})
@@ -236,7 +236,7 @@ func TestPumpFramesLeavesAWholeLineUnflagged(t *testing.T) {
 	var out bytes.Buffer
 	var truncated bool
 	var observed []byte
-	pumpFrames(strings.NewReader(frame+"\r\n"), &out, maxFrameBytes, func(l []byte, tr bool) {
+	pumpFrames(strings.NewReader(frame+"\r\n"), &out, maxFrameBytes, newRecorder(NopSink()), func(_ place, l []byte, tr bool) {
 		observed = append([]byte(nil), l...)
 		truncated = tr
 	})
@@ -335,6 +335,86 @@ func TestStdioSeqReachesTheSinkInOrder(t *testing.T) {
 	if sink.count < frames {
 		t.Fatalf("only %d envelopes observed, want at least %d", sink.count, frames)
 	}
+}
+
+// TestStdioRecordsALineBeforeTheAnswerToIt. A peer can answer a line the moment
+// it is forwarded, and the pump on the other side then records the answer while
+// the first pump is still on its way to recording the line. Numbered as they
+// were observed, the capture showed a client answering a request it had not yet
+// been sent, and a replay, which plans from that order, sent the answer before
+// the request it answers.
+//
+// The client here answers the server's request from inside the write that
+// delivers it, and holds that write until its answer is recorded, or until it
+// has waited long enough to know the answer is held back, which forces the
+// interleaving rather than hoping for it.
+func TestStdioRecordsALineBeforeTheAnswerToIt(t *testing.T) {
+	const (
+		request = `{"jsonrpc":"2.0","id":"q1","method":"roots/list"}`
+		answer  = `{"jsonrpc":"2.0","id":"q1","result":{"roots":[]}}`
+	)
+	sink := &captureSink{}
+	inR, inW := io.Pipe()
+	client := &answeringClient{sink: sink, in: inW, trigger: request, answer: answer}
+
+	code, err := RunStdio(context.Background(), StdioConfig{
+		Command:   []string{"/bin/sh", "-c", `printf '%s\n' '` + request + `'; IFS= read -r line`},
+		Label:     "test",
+		SessionID: "causal-1",
+		Sink:      sink,
+		In:        inR,
+		Out:       client,
+		Err:       io.Discard,
+	})
+	if err != nil || code != 0 {
+		t.Fatalf("RunStdio: code %d, %v", code, err)
+	}
+	var asked, answered *Envelope
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	for i, e := range sink.envs {
+		switch {
+		case e.Direction == ServerToClient && string(e.Raw) == request:
+			asked = &sink.envs[i]
+		case e.Direction == ClientToServer && string(e.Raw) == answer:
+			answered = &sink.envs[i]
+		}
+	}
+	if asked == nil || answered == nil {
+		t.Fatalf("missing frames in %+v", sink.envs)
+	}
+	if asked.Seq >= answered.Seq || answered.TS.Before(asked.TS) {
+		t.Fatalf("the answer was recorded at seq %d, %s, before the request it answers at seq %d, %s",
+			answered.Seq, answered.TS.Format(time.RFC3339Nano), asked.Seq, asked.TS.Format(time.RFC3339Nano))
+	}
+}
+
+// answeringClient is a client that answers a line the moment it arrives.
+type answeringClient struct {
+	sink    *captureSink
+	in      *io.PipeWriter
+	trigger string
+	answer  string
+	buf     bytes.Buffer
+}
+
+func (c *answeringClient) Write(p []byte) (int, error) {
+	c.buf.Write(p)
+	if !strings.Contains(c.buf.String(), c.trigger+"\n") {
+		return len(p), nil
+	}
+	c.buf.Reset()
+	go func() {
+		_, _ = c.in.Write([]byte(c.answer + "\n"))
+		_ = c.in.Close()
+	}()
+	// Held until the answer is recorded, which is the interleaving that inverted
+	// the capture, or until it is plainly being held back for the request.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) && len(c.sink.byDir(ClientToServer)) == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	return len(p), nil
 }
 
 type orderedSink struct {
