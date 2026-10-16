@@ -236,6 +236,14 @@ type bodyTap struct {
 	cut     bool
 	done    bool
 	started bool // some read of rc has begun
+	// ended says rc reached its end, after which a read answers EOF itself. The
+	// transport reads a body of known length once more after its last byte, to
+	// check nothing follows, and by then the target may have answered and the
+	// reverse proxy written the answer's header, which is when net/http closes
+	// the request body under its handler. That read then failed, the transport
+	// took the failure for a broken connection and closed it, and an answer
+	// still streaming on it was cut off mid-way.
+	ended bool
 }
 
 func newBodyTap(rc io.ReadCloser, cap int, onDone func([]byte, bool)) *bodyTap {
@@ -252,8 +260,17 @@ func (t *bodyTap) Read(p []byte) (int, error) {
 func (t *bodyTap) read(p []byte) (int, error) {
 	t.mu.Lock()
 	t.started = true
+	ended := t.ended
 	t.mu.Unlock()
+	if ended {
+		return 0, io.EOF
+	}
 	n, err := t.rc.Read(p)
+	if errors.Is(err, io.EOF) {
+		t.mu.Lock()
+		t.ended = true
+		t.mu.Unlock()
+	}
 	if n > 0 {
 		t.mu.Lock()
 		if room := t.cap - t.buf.Len(); room <= 0 {

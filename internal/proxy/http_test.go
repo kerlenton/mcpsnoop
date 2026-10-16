@@ -765,6 +765,79 @@ func TestHTTPDoesNotInventAFailureOnClientCancellation(t *testing.T) {
 	}
 }
 
+// TestHTTPKeepsAFastAnswersStream. The transport reads a request body of known
+// length once more after its last byte, to check nothing follows it. A target
+// that answers the moment it has the body can have its answer arriving before
+// that read, and net/http closes the request body under a handler as soon as
+// the handler starts answering, so the read failed. The transport took that
+// for a broken connection and closed it, and an event stream still on it was
+// cut off after its first event. Rare on a quiet machine and seen in CI, so the
+// body here closes on the answer the way net/http's does, and the race always
+// goes the bad way.
+func TestHTTPKeepsAFastAnswersStream(t *testing.T) {
+	const (
+		request = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow"}}`
+		first   = `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":1,"progress":1}}`
+		last    = `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: %s\n\n", first)
+		w.(http.Flusher).Flush()
+		time.Sleep(100 * time.Millisecond)
+		fmt.Fprintf(w, "data: %s\n\n", last)
+	}))
+	defer backend.Close()
+	target, _ := url.Parse(backend.URL)
+
+	answering := make(chan struct{})
+	rec := &answerSignal{ResponseRecorder: httptest.NewRecorder(), started: answering}
+	req := httptest.NewRequest(http.MethodPost, "http://mcpsnoop/mcp", nil)
+	req.Body = &closesOnAnswer{data: []byte(request), answering: answering}
+	req.ContentLength = int64(len(request))
+	httpProxyHandler(target, emitterTo(&captureSink{})).ServeHTTP(rec, req)
+
+	if got := rec.Body.String(); !strings.Contains(got, last) {
+		t.Fatalf("the answer was cut off after its first event: %q", got)
+	}
+}
+
+// answerSignal is a ResponseRecorder that says when the handler began answering.
+type answerSignal struct {
+	*httptest.ResponseRecorder
+	started chan struct{}
+	once    sync.Once
+}
+
+func (a *answerSignal) WriteHeader(code int) {
+	a.once.Do(func() { close(a.started) })
+	a.ResponseRecorder.WriteHeader(code)
+}
+
+// closesOnAnswer is a request body as net/http serves one. Its last bytes come
+// with EOF, and once the handler begins answering it is closed, so a read after
+// that fails.
+type closesOnAnswer struct {
+	data      []byte
+	answering chan struct{}
+	read      bool
+}
+
+func (b *closesOnAnswer) Read(p []byte) (int, error) {
+	if !b.read {
+		b.read = true
+		return copy(p, b.data), io.EOF
+	}
+	select {
+	case <-b.answering:
+	case <-time.After(2 * time.Second):
+	}
+	return 0, http.ErrBodyReadAfterClose
+}
+
+func (b *closesOnAnswer) Close() error { return nil }
+
 // TestProxyForwardsTheRequestUnchanged pins what the target actually receives.
 // mcpsnoop sits in the real data path and CONTRIBUTING calls that transparency
 // invariant, so this exists to make any change to the forwarding path, including
