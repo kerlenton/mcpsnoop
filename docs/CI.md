@@ -136,9 +136,51 @@ tool removed or changed, a call whose outcome got worse, and a call that got
 notably slower. `--wait` bounds how long it waits for any one answer, 10 seconds
 by default, and a server that stopped answering costs that once.
 
-The server runs over stdio from the current directory. A recording captured over
-HTTP replays its frames over stdio as well, which covers a server that speaks
-both.
+### Over HTTP
+
+A stdio server is the command after `--`, run from the current directory. A
+server reached over Streamable HTTP is named by `--target`, and the command
+after `--`, when there is one, starts it. Either way the replay waits up to
+`--start-timeout`, 30 seconds by default, for the server to listen, so a server
+that never comes up stops the run rather than failing every call. One an
+earlier step started needs no command.
+
+```yaml
+steps:
+  - uses: kerlenton/mcpsnoop@<the release the README pins>
+    with:
+      replay: tests/mcp/claude-code-session.jsonl
+      target: http://localhost:3000/mcp
+      server: node dist/http.js
+      replay-args: --header "Authorization: Bearer ${{ secrets.MCP_TOKEN }}"
+```
+
+```bash
+mcpsnoop replay tests/mcp/claude-code-session.jsonl --target http://localhost:3000/mcp \
+  --out replayed.jsonl --exit-code -- node dist/http.js
+```
+
+Each frame is its own POST, through the same recording proxy as
+`mcpsnoop http`, and the transport's bookkeeping is the replay's to do rather
+than the recording's.
+
+- **Sessions.** The session id a 2025 server assigns goes on every later
+  request, a GET stream is opened when the recording had one, and the session
+  ends with a DELETE.
+- **The server's requests.** Those on an event stream are answered with POSTs
+  of their own, and its pings as they come.
+- **Headers.** A 2026 request carries `MCP-Protocol-Version`, `Mcp-Method` and
+  `Mcp-Name` read from the body actually sent, and the `Mcp-Param` headers its
+  tool's listing declares, read the way a client reads them. A tool that gained
+  or renamed an annotation since the recording gets the header it now requires.
+- **Cancellations.** A 2026 request is cancelled by closing the stream its
+  answer comes on, which is the only cancellation that revision has over HTTP.
+- **Credentials.** A capture holds none, so `--header` adds one to every
+  request, and the action's step log shows its value hidden.
+
+A recording replays over either transport, whichever one it was captured over.
+A session recorded against the stdio build of a server checks its HTTP build,
+and the other way round.
 
 ## Record an agent run in CI
 

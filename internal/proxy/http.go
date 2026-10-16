@@ -38,19 +38,10 @@ type HTTPConfig struct {
 // text/event-stream SSE) while forwarding traffic transparently. It blocks
 // until ctx is cancelled.
 func RunHTTP(ctx context.Context, cfg HTTPConfig) error {
-	if cfg.Target == "" {
-		return errors.New("proxy: empty target")
-	}
-	target, err := url.Parse(cfg.Target)
+	handler, err := NewHTTPHandler(cfg)
 	if err != nil {
 		return err
 	}
-	sink := cfg.Sink
-	if sink == nil {
-		sink = NopSink()
-	}
-
-	handler := httpProxyHandler(target, newHTTPEmitter(cfg, sink))
 
 	srv := &http.Server{Addr: cfg.Listen, Handler: handler}
 	go func() {
@@ -63,6 +54,25 @@ func RunHTTP(ctx context.Context, cfg HTTPConfig) error {
 		return err
 	}
 	return nil
+}
+
+// NewHTTPHandler is the recording reverse proxy RunHTTP serves, for a caller
+// that serves it itself. A session replay over HTTP puts one in front of the
+// server under test on a port of its own, so the capture it leaves is written by
+// the same code that records a live session. cfg.Listen is not used.
+func NewHTTPHandler(cfg HTTPConfig) (http.Handler, error) {
+	if cfg.Target == "" {
+		return nil, errors.New("proxy: empty target")
+	}
+	target, err := url.Parse(cfg.Target)
+	if err != nil {
+		return nil, err
+	}
+	sink := cfg.Sink
+	if sink == nil {
+		sink = NopSink()
+	}
+	return httpProxyHandler(target, newHTTPEmitter(cfg, sink)), nil
 }
 
 // mcpMethodHeader and mcpNameHeader are the SEP-2243 Streamable HTTP routing
@@ -226,6 +236,14 @@ type bodyTap struct {
 	cut     bool
 	done    bool
 	started bool // some read of rc has begun
+	// ended says rc reached its end, after which a read answers EOF itself. The
+	// transport reads a body of known length once more after its last byte, to
+	// check nothing follows, and by then the target may have answered and the
+	// reverse proxy written the answer's header, which is when net/http closes
+	// the request body under its handler. That read then failed, the transport
+	// took the failure for a broken connection and closed it, and an answer
+	// still streaming on it was cut off mid-way.
+	ended bool
 }
 
 func newBodyTap(rc io.ReadCloser, cap int, onDone func([]byte, bool)) *bodyTap {
@@ -242,8 +260,17 @@ func (t *bodyTap) Read(p []byte) (int, error) {
 func (t *bodyTap) read(p []byte) (int, error) {
 	t.mu.Lock()
 	t.started = true
+	ended := t.ended
 	t.mu.Unlock()
+	if ended {
+		return 0, io.EOF
+	}
 	n, err := t.rc.Read(p)
+	if errors.Is(err, io.EOF) {
+		t.mu.Lock()
+		t.ended = true
+		t.mu.Unlock()
+	}
 	if n > 0 {
 		t.mu.Lock()
 		if room := t.cap - t.buf.Len(); room <= 0 {

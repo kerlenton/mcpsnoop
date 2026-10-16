@@ -163,6 +163,7 @@ replay_refusals=(
 	"a server with an unbalanced quote|MCPSNOOP_REPLAY=$root/clean.jsonl|MCPSNOOP_SERVER=node 'oops"
 	"a server that does not start|MCPSNOOP_REPLAY=$root/clean.jsonl|MCPSNOOP_SERVER=$root/no-such-server"
 	"replay-args setting --out|MCPSNOOP_REPLAY=$root/clean.jsonl|MCPSNOOP_SERVER=mcpsnoop mock $root/clean.jsonl|MCPSNOOP_REPLAY_ARGS=--out elsewhere.jsonl"
+	"a target nothing listens on|MCPSNOOP_REPLAY=$root/clean.jsonl|MCPSNOOP_TARGET=http://127.0.0.1:1/mcp|MCPSNOOP_REPLAY_ARGS=--start-timeout 300ms"
 )
 for case in "${replay_refusals[@]}"; do
 	IFS='|' read -r -a parts <<<"$case"
@@ -172,6 +173,18 @@ for case in "${replay_refusals[@]}"; do
 	run "" "${parts[@]:1}" MCPSNOOP_FAIL_ON_FINDINGS=false
 	[ "$gate_code" = 1 ] || bad "$label was suppressed by fail-on-findings" "gate exited $gate_code"
 done
+
+# A credential rides replay-args as a --header, and the step log prints the
+# command line, so the value has to be hidden there.
+run "" MCPSNOOP_REPLAY="$root/clean.jsonl" MCPSNOOP_TARGET=http://127.0.0.1:1/mcp \
+	"MCPSNOOP_REPLAY_ARGS=--start-timeout 300ms --header 'Authorization: Bearer topsecret'"
+if grep -q topsecret "$root/log"; then
+	bad "the step log shows a --header value" "$(cat "$root/log")"
+elif ! grep -q 'Authorization: \*\*\*' "$root/log"; then
+	bad "the step log does not show which header was hidden" "$(cat "$root/log")"
+else
+	ok "a --header value never reaches the step log"
+fi
 
 # The two safeguards, pinned one at a time.
 #

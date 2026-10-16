@@ -113,6 +113,56 @@ func TestMCPParamHeadersMatchNestedPrimitiveArguments(t *testing.T) {
 	}
 }
 
+// TestParamHeadersAreWhatTheCheckAccepts. A replay derives the headers a
+// conforming client sends from the definition the server gave, so what it
+// derives has to be exactly what the check accepts, encoding, nesting and the
+// spelling of an integer included.
+func TestParamHeadersAreWhatTheCheckAccepts(t *testing.T) {
+	var tool struct {
+		InputSchema json.RawMessage `json:"inputSchema"`
+	}
+	if err := json.Unmarshal([]byte(paramHeaderTool), &tool); err != nil {
+		t.Fatal(err)
+	}
+	arguments := `{"region":"us-west1","greeting":"Hello, 世界","options":{"verbose":false,"count":42.0}}`
+	headers, ok := ParamHeaders(tool.InputSchema, json.RawMessage(arguments))
+	if !ok {
+		t.Fatal("a valid schema was refused")
+	}
+	want := []proxy.MCPParamHeader{
+		{Name: "Mcp-Param-Region", Value: "us-west1"},
+		{Name: "Mcp-Param-Greeting", Value: "=?base64?" + base64.StdEncoding.EncodeToString([]byte("Hello, 世界")) + "?="},
+		{Name: "Mcp-Param-Verbose", Value: "false"},
+		{Name: "Mcp-Param-Count", Value: "42"},
+	}
+	got := sortedMCPParamHeaders(headers)
+	if fmt.Sprint(got) != fmt.Sprint(sortedMCPParamHeaders(want)) {
+		t.Fatalf("derived %+v, want %+v", got, want)
+	}
+
+	s := New()
+	seedParamHeaderTool(s)
+	ev := s.Ingest(paramCall(3, proxy.TransportHTTP, false, arguments, headers...))
+	if ev.RoutingMismatch || strings.Contains(ev.Warning, "Mcp-Param") {
+		t.Fatalf("the check refused derived headers: mismatch=%v warning=%q", ev.RoutingMismatch, ev.Warning)
+	}
+
+	// The transport omits the header when there is no value at the path.
+	if headers, ok := ParamHeaders(tool.InputSchema, json.RawMessage(`{"region":null,"options":{}}`)); !ok || len(headers) != 0 {
+		t.Fatalf("absent and null parameters got %+v, ok=%v", headers, ok)
+	}
+	// A definition a client over HTTP must reject, and one that is not a schema,
+	// leave the caller to decide.
+	for _, schema := range []string{
+		`{"type":"object","properties":{"ratio":{"type":"number","x-mcp-header":"Ratio"}}}`,
+		`["not","a","schema"]`,
+	} {
+		if headers, ok := ParamHeaders(json.RawMessage(schema), json.RawMessage(`{"ratio":1.5}`)); ok {
+			t.Fatalf("schema %s gave %+v", schema, headers)
+		}
+	}
+}
+
 func TestMCPParamHeaderMismatchSetsRoutingSignal(t *testing.T) {
 	s := New()
 	seedParamHeaderTool(s)
