@@ -436,3 +436,36 @@ func TestACallSentTheMomentTheLastWasAnsweredIsNotBesideIt(t *testing.T) {
 		t.Fatalf("calls in flight = %q, want others 1 at a time", got)
 	}
 }
+
+// TestTraceContextInTheHTTPHeaderIsCounted. A client instrumented with
+// OpenTelemetry's HTTP propagation sends its trace in the traceparent header and
+// nothing in _meta, and the row used to call that client one that sent no trace
+// context at all.
+func TestTraceContextInTheHTTPHeaderIsCounted(t *testing.T) {
+	st := store.New()
+	t0 := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	traced := &proxy.TraceContext{Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
+	for i, f := range []struct {
+		dir   proxy.Direction
+		raw   string
+		trace *proxy.TraceContext
+	}{
+		{proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{` + meta2026("") + `}}`, traced},
+		{proxy.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","tools":[]}}`, nil},
+		{proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{` + meta2026("") + `}}`, &proxy.TraceContext{Traceparent: "garbage"}},
+		{proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[]}}`, nil},
+	} {
+		st.Ingest(proxy.Envelope{SessionID: "h", ServerLabel: "ref", Seq: uint64(i + 1), TS: t0.Add(time.Duration(i) * time.Second),
+			Direction: f.dir, Transport: proxy.TransportHTTP, Raw: json.RawMessage(f.raw), TraceContext: f.trace})
+	}
+	p, ok := Fold(st, st.Sessions()[0])
+	if !ok {
+		t.Fatal("the session should fold")
+	}
+	if p.TraceHeader != 1 || p.TraceContext != 0 {
+		t.Fatalf("trace header %d, trace context %d, want only the well-formed header counted", p.TraceHeader, p.TraceContext)
+	}
+	if got := traceCell(p); got != "0 of 2 requests, 1 in the HTTP header" {
+		t.Fatalf("cell = %q", got)
+	}
+}

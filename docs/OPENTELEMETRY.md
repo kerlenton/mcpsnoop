@@ -15,10 +15,16 @@ mcpsnoop export -T otlp -o trace.json   # import into an OTLP-compatible tracing
 ```
 
 For OTLP, a request's `_meta.traceparent` supplies that call's trace and parent
-span IDs, and `_meta.tracestate` rides along on the span. When the traceparent is
-absent or invalid, mcpsnoop keeps the session-derived trace and carries no state.
-mcpsnoop observes rather than participates, so it adds no vendor entry of its own
-and passes the caller's state through unchanged.
+span IDs, and `_meta.tracestate` rides along on the span. Over HTTP, a request
+with no traceparent in `_meta` takes it from the `traceparent` and `tracestate`
+headers instead. That is where OpenTelemetry's HTTP instrumentation propagates a
+trace, and an MCP SDK writes nothing to `_meta` on its own, so a call from an
+instrumented client used to start a trace of its own rather than join the
+client's. `_meta` still comes first, being the carrier the specification names
+today. When neither carries a valid traceparent, mcpsnoop keeps the
+session-derived trace and carries no state. mcpsnoop observes rather than
+participates, so it adds no vendor entry of its own and passes the caller's
+state through unchanged.
 
 ## What the spans carry
 

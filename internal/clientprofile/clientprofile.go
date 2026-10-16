@@ -58,9 +58,12 @@ type Profile struct {
 	Capabilities []string `json:"capabilities"`
 
 	// TraceContext counts requests carrying a well-formed W3C traceparent in _meta
-	// (SEP-414), and TraceMalformed the ones carrying a broken one.
+	// (SEP-414), and TraceMalformed the ones carrying a broken one. TraceHeader
+	// counts the HTTP requests carrying a well-formed one in the traceparent
+	// header instead, which is where OpenTelemetry's HTTP instrumentation puts it.
 	TraceContext   int `json:"trace_context"`
 	TraceMalformed int `json:"trace_malformed"`
+	TraceHeader    int `json:"trace_header"`
 	// ProgressTokens counts the tool calls that offered a progressToken.
 	ToolCalls      int `json:"tool_calls"`
 	ProgressTokens int `json:"progress_tokens"`
@@ -198,6 +201,9 @@ func Fold(st *store.Store, header store.SessionHeader) (Profile, bool) {
 					p.TraceMalformed++
 				}
 			}
+			if ev.TraceContext != nil && validTraceparent(ev.TraceContext.Traceparent) {
+				p.TraceHeader++
+			}
 			if ev.MRTRRoot != "" {
 				p.Retries++
 				if ev.MRTRStateIssue != "" {
@@ -269,6 +275,7 @@ func Merge(in []Profile) []Profile {
 		acc.InitializeIdentified += p.InitializeIdentified
 		acc.TraceContext += p.TraceContext
 		acc.TraceMalformed += p.TraceMalformed
+		acc.TraceHeader += p.TraceHeader
 		acc.ToolCalls += p.ToolCalls
 		acc.ProgressTokens += p.ProgressTokens
 		acc.ReadOnlyAtOnce = max(acc.ReadOnlyAtOnce, p.ReadOnlyAtOnce)
@@ -419,6 +426,9 @@ func traceCell(p Profile) string {
 	out := fmt.Sprintf("%d of %d requests", p.TraceContext, p.Requests)
 	if p.TraceMalformed > 0 {
 		out += fmt.Sprintf(", %d malformed", p.TraceMalformed)
+	}
+	if p.TraceHeader > 0 {
+		out += fmt.Sprintf(", %d in the HTTP header", p.TraceHeader)
 	}
 	return out
 }

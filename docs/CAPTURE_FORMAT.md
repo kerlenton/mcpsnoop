@@ -82,6 +82,7 @@ in the order they appear on a line.
 | `status` | integer | 0.15.0 | The HTTP status of the response a server frame arrived on |
 | `auth_challenge` | string | 0.15.0 | That response's `WWW-Authenticate`, every challenge joined with `, ` |
 | `transport_headers` | object | 0.19.0 | The HTTP headers the transport specification makes rules about, described below |
+| `trace_context` | object | 0.28.0 | The W3C trace context headers of an HTTP request, described below |
 
 Each entry of `mcp_param_headers` is an object.
 
@@ -100,6 +101,17 @@ response that had no `Content-Type`.
 | `accept` | string | 0.19.0 | The request's `Accept` |
 | `content_type` | string | 0.19.0 | The frame's own `Content-Type`, the request's on a client frame and the response's on a server frame |
 | `origin` | string | 0.19.0 | The request's `Origin` |
+
+`trace_context` is the trace context an HTTP request carried in its headers,
+which is where OpenTelemetry's HTTP instrumentation puts it. It rides every
+element of a batch, and it is absent from a request that sent neither header.
+`baggage` is left out on purpose, since it is data a client forwards about its
+own work, often its user, and a span needs none of it.
+
+| Field | Type | Since | Meaning |
+|---|---|---|---|
+| `traceparent` | string | 0.28.0 | The request's `traceparent`, as sent and not validated |
+| `tracestate` | string | 0.28.0 | The request's `tracestate`, several lines joined with commas |
 
 ## Directions
 

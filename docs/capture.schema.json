@@ -91,6 +91,9 @@
     },
     "transport_headers": {
       "$ref": "#/$defs/transportHeaders"
+    },
+    "trace_context": {
+      "$ref": "#/$defs/traceContext"
     }
   },
   "allOf": [
@@ -133,6 +136,14 @@
         "accept": { "type": "string" },
         "content_type": { "type": "string" },
         "origin": { "type": "string" }
+      }
+    },
+    "traceContext": {
+      "description": "The W3C trace context headers of an HTTP request, as sent. baggage is not recorded.",
+      "type": "object",
+      "properties": {
+        "traceparent": { "type": "string" },
+        "tracestate": { "type": "string" }
       }
     },
     "mcpParamHeader": {
