@@ -314,7 +314,9 @@ type EventExport struct {
 	Status        int    `json:"http_status,omitempty"`
 	AuthChallenge string `json:"auth_challenge,omitempty"`
 	Truncated     bool   `json:"truncated,omitempty"`
-	Deprecated    string `json:"deprecated,omitempty"`
+	// Abandoned marks the client leaving an HTTP exchange before its answer.
+	Abandoned  bool   `json:"abandoned,omitempty"`
+	Deprecated string `json:"deprecated,omitempty"`
 	// CacheTTLMs is a pointer so an explicit ttlMs of 0, which the spec defines as
 	// immediately stale, stays distinguishable from a server that declared none.
 	CacheTTLMs        *int            `json:"cache_ttl_ms,omitempty"`
@@ -1778,6 +1780,7 @@ func exportEvent(ev store.EventView, callIndex map[string]int) EventExport {
 		Status:            ev.HTTPStatus,
 		AuthChallenge:     ev.AuthChallenge,
 		Truncated:         ev.Truncated,
+		Abandoned:         ev.Abandoned,
 		Deprecated:        ev.Deprecated,
 		CacheTTLMs:        cacheTTLExport(ev.CacheHint),
 		CacheScope:        ev.CacheHint.Scope,
@@ -1927,6 +1930,9 @@ func writeText(w io.Writer, data SessionExport) error {
 		}
 		if ev.Truncated {
 			title += " truncated"
+		}
+		if ev.Abandoned {
+			title += " abandoned"
 		}
 		if ev.Deprecated != "" {
 			title += " deprecated"

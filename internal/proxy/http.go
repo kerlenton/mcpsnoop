@@ -103,9 +103,12 @@ type route struct {
 	// undelivered marks the proxy's own 502 for a request that never reached the
 	// target. See Envelope.Undelivered.
 	undelivered bool
-	truncated   bool   // the observed copy was cut at the frame-size cap
-	status      int    // HTTP status of the response carrying this frame
-	challenge   string // WWW-Authenticate on that response
+	// abandoned marks the client leaving the exchange before its answer. See
+	// Envelope.Abandoned.
+	abandoned bool
+	truncated bool   // the observed copy was cut at the frame-size cap
+	status    int    // HTTP status of the response carrying this frame
+	challenge string // WWW-Authenticate on that response
 	// headers are the spec-mandated transport headers of this frame. A pointer so
 	// a frame mcpsnoop captured with none is distinguishable from a log written
 	// before it recorded them at all.
@@ -161,6 +164,7 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 			ConnID:             r.conn,
 			Exchange:           r.exchange,
 			Undelivered:        r.undelivered,
+			Abandoned:          r.abandoned,
 			Truncated:          r.truncated,
 			Status:             r.status,
 			AuthChallenge:      r.challenge,
@@ -420,9 +424,18 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 				// discarded afterwards, so nothing could check the rule it decides.
 				headers: &TransportHeaders{ContentType: resp.Header.Get("Content-Type")},
 			}
+			var st *exchangeState
 			if resp.Request != nil {
 				rt.conn = resp.Request.RemoteAddr
 				rt.exchange = exchangeOf(resp.Request)
+				st = exchangeStateOf(resp.Request)
+			}
+			stream := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
+			if !stream {
+				// A body that is not a stream is the whole answer, or a failure in its
+				// place, so the server is done with the request whatever the client
+				// does with the body.
+				st.answer()
 			}
 			// Defensive fallback. If the target ignored the identity request and
 			// still compressed the body, skip observation rather than push binary
@@ -430,9 +443,12 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			if enc := resp.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
 				return nil
 			}
-			if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-				// Streaming case, tap SSE data frames as bytes flow to the client.
-				resp.Body = newSSETap(resp.Body, maxFrameBytes, func(data []byte, truncated bool) {
+			if stream {
+				// Streaming case, tap SSE data frames as bytes flow to the client. The
+				// answer is one event among them, and until it passes the request is
+				// still open, which is what the client closing the stream ends.
+				watched := st.watch(emit)
+				tap := newSSETap(resp.Body, maxFrameBytes, func(data []byte, truncated bool) {
 					r := rt
 					if truncated {
 						// A cut event is a fragment, so it is emitted whole and flagged
@@ -441,11 +457,13 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 						// json.RawMessage and an invalid one makes the envelope fail to
 						// marshal in the sinks.
 						r.truncated = true
-						emit(ServerToClient, data, r)
+						watched(ServerToClient, data, r)
 						return
 					}
-					emitFrames(emit, ServerToClient, data, r)
+					emitFrames(watched, ServerToClient, data, r)
 				})
+				tap.onCut = st.cut
+				resp.Body = tap
 				return nil
 			}
 			// Plain JSON case. Stream the body through a tap that copies at most
@@ -474,6 +492,7 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 				// reached it.
 				var dial *net.OpError
 				undelivered := errors.As(err, &dial) && dial.Op == "dial"
+				exchangeStateOf(req).answer()
 				emit(ServerToClient, nil, route{status: http.StatusBadGateway, conn: req.RemoteAddr,
 					exchange: exchangeOf(req), undelivered: undelivered})
 			}
@@ -487,7 +506,9 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 		// reverse proxy hands to both the outgoing request and the error handler, so
 		// the request and whatever comes back for it share one number.
 		exchange := exchanges.Add(1)
-		r = r.WithContext(context.WithValue(r.Context(), exchangeKey{}, exchange))
+		st := &exchangeState{}
+		ctx := context.WithValue(r.Context(), exchangeKey{}, exchange)
+		r = r.WithContext(context.WithValue(ctx, exchangeStateKey{}, st))
 		if r.Body != nil && r.Method == http.MethodPost {
 			rt := route{
 				exchange:        exchange,
@@ -505,12 +526,92 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 			}
 			// Same streaming tap for the request body, so a large upload is forwarded
 			// without being held in memory whole.
+			watched := st.watch(emit)
 			r.Body = newBodyTap(r.Body, maxFrameBytes, func(observed []byte, truncated bool) {
-				observeBody(emit, ClientToServer, observed, truncated, rt)
+				observeBody(watched, ClientToServer, observed, truncated, rt)
 			})
 		}
+		// The request context ends when the client's connection does, and a stream
+		// the client stopped reading ends without the server ending it. Either way
+		// before the answer, the client gave up on the request, which is recorded
+		// since nothing on the wire says so otherwise. Deferred, because a stream
+		// cut short makes the reverse proxy abort the handler with a panic.
+		defer func() {
+			if st.abandoned(r.Context().Err() != nil) {
+				emit(ClientToServer, nil, route{exchange: exchange, conn: r.RemoteAddr, abandoned: true,
+					protocolVersion: r.Header.Get(mcpProtocolVersionHeader)})
+			}
+		}()
 		rp.ServeHTTP(w, r)
 	})
+}
+
+// exchangeState is what one exchange has shown so far, enough to tell a client
+// that gave up on its request from one that was answered and then went away.
+type exchangeState struct {
+	mu       sync.Mutex
+	request  bool // the POST carried a JSON-RPC request
+	answered bool // its answer, or a failure in its place, came back
+	cutShort bool // the stream carrying the answer ended without the server ending it
+}
+
+// exchangeStateKey carries an exchange's state on its request context.
+type exchangeStateKey struct{}
+
+// exchangeStateOf returns the state the handler keeps for r's exchange, nil for
+// a request that never passed through it. Every method takes a nil state.
+func exchangeStateOf(r *http.Request) *exchangeState {
+	st, _ := r.Context().Value(exchangeStateKey{}).(*exchangeState)
+	return st
+}
+
+// watch wraps emit so the exchange learns from each frame it passes whether the
+// client sent a request and whether its answer came back.
+func (st *exchangeState) watch(emit func(Direction, []byte, route)) func(Direction, []byte, route) {
+	if st == nil {
+		return emit
+	}
+	return func(dir Direction, body []byte, rt route) {
+		if msg, ok := ParseRPC(body); ok {
+			st.mu.Lock()
+			switch {
+			case dir == ClientToServer && msg.Method != "" && len(msg.ID) > 0:
+				st.request = true
+			case dir == ServerToClient && msg.IsResponse():
+				st.answered = true
+			}
+			st.mu.Unlock()
+		}
+		emit(dir, body, rt)
+	}
+}
+
+func (st *exchangeState) answer() {
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	st.answered = true
+	st.mu.Unlock()
+}
+
+func (st *exchangeState) cut() {
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	st.cutShort = true
+	st.mu.Unlock()
+}
+
+// abandoned reports whether the client left before its request was answered.
+func (st *exchangeState) abandoned(clientGone bool) bool {
+	if st == nil {
+		return false
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.request && !st.answered && (clientGone || st.cutShort)
 }
 
 // traceContextOf reads a request's W3C trace context headers as sent. Both are
@@ -584,6 +685,10 @@ type sseTap struct {
 	lineBuf   bytes.Buffer
 	dataBuf   bytes.Buffer
 	truncated bool
+	// ended says the server ended the stream, and onCut, when set, hears about a
+	// stream closed before that, which is the client or mcpsnoop letting go.
+	ended bool
+	onCut func()
 }
 
 func newSSETap(rc io.ReadCloser, cap int, onData func([]byte, bool)) *sseTap {
@@ -594,6 +699,9 @@ func (t *sseTap) Read(p []byte) (int, error) {
 	n, err := t.rc.Read(p)
 	if n > 0 {
 		t.feed(p[:n])
+	}
+	if errors.Is(err, io.EOF) {
+		t.ended = true
 	}
 	return n, err
 }
@@ -662,6 +770,9 @@ func (t *sseTap) Close() error {
 		t.onData(append([]byte(nil), t.dataBuf.Bytes()...), t.truncated)
 		t.dataBuf.Reset()
 		t.truncated = false
+	}
+	if !t.ended && t.onCut != nil {
+		t.onCut()
 	}
 	return t.rc.Close()
 }

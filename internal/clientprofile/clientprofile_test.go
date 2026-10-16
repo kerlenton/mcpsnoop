@@ -469,3 +469,36 @@ func TestTraceContextInTheHTTPHeaderIsCounted(t *testing.T) {
 		t.Fatalf("cell = %q", got)
 	}
 }
+
+// TestACancellationByClosingTheStreamIsCounted. On 2026-07-28 a client over HTTP
+// cancels by closing the stream its answer was coming on, and sends no
+// notification, so the row used to say such a client never cancelled anything.
+func TestACancellationByClosingTheStreamIsCounted(t *testing.T) {
+	st := store.New()
+	t0 := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	for i, f := range []struct {
+		dir       proxy.Direction
+		raw       string
+		exchange  uint64
+		abandoned bool
+	}{
+		{proxy.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow",` + meta2026("") + `}}`, 1, false},
+		{proxy.ClientToServer, ``, 1, true},
+		{proxy.ClientToServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow",` + meta2026("") + `}}`, 2, false},
+		{proxy.ServerToClient, `{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[]}}`, 2, false},
+	} {
+		env := proxy.Envelope{SessionID: "h", ServerLabel: "ref", Seq: uint64(i + 1), TS: t0.Add(time.Duration(i) * time.Second),
+			Direction: f.dir, Transport: proxy.TransportHTTP, Exchange: f.exchange, Abandoned: f.abandoned}
+		if f.raw != "" {
+			env.Raw = json.RawMessage(f.raw)
+		}
+		st.Ingest(env)
+	}
+	p, ok := Fold(st, st.Sessions()[0])
+	if !ok {
+		t.Fatal("the session should fold")
+	}
+	if got := cancellationsCell(p); got != "1, 1 by closing the stream" {
+		t.Fatalf("cell = %q", got)
+	}
+}

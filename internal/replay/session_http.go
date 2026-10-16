@@ -191,10 +191,10 @@ type httpSide struct {
 	sessionID string // Mcp-Session-Id, from whichever answer assigned one
 	version   string // the MCP-Protocol-Version the client last sent
 	listening bool
-	// streams closes the answer stream of each 2026 request, by id. An entry
+	// streams closes the answer stream of each request, by id. An entry
 	// outlives its request, since closing a finished stream does nothing and
 	// the notification it stands in for must not go out either way.
-	streams map[string]context.CancelFunc
+	streams map[string]stream
 
 	wg sync.WaitGroup
 }
@@ -208,14 +208,12 @@ func (h *httpSide) send(frame []byte, env *proxy.Envelope) {
 		// A request, which the server may take its time over, so the next frame
 		// does not wait for it.
 		ctx, cancel := context.WithCancel(h.ctx)
-		if metaVersion(msg.Params) >= "2026-07-28" {
-			h.mu.Lock()
-			if h.streams == nil {
-				h.streams = map[string]context.CancelFunc{}
-			}
-			h.streams[string(msg.ID)] = cancel
-			h.mu.Unlock()
+		h.mu.Lock()
+		if h.streams == nil {
+			h.streams = map[string]stream{}
 		}
+		h.streams[string(msg.ID)] = stream{close: cancel, modern: metaVersion(msg.Params) >= "2026-07-28"}
+		h.mu.Unlock()
 		h.wg.Add(1)
 		go func() {
 			defer h.wg.Done()
@@ -245,13 +243,35 @@ func (h *httpSide) closeStream(params []byte) bool {
 	}
 	key := string(bytes.TrimSpace(id.encode()))
 	h.mu.Lock()
-	cancel, ok := h.streams[key]
+	st, ok := h.streams[key]
 	h.mu.Unlock()
-	if ok {
-		cancel()
-		h.e.closed(key)
+	if !ok || !st.modern {
+		return false
 	}
-	return ok
+	st.close()
+	h.e.closed(key)
+	return true
+}
+
+// stream is one request's answer stream, and whether the request declared the
+// revision that cancels by closing it.
+type stream struct {
+	close  context.CancelFunc
+	modern bool
+}
+
+// cancel closes the stream of a request whose recorded client left its
+// exchange, which is that act itself, on any revision.
+func (h *httpSide) cancel(id, _ string) string {
+	h.mu.Lock()
+	st, ok := h.streams[id]
+	h.mu.Unlock()
+	if !ok {
+		return "the request it gave up on was never sent"
+	}
+	st.close()
+	h.e.closed(id)
+	return ""
 }
 
 // post sends one frame and reads whatever comes back on it, until ctx ends.

@@ -572,6 +572,66 @@ func (s *strictServer) waitCancelled(patience time.Duration) int {
 	}
 }
 
+// TestReplayOfAClientThatLeftItsExchange. A 2026 client recorded over HTTP
+// cancels by leaving the exchange, which the capture records with no frame of
+// its own. Replayed over HTTP the replay leaves the same way, and over stdio it
+// sends the notification a client there cancels with. A 2025 client that left
+// only disconnected, which stdio has no way to say, so that is reported rather
+// than turned into a cancellation it never was.
+func TestReplayOfAClientThatLeftItsExchange(t *testing.T) {
+	meta := `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}`
+	left := func(e *proxy.Envelope) { e.Raw, e.Abandoned = nil, true }
+	recording := func(t *testing.T, call string, edit func(*proxy.Envelope)) *Recording {
+		return (&httpRecording{t: t}).
+			add(proxy.ClientToServer, 1, call, edit).
+			add(proxy.ClientToServer, 1, `{}`, left).
+			load()
+	}
+
+	t.Run("over HTTP", func(t *testing.T) {
+		server := &strictServer{run: fmt.Sprintf("%x", time.Now().UnixNano())}
+		ts := httptest.NewServer(server)
+		defer ts.Close()
+		rec := recording(t, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow","arguments":{},`+meta+`}}`,
+			func(e *proxy.Envelope) {
+				e.MCPProtocolVersion, e.MCPMethod, e.MCPName = "2026-07-28", "tools/call", "slow"
+			})
+
+		_, report := replayHTTP(t, rec, ts.URL+"/mcp", SessionOptions{Wait: 4 * time.Second})
+		cancelled := server.waitCancelled(2 * time.Second)
+		server.mu.Lock()
+		bad := server.bad
+		server.mu.Unlock()
+		if len(bad) != 0 || cancelled != 1 {
+			t.Fatalf("rejected %v, cancelled %d, want the stream closed under the call", bad, cancelled)
+		}
+		if report.Sent != 2 || len(report.Skipped) != 0 || len(report.Missing) != 0 {
+			t.Fatalf("sent %d, skipped %v, missing %v", report.Sent, report.Skipped, report.Missing)
+		}
+	})
+
+	t.Run("over stdio", func(t *testing.T) {
+		rec := recording(t, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow","arguments":{"ms":3000},`+meta+`}}`, nil)
+		sink, report := replayAgainst(t, rec, SessionOptions{Wait: 2 * time.Second})
+		got := sink.clientFrames("notifications/cancelled")
+		if len(got) != 1 || !strings.Contains(got[0], `"requestId":7`) {
+			t.Fatalf("sent %v, skipped %v, want the call cancelled the stdio way", got, report.Skipped)
+		}
+	})
+
+	t.Run("a 2025 client over stdio", func(t *testing.T) {
+		rec := recording(t, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow","arguments":{"ms":3000}}}`,
+			func(e *proxy.Envelope) { e.MCPProtocolVersion = "2025-11-25" })
+		sink, report := replayAgainst(t, rec, SessionOptions{Wait: 4 * time.Second})
+		if got := sink.clientFrames("notifications/cancelled"); len(got) != 0 {
+			t.Fatalf("a disconnect was replayed as a cancellation: %v", got)
+		}
+		if len(report.Skipped) != 1 || !strings.Contains(report.Skipped[0], "2025-11-25 client leaving an HTTP exchange disconnected") {
+			t.Fatalf("skipped = %v", report.Skipped)
+		}
+	})
+}
+
 // TestReplayOverHTTPStartsTheServer. With a command beside the target, the
 // replay starts the server, waits for it to listen, and stops it afterwards,
 // which is what a CI job needs from one line. A server that never listens is

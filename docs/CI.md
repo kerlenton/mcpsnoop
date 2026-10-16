@@ -119,7 +119,9 @@ What the replay keeps from the recording is the client's behaviour.
   Pings are answered as they come.
 - **Cancellations.** One goes out after the delay it did in the recording, and
   not at all when the server answered first, since the client would have had no
-  reason to give up.
+  reason to give up. A client recorded over HTTP that cancelled by leaving the
+  exchange is replayed the same way, as the cancellation the transport the
+  replay speaks has, `notifications/cancelled` over stdio.
 
 It runs every call the recording made, including those that change things, so
 point it at a server and data you can afford to change. `--read-only` holds back
@@ -174,7 +176,8 @@ than the recording's.
   tool's listing declares, read the way a client reads them. A tool that gained
   or renamed an annotation since the recording gets the header it now requires.
 - **Cancellations.** A 2026 request is cancelled by closing the stream its
-  answer comes on, which is the only cancellation that revision has over HTTP.
+  answer comes on, which is the only cancellation that revision has over HTTP,
+  and the capture records the client leaving the exchange.
 - **Credentials.** A capture holds none, so `--header` adds one to every
   request, and the action's step log shows its value hidden.
 
@@ -533,9 +536,11 @@ failure, because it is usually the cancellation reported back. The Go SDK turns
 a cancelled handler into an `isError` result, and that says nothing about
 whether the work was done before the handler noticed.
 
-On Streamable HTTP closing the response stream is the cancellation, and it leaves
-no frame. A call abandoned that way reads as never answered, so a repeat of it is
-reported as one that may have run twice. mcpsnoop numbers every HTTP exchange,
+On Streamable HTTP under 2026-07-28 closing the response stream is the
+cancellation. It leaves no frame, so mcpsnoop records the client leaving the
+exchange, the call reads as cancelled, and a repeat of it is judged the way a
+repeat after `notifications/cancelled` is. In a capture written before 0.28.0
+such a call reads as never answered. mcpsnoop numbers every HTTP exchange,
 so a 401 or a 403 settles the call it refused. A repeat after authorizing again,
 which the authorization spec tells a client to do, is not reported, and the
 refused call reads as failed rather than as one still waiting for an answer. A

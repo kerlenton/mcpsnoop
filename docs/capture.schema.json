@@ -73,6 +73,10 @@
       "description": "On mcpsnoop's own 502, the target refused the connection, so the request never reached it.",
       "type": "boolean"
     },
+    "abandoned": {
+      "description": "On a c2s envelope with no message, the client left the exchange before the answer to its request came back.",
+      "type": "boolean"
+    },
     "truncated": {
       "description": "This copy of the frame was cut at 16 MiB and is in text. The whole frame still reached the other side.",
       "type": "boolean"

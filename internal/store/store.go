@@ -34,13 +34,13 @@ const (
 	// Superseded means the request's id was reused by a later in-flight request, so
 	// this one can never be matched to a response. It is no longer pending.
 	Superseded
-	// Cancelled means a notifications/cancelled named this request, so it settled
-	// without the answer the caller wanted. It is no longer pending, and it is not
-	// an error, since the client stopping work on purpose is not something going
-	// wrong. Reachable on stdio only: on Streamable HTTP closing the response
-	// stream is itself the cancellation signal and, in the spec's words, "No
-	// notifications/cancelled message is required or expected", so mcpsnoop never
-	// sees one there.
+	// Cancelled means the client gave up on this request, so it settled without
+	// the answer the caller wanted. It is no longer pending, and it is not an
+	// error, since the client stopping work on purpose is not something going
+	// wrong. A notifications/cancelled names the request, or on Streamable HTTP
+	// under 2026-07-28 the client leaves the exchange that carried it, since there
+	// closing the response stream is itself the cancellation and, in the spec's
+	// words, "No notifications/cancelled message is required or expected".
 	Cancelled
 	// Streaming means a long-lived stream request (subscriptions/listen) whose
 	// response arrives only when the stream ends. It is open but not pending.
@@ -272,6 +272,7 @@ type event struct {
 	traceContext       *proxy.TraceContext
 	mismatch           bool   // a routing header disagrees with the body (structured flag for warning)
 	truncated          bool   // the observed copy was capped at the frame-size limit
+	abandoned          bool   // the client left the exchange before its answer came back
 	deprecated         string // a deprecated MCP feature was used (structured, not a protocol warning)
 	cacheHint          CacheHint
 	cacheStaleRefetch  string // client re-fetched inside a declared ttlMs window (structured, not a protocol warning)
@@ -569,6 +570,29 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 			// warning field four lines above: the gap is mcpsnoop's own doing and the
 			// traffic was correct in both directions.
 			sess.truncatedRequests++
+		}
+		s.appendEvent(sess, ev)
+		return ev.view(sess)
+	}
+
+	// The client left an exchange before the answer to its request came back. On
+	// 2026-07-28 the spec has the server treat that as the request's cancellation,
+	// so the call settles as cancelled, which is what happened to it. On an
+	// earlier revision a disconnect "SHOULD NOT be interpreted as the client
+	// cancelling its request", and the call stays open for an answer the server
+	// may still deliver another way.
+	if e.Abandoned {
+		ev.kind = EventTransport
+		ev.abandoned = true
+		if c := sess.exchangeRequest(e.Exchange); c != nil {
+			if atLeastRevision(c.protocolVersion, cancelByClosingFrom) {
+				if sess.closeExchange(c, e.TS) {
+					ev.call = c
+				}
+				ev.observation = "the client closed the stream, which cancels " + describeCall(c)
+			} else {
+				ev.observation = "the client disconnected, which on " + c.protocolVersion + " does not cancel " + describeCall(c)
+			}
 		}
 		s.appendEvent(sess, ev)
 		return ev.view(sess)
@@ -2355,6 +2379,41 @@ func (sess *session) cancelCall(id string, dir proxy.Direction, conn string, ts 
 	c.markHop(ts, &c.serverTime)
 	sess.pending--
 	return c
+}
+
+// cancelByClosingFrom is the revision on which a client over Streamable HTTP
+// cancels a request by closing the stream its answer is coming on.
+const cancelByClosingFrom = "2026-07-28"
+
+// closeExchange settles the call whose client closed the stream its answer was
+// coming on, which on cancelByClosingFrom is the request's cancellation. A
+// subscription ends the way closeStreamingCall ends one, and a call whose result
+// handed out a task is left to the task, as cancelCall leaves it.
+// It reports whether the call was settled.
+func (sess *session) closeExchange(c *call, ts time.Time) bool {
+	const reason = "the client closed the stream"
+	switch {
+	case c.state == Streaming:
+		c.end = ts
+		c.markHop(ts, &c.serverTime)
+	case c.state == Pending && c.taskID == "":
+		c.markHop(ts, &c.serverTime)
+		sess.pending--
+	default:
+		return false
+	}
+	c.state = Cancelled
+	c.cancelledAt = ts
+	c.cancelReason = reason
+	return true
+}
+
+// describeCall names a call the way a reader would look for it.
+func describeCall(c *call) string {
+	if c.toolName != "" {
+		return c.method + " " + strconv.Quote(c.toolName) + " (id " + c.id + ")"
+	}
+	return c.method + " (id " + c.id + ")"
 }
 
 // closeStreamingCall settles the long-lived call a notifications/cancelled names.

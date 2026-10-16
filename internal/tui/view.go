@@ -811,6 +811,23 @@ func (m Model) streamCells(e store.EventView) streamCell {
 			c.detail = e.Text
 		}
 	case store.EventTransport:
+		if e.Abandoned {
+			// The client left before its answer, which nothing else on the wire
+			// shows, and on 2026-07-28 it is how a client cancels. Labelled like a
+			// notifications/cancelled row when it settled the call.
+			c.dir, c.method, c.status = arrow(e.Dir), "closed", "ok"
+			c.detail = "the client left before the answer came back"
+			if e.Observation != "" {
+				c.detail = e.Observation
+			}
+			if e.Call != nil {
+				c.status = "cancel"
+				if e.Call.LateResult {
+					c.status = "late"
+				}
+			}
+			break
+		}
 		// Reading the status out loud is the whole point of this row: it exists
 		// because a 401 challenge and a 202 acknowledging a notification carry no
 		// body, so before this they produced nothing at all.

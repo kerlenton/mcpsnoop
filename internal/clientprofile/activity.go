@@ -39,9 +39,9 @@ func listedTools(st *store.Store, sessionID string) map[string]store.ToolDefinit
 //
 // Only calls the server answered are measured. A client that gives up on a call
 // and moves on has not run the two side by side, even though the next request
-// can reach the wire before the cancellation does, and on Streamable HTTP a
-// cancellation leaves no frame at all, so a call the client abandoned there would
-// otherwise read as running for the rest of the capture.
+// can reach the wire before the cancellation does, and an HTTP capture written
+// before 0.28.0 holds no trace of a cancellation at all, so a call the client
+// abandoned there would otherwise read as running for the rest of the capture.
 func callsAtOnce(st *store.Store, sessionID string, definitions map[string]store.ToolDefinition) (readOnlyAtOnce, othersAtOnce int) {
 	type edge struct {
 		at       time.Time

@@ -107,6 +107,9 @@ type EventView struct {
 	// Truncated is true when mcpsnoop capped its own observed copy of a large body.
 	// It is a structured marker, not a protocol warning, so it never fails check.
 	Truncated bool
+	// Abandoned is true on the transport event recorded when the client left an
+	// HTTP exchange before the answer to its request came back.
+	Abandoned bool
 	// Deprecated carries a heads-up when a frame uses a feature deprecated in the
 	// 2026-07-28 MCP release. It is structured like Truncated and never fails check.
 	Deprecated string
@@ -484,6 +487,7 @@ func (e *event) view(sess *session) EventView {
 		TraceContext:       e.traceContext,
 		RoutingMismatch:    e.mismatch,
 		Truncated:          e.truncated,
+		Abandoned:          e.abandoned,
 		Deprecated:         e.deprecated,
 		CacheHint:          e.cacheHint,
 		CacheStaleRefetch:  e.cacheStaleRefetch,

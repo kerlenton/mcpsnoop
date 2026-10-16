@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -145,7 +146,7 @@ func TestBodyTapNeverReadsBesideAReader(t *testing.T) {
 // emitterTo adapts a captureSink into the emit func httpProxyHandler expects.
 func emitterTo(sink *captureSink) func(Direction, []byte, route) {
 	return func(d Direction, raw []byte, rt route) {
-		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, MCPProtocolVersion: rt.protocolVersion, MCPParamHeaders: rt.params, Batch: rt.batch, Truncated: rt.truncated, Status: rt.status, AuthChallenge: rt.challenge})
+		sink.Emit(Envelope{Direction: d, Raw: append([]byte(nil), raw...), MCPMethod: rt.method, MCPName: rt.name, MCPProtocolVersion: rt.protocolVersion, MCPParamHeaders: rt.params, Batch: rt.batch, Truncated: rt.truncated, Status: rt.status, AuthChallenge: rt.challenge, Exchange: rt.exchange, Abandoned: rt.abandoned})
 	}
 }
 
@@ -837,6 +838,145 @@ func (b *closesOnAnswer) Read(p []byte) (int, error) {
 }
 
 func (b *closesOnAnswer) Close() error { return nil }
+
+// TestHTTPRecordsAClientThatLeftBeforeItsAnswer. On 2026-07-28 a client over
+// HTTP cancels a request by closing the stream its answer is coming on, and
+// nothing on the wire says so but the closing. So the proxy records it, once,
+// on the request's exchange, whether the client left before the server began
+// answering or in the middle of a stream. A client that got its answer and then
+// left, and one that never sent a request, have nothing to give up on.
+func TestHTTPRecordsAClientThatLeftBeforeItsAnswer(t *testing.T) {
+	const (
+		request      = `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow"}}`
+		notification = `{"jsonrpc":"2.0","method":"notifications/initialized"}`
+		progress     = `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":1,"progress":1}}`
+		answer       = `{"jsonrpc":"2.0","id":7,"result":{"content":[]}}`
+	)
+	cases := []struct {
+		name string
+		body string
+		// serve answers the request, and is released when the test ends.
+		serve     func(w http.ResponseWriter, release <-chan struct{})
+		readFirst bool // the client reads one event before it leaves
+		abandoned bool
+	}{
+		{
+			name: "before the server began answering",
+			body: request,
+			serve: func(w http.ResponseWriter, release <-chan struct{}) {
+				<-release
+			},
+			abandoned: true,
+		},
+		{
+			name: "in the middle of the stream",
+			body: request,
+			serve: func(w http.ResponseWriter, release <-chan struct{}) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "data: %s\n\n", progress)
+				w.(http.Flusher).Flush()
+				<-release
+			},
+			readFirst: true,
+			abandoned: true,
+		},
+		{
+			name: "after the answer came on the stream",
+			body: request,
+			serve: func(w http.ResponseWriter, release <-chan struct{}) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "data: %s\n\n", answer)
+				w.(http.Flusher).Flush()
+				<-release
+			},
+			readFirst: true,
+		},
+		{
+			name: "with no request to give up on",
+			body: notification,
+			serve: func(w http.ResponseWriter, release <-chan struct{}) {
+				<-release
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			release := make(chan struct{})
+			arrived := make(chan struct{}, 1)
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.ReadAll(r.Body)
+				select {
+				case arrived <- struct{}{}:
+				default:
+				}
+				tc.serve(w, release)
+			}))
+			defer backend.Close()
+
+			target, _ := url.Parse(backend.URL)
+			sink := &captureSink{}
+			proxied := httpProxyHandler(target, emitterTo(sink))
+			done := make(chan struct{})
+			front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(done)
+				proxied.ServeHTTP(w, r)
+			}))
+			defer front.Close()
+			// Released before either server closes, since Close waits for every
+			// handler, and on a failure the proxy's can still be waiting on the
+			// target's, which waits on this.
+			defer close(release)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, front.URL, strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("MCP-Protocol-Version", "2026-07-28")
+			if tc.readFirst {
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				line, _ := bufio.NewReader(resp.Body).ReadString('\n')
+				if !strings.HasPrefix(line, "data: ") {
+					t.Fatalf("first line %q", line)
+				}
+				cancel()
+				resp.Body.Close()
+			} else {
+				go func() {
+					<-arrived
+					cancel()
+				}()
+				if resp, err := http.DefaultClient.Do(req); err == nil {
+					resp.Body.Close()
+				}
+			}
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the proxy never noticed the client leave")
+			}
+
+			var left []Envelope
+			for _, env := range sink.byDir(ClientToServer) {
+				if env.Abandoned {
+					left = append(left, env)
+				}
+			}
+			switch {
+			case !tc.abandoned && len(left) != 0:
+				t.Fatalf("recorded a client giving up with nothing to give up on: %+v", left)
+			case tc.abandoned && len(left) != 1:
+				t.Fatalf("recorded %d departures, want one: %+v", len(left), sink.byDir(ClientToServer))
+			case tc.abandoned && (len(left[0].Raw) != 0 || left[0].Exchange == 0 || left[0].MCPProtocolVersion != "2026-07-28"):
+				t.Fatalf("the departure should name the exchange and carry no frame: %+v", left[0])
+			}
+		})
+	}
+}
 
 // TestProxyForwardsTheRequestUnchanged pins what the target actually receives.
 // mcpsnoop sits in the real data path and CONTRIBUTING calls that transparency

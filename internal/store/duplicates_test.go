@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
@@ -222,6 +223,31 @@ func TestDuplicatesOverHTTP(t *testing.T) {
 		if got := len(s.Duplicates("s")); got != tc.want {
 			t.Errorf("after HTTP %d (undelivered %v), duplicates = %d, want %d", tc.status, tc.undelivered, got, tc.want)
 		}
+	}
+}
+
+// TestARepeatAfterLeavingTheExchangeFollowsACancellation. On 2026-07-28 a client
+// over HTTP cancels by leaving the exchange, and a call it sends again after that
+// is the retry after a cancellation that a stdio client's would be, rather than a
+// repeat of a call still waiting on its answer.
+func TestARepeatAfterLeavingTheExchangeFollowsACancellation(t *testing.T) {
+	meta := `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}`
+	call := func(id int) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"append","arguments":{"text":"a"},%s}}`, id, meta)
+	}
+	s := New()
+	for i, e := range []proxy.Envelope{
+		{Direction: c2s, Exchange: 1, Raw: json.RawMessage(call(1))},
+		{Direction: c2s, Exchange: 1, Abandoned: true},
+		{Direction: c2s, Exchange: 2, Raw: json.RawMessage(call(2))},
+		{Direction: s2c, Exchange: 2, Status: 200, Raw: json.RawMessage(`{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[]}}`)},
+	} {
+		e.SessionID, e.ServerLabel, e.Seq, e.Transport = "s", "srv", uint64(i+1), proxy.TransportHTTP
+		s.Ingest(e)
+	}
+	got := s.Duplicates("s")
+	if len(got) != 1 || !got[0].AfterCancel {
+		t.Fatalf("duplicates = %+v, want one repeat after a cancellation", got)
 	}
 }
 

@@ -101,6 +101,10 @@ type Profile struct {
 	ServerRequests map[string]int `json:"server_requests"`
 
 	Cancellations int `json:"cancellations"`
+	// ClosedStreams counts the cancellations a client made by closing the stream
+	// an answer was coming on, which is how 2026-07-28 has a client over HTTP
+	// cancel. They are among Cancellations too.
+	ClosedStreams int `json:"cancellations_by_closing"`
 	// CacheRefetches counts list and read requests repeated inside the ttlMs
 	// window the server declared on the previous answer (SEP-2549).
 	CacheRefetches int `json:"cache_refetches"`
@@ -214,6 +218,9 @@ func Fold(st *store.Store, header store.SessionHeader) (Profile, bool) {
 			if ev.Method == "notifications/cancelled" {
 				p.Cancellations++
 			}
+		case ev.Dir == proxy.ClientToServer && ev.Abandoned && ev.Call != nil:
+			p.Cancellations++
+			p.ClosedStreams++
 		case ev.Dir == proxy.ServerToClient && ev.Kind == store.EventResponse:
 			if resultType(ev.Raw) == "input_required" {
 				p.InputRequired++
@@ -286,6 +293,7 @@ func Merge(in []Profile) []Profile {
 		acc.Retries += p.Retries
 		acc.StateIssues += p.StateIssues
 		acc.Cancellations += p.Cancellations
+		acc.ClosedStreams += p.ClosedStreams
 		acc.CacheRefetches += p.CacheRefetches
 		addCounts(acc.Methods, p.Methods)
 		addCounts(acc.Effects, p.Effects)
@@ -371,7 +379,7 @@ func Table(profiles []Profile) []Row {
 			mrtrCell(p),
 			orNone(counted(p.Answers, " "), "none"),
 			orNone(counted(p.ServerRequests, " ×"), "none"),
-			countOrNone(p.Cancellations),
+			cancellationsCell(p),
 			inFlightCell(p),
 			repeatedCell(p),
 			orNone(counted(p.Deprecated, " ×"), "none"),
@@ -464,6 +472,14 @@ func warningsCell(warnings map[string]int) string {
 	}
 	top := byCount(warnings)[0]
 	return fmt.Sprintf("%d, most often %q", total, clip(top, 80))
+}
+
+func cancellationsCell(p Profile) string {
+	out := countOrNone(p.Cancellations)
+	if p.ClosedStreams > 0 {
+		out += fmt.Sprintf(", %d by closing the stream", p.ClosedStreams)
+	}
+	return out
 }
 
 func countOrNone(n int) string {
