@@ -368,7 +368,7 @@ func plan(rec *Recording) ([]*step, []*slot, map[string]int) {
 		byID    = map[string]*serverRequest{}
 		counts  = map[string]int{}
 	)
-	for _, env := range rec.frames {
+	for _, env := range answersAfterRequests(rec.frames) {
 		switch env.Direction {
 		case proxy.ClientToServer:
 			st := &step{env: env, waits: pending}

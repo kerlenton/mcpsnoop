@@ -44,15 +44,18 @@ string leaves those bytes in the line. A reader that insists on valid UTF-8
 loses that frame, so decide what to do with one before you meet it.
 
 Within a session, `seq` starts at 1 and rises by one for each envelope in the
-order mcpsnoop observed them, and a session's lines are written in that order.
-A jump in `seq` means envelopes never reached the file because the writer's
-queue was full. mcpsnoop counts every jump as missing frames, which
-`check --fail-on incomplete` gates on, so count them too rather than assuming a
-capture is whole.
+order mcpsnoop read the frames, and a session's lines are written in that order.
+A frame takes its place before mcpsnoop passes it on, so whatever either peer
+sent in answer to a frame comes after it. A stdio capture written before 0.28.0
+numbered a frame once it had been passed on, and a client quick enough could
+have its answer come first. A jump in `seq` means envelopes never reached the
+file because the writer's queue was full. mcpsnoop counts every jump as missing
+frames, which `check --fail-on incomplete` gates on, so count them too rather
+than assuming a capture is whole.
 
-`ts` is when mcpsnoop observed the envelope, in RFC 3339 with the machine's UTC
-offset and up to nanosecond precision. It is not when the client or the server
-sent the frame, and two envelopes can carry the same `ts`.
+`ts` is when mcpsnoop read the frame, in RFC 3339 with the machine's UTC offset
+and up to nanosecond precision. It is not when the client or the server sent
+the frame, and two envelopes can carry the same `ts`.
 
 ## The envelope
 
@@ -65,7 +68,7 @@ in the order they appear on a line.
 | `session_id` | string | 0.1.0 | The session the envelope belongs to |
 | `server_label` | string | 0.1.0 | The `--label` given to mcpsnoop, or else a name taken from the server command on stdio and the target's host on HTTP |
 | `seq` | integer | 0.1.0 | The envelope's position in its session, from 1 |
-| `ts` | string | 0.1.0 | When mcpsnoop observed it |
+| `ts` | string | 0.1.0 | When mcpsnoop read it |
 | `direction` | string | 0.1.0 | `c2s`, `s2c`, `stderr` or `meta`, described below |
 | `transport` | string | 0.1.0 | `stdio` or `http` |
 | `raw` | any JSON | 0.1.0 | The frame, when it arrived as valid JSON |

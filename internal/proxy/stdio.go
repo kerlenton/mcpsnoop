@@ -84,36 +84,29 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 		return 1, err
 	}
 
-	// The number and the handoff are taken together under one lock. Three pumps
-	// call emit at once, the client, the server and stderr, and an atomic counter
-	// only makes each number unique, not the order they reach the sink in. The
-	// store infers a dropped frame from a forward jump in Seq, so a pair that
+	// rec numbers every frame and hands it to the sink under one lock, in the
+	// order the frames were read rather than the order they were observed. Three
+	// pumps record at once, the client, the server and stderr, and an atomic
+	// counter only makes each number unique, not the order they reach the sink in.
+	// The store infers a dropped frame from a forward jump in Seq, so a pair that
 	// arrived swapped was counted as loss on a capture that had lost nothing, and
 	// that invented figure reached check --fail-on incomplete, the JSON export,
 	// the HAR comment, the OTLP attributes and the TUI banner alike.
-	var (
-		seqMu sync.Mutex
-		seq   uint64
-	)
-	emit := func(dir Direction, raw []byte, text string, truncated bool) {
-		env := Envelope{
+	rec := newRecorder(sink)
+	frame := func(dir Direction, raw []byte, text string, truncated bool) *Envelope {
+		env := &Envelope{
 			SessionID:   cfg.SessionID,
 			ServerLabel: cfg.Label,
-			TS:          time.Now(),
 			Direction:   dir,
 			Transport:   TransportStdio,
 			Truncated:   truncated,
+			Text:        text,
 		}
 		if raw != nil {
 			// Copy, because the underlying buffer is reused by the next read.
 			env.Raw = append([]byte(nil), raw...)
 		}
-		env.Text = text
-		seqMu.Lock()
-		defer seqMu.Unlock()
-		seq++
-		env.Seq = seq
-		sink.Emit(env)
+		return env
 	}
 
 	// observe routes a framed protocol line to Raw when it is valid JSON, or to
@@ -129,9 +122,11 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 	// reads the error as the hub having gone away and drops the connection. The
 	// flag is what says the copy is short; splitObserved decides where the bytes
 	// go.
-	observe := func(dir Direction, line []byte, truncated bool) {
-		raw, text := splitObserved(line)
-		emit(dir, raw, text, truncated)
+	observe := func(dir Direction) func(place, []byte, bool) {
+		return func(p place, line []byte, truncated bool) {
+			raw, text := splitObserved(line)
+			rec.fill(p, frame(dir, raw, text, truncated))
+		}
 	}
 
 	// Emit the session meta first (seq 1) so the hub can replay this server.
@@ -139,7 +134,7 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 	// and a command or cwd containing & would otherwise be the only escaped frame
 	// in an otherwise verbatim log.
 	if meta, mErr := jsonwire.Marshal(SessionMeta{Command: cfg.Command, CWD: cwd()}); mErr == nil {
-		emit(DirectionMeta, meta, "", false)
+		rec.fill(rec.take(), frame(DirectionMeta, meta, "", false))
 	}
 
 	// client -> server. Deliberately NOT awaited below. This pump blocks reading the
@@ -153,9 +148,7 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 	go func() {
 		// Closing the server's stdin signals EOF so it can shut down cleanly.
 		defer srvStdin.Close()
-		pumpFrames(in, srvStdin, maxFrameBytes, func(line []byte, truncated bool) {
-			observe(ClientToServer, line, truncated)
-		})
+		pumpFrames(in, srvStdin, maxFrameBytes, rec, observe(ClientToServer))
 	}()
 
 	var wg sync.WaitGroup
@@ -164,19 +157,23 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 	// server -> client
 	go func() {
 		defer wg.Done()
-		pumpFrames(srvStdout, out, maxFrameBytes, func(line []byte, truncated bool) {
-			observe(ServerToClient, line, truncated)
-		})
+		pumpFrames(srvStdout, out, maxFrameBytes, rec, observe(ServerToClient))
 	}()
 
 	// server stderr -> our stderr (forwarded) + observed line-by-line
 	go func() {
 		defer wg.Done()
-		pumpLines(srvStderr, errOut, func(line string) { emit(ServerStderr, nil, line, false) })
+		pumpLines(srvStderr, errOut, rec, func(p place, line string) {
+			rec.fill(p, frame(ServerStderr, nil, line, false))
+		})
 	}()
 
 	wg.Wait()
 	waitErr := cmd.Wait()
+	// A frame the server sent last can be waiting on a client frame read before
+	// it, whose pump is not awaited above. It reaches the sink before the caller
+	// closes it.
+	rec.flush(time.Second)
 
 	var ee *exec.ExitError
 	if errors.As(waitErr, &ee) {
@@ -190,24 +187,38 @@ func RunStdio(ctx context.Context, cfg StdioConfig) (exitCode int, err error) {
 
 // pumpFrames copies src->dst losslessly while splitting on newlines for
 // observation. Each complete line (without the trailing newline) is passed to
-// observe, along with whether the observed copy was cut at observeCap. The exact
-// bytes read are always written to dst first, so a slow or failing observer can
-// never affect the forwarded stream. Lines longer than observeCap are still
-// forwarded in full, only the copy is short.
+// observe, along with the place it took in rec and whether the observed copy was
+// cut at observeCap. The exact bytes read are always written to dst first, so a
+// slow or failing observer can never affect the forwarded stream. Lines longer
+// than observeCap are still forwarded in full, only the copy is short.
+//
+// The place is taken just before the chunk that ends a line is forwarded, which
+// is the last moment before the other peer has the whole line and can answer
+// it. Whatever it answers is read after that, takes a later place, and so is
+// recorded after the line. observe must settle the place, and a line that is
+// not observed has its place let go here.
 //
 // The flag matters as much as the copy. A cut line is not valid JSON, so without
 // it the store reads the fragment as a stray non-JSON line and reports the
 // stream as corrupted, which is a diagnosis about the server rather than about
 // the observer's own cap.
-func pumpFrames(src io.Reader, dst io.Writer, observeCap int, observe func(line []byte, truncated bool)) {
+func pumpFrames(src io.Reader, dst io.Writer, observeCap int, rec *recorder, observe func(p place, line []byte, truncated bool)) {
 	r := bufio.NewReaderSize(src, 64<<10)
 	var pending []byte // accumulated bytes of the current (unterminated) line
 	var truncated bool
 	for {
 		chunk, err := r.ReadSlice('\n')
 		if len(chunk) > 0 {
+			ends := chunk[len(chunk)-1] == '\n'
+			var p place
+			if ends {
+				p = rec.take()
+			}
 			// Forward verbatim, immediately.
 			if _, werr := dst.Write(chunk); werr != nil {
+				if ends {
+					rec.drop(p)
+				}
 				return
 			}
 			if f, ok := dst.(interface{ Flush() error }); ok {
@@ -222,7 +233,7 @@ func pumpFrames(src io.Reader, dst io.Writer, observeCap int, observe func(line 
 			default:
 				pending = append(pending, chunk...)
 			}
-			if chunk[len(chunk)-1] == '\n' {
+			if ends {
 				// The chunk ends the line, but the copy may not: once the cap is
 				// reached the terminator is among the bytes we stopped taking. Strip
 				// only what is actually present, or a truncated line loses a byte of
@@ -235,7 +246,9 @@ func pumpFrames(src io.Reader, dst io.Writer, observeCap int, observe func(line 
 					}
 				}
 				if len(line) > 0 {
-					observe(line, truncated)
+					observe(p, line, truncated)
+				} else {
+					rec.drop(p)
 				}
 				pending = nil
 				truncated = false
@@ -246,27 +259,36 @@ func pumpFrames(src io.Reader, dst io.Writer, observeCap int, observe func(line 
 		}
 		if err != nil {
 			if len(pending) > 0 {
-				observe(pending, truncated)
+				observe(rec.take(), pending, truncated)
 			}
 			return
 		}
 	}
 }
 
-// pumpLines copies src->dst and reports each complete line as a string.
-func pumpLines(src io.Reader, dst io.Writer, observe func(line string)) {
+// pumpLines copies src->dst and reports each complete line as a string, with the
+// place it took in rec, taken the way pumpFrames takes one.
+func pumpLines(src io.Reader, dst io.Writer, rec *recorder, observe func(p place, line string)) {
 	r := bufio.NewReaderSize(src, 64<<10)
 	var pending []byte
 	for {
 		chunk, err := r.ReadSlice('\n')
 		if len(chunk) > 0 {
+			ends := chunk[len(chunk)-1] == '\n'
+			var p place
+			if ends {
+				p = rec.take()
+			}
 			if _, werr := dst.Write(chunk); werr != nil {
+				if ends {
+					rec.drop(p)
+				}
 				return
 			}
 			if len(pending) < maxFrameBytes {
 				pending = append(pending, chunk...)
 			}
-			if chunk[len(chunk)-1] == '\n' {
+			if ends {
 				// Same care as pumpFrames: past the cap the copy no longer ends with
 				// the terminator, so strip only what is there. Stderr is text and
 				// goes to Text either way, so a cut line costs a byte rather than a
@@ -278,7 +300,7 @@ func pumpLines(src io.Reader, dst io.Writer, observe func(line string)) {
 						line = line[:len(line)-1]
 					}
 				}
-				observe(string(line))
+				observe(p, string(line))
 				pending = nil
 			}
 		}
@@ -287,10 +309,107 @@ func pumpLines(src io.Reader, dst io.Writer, observe func(line string)) {
 		}
 		if err != nil {
 			if len(pending) > 0 {
-				observe(string(pending))
+				observe(rec.take(), string(pending))
 			}
 			return
 		}
+	}
+}
+
+// recorder numbers frames in the order they were read and hands them to the
+// sink in that order.
+//
+// A pump forwards a line before it observes it, so that observing can never
+// hold up the data path, and the other peer can answer the line the moment it
+// is forwarded. Numbering frames as they were observed let that answer, read and
+// observed by the other pump, take the earlier number while the line was still
+// being observed, and the capture showed a client answering a request it had
+// not yet been sent. A replay plans from that order, and sent the answer first.
+//
+// So a line takes its place just before it is forwarded, and the sink gets
+// frames in place order. One observed early waits for those before it, which
+// costs the capture a moment and never costs the data path anything. A forward
+// blocked on a peer that stopped reading holds back the frames after it until
+// it completes, which delays what the capture shows and not what either peer
+// receives.
+type recorder struct {
+	sink Sink
+
+	mu      sync.Mutex
+	next    uint64               // the next place to hand out
+	emitted uint64               // every place below this is settled
+	seq     uint64               // the last Seq handed to the sink
+	settled map[uint64]*Envelope // places settled out of turn, nil for one let go
+}
+
+// place is a frame's position in the capture and the time it was read.
+type place struct {
+	n  uint64
+	ts time.Time
+}
+
+func newRecorder(sink Sink) *recorder {
+	return &recorder{sink: sink, settled: map[uint64]*Envelope{}}
+}
+
+// take hands out the next place. Every place taken has to be settled, by fill or
+// drop, or no frame after it reaches the sink.
+func (r *recorder) take() place {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := place{n: r.next, ts: time.Now()}
+	r.next++
+	return p
+}
+
+// fill settles a place with its frame, stamped with the time the frame was read.
+func (r *recorder) fill(p place, env *Envelope) {
+	env.TS = p.ts
+	r.settle(p, env)
+}
+
+// drop settles a place that holds no frame, a line that was never forwarded or
+// was empty.
+func (r *recorder) drop(p place) {
+	r.settle(p, nil)
+}
+
+// settle records a place's outcome and emits every frame now in turn. Seq is
+// given out here rather than with the place, so a place let go leaves no gap the
+// store would count as a lost frame.
+func (r *recorder) settle(p place, env *Envelope) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.settled[p.n] = env
+	for {
+		next, ok := r.settled[r.emitted]
+		if !ok {
+			return
+		}
+		delete(r.settled, r.emitted)
+		r.emitted++
+		if next != nil {
+			r.seq++
+			next.Seq = r.seq
+			r.sink.Emit(*next)
+		}
+	}
+}
+
+// flush waits, for at most patience, until every place taken so far is settled.
+func (r *recorder) flush(patience time.Duration) {
+	r.mu.Lock()
+	target := r.next
+	r.mu.Unlock()
+	deadline := time.Now().Add(patience)
+	for {
+		r.mu.Lock()
+		done := r.emitted >= target
+		r.mu.Unlock()
+		if done || time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
