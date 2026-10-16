@@ -178,6 +178,7 @@ type slot struct {
 	recorded   *node  // the recorded response, nil when there was none
 	taskID     string // the task that response handed out, if any
 	taskParam  string // the task a tasks/* request is about
+	version    string // the revision the request declared
 	skipped    bool
 
 	// The replay's side, guarded by the engine's lock.
@@ -210,7 +211,10 @@ type element struct {
 	answers *serverRequest // a response to a server request
 	cancels *slot          // a notifications/cancelled
 	delay   time.Duration  // how long after its request the cancellation went out
-	ping    bool           // an answer to a server ping, which the replay gives itself
+	// closes says the client cancelled by leaving the HTTP exchange rather than
+	// with a notification, so the element has no frame of its own.
+	closes bool
+	ping   bool // an answer to a server ping, which the replay gives itself
 }
 
 type step struct {
@@ -345,6 +349,10 @@ func (e *engine) startStdio(ctx context.Context, cancel context.CancelFunc, opts
 // writes itself, which is only ever an answer to a ping.
 type clientSide interface {
 	send(frame []byte, env *proxy.Envelope)
+	// cancel gives up on a request the way the transport has a client do it,
+	// for a recording whose client cancelled by leaving an HTTP exchange. It
+	// returns why it could not, empty when it did.
+	cancel(id, version string) string
 }
 
 // stdioSide writes each frame as one line of the server's stdin.
@@ -354,6 +362,24 @@ type stdioSide struct {
 
 func (s stdioSide) send(frame []byte, _ *proxy.Envelope) {
 	_, _ = s.in.Write(append(append([]byte(nil), frame...), '\n'))
+}
+
+// cancel sends the notification a client over stdio cancels with. A 2025 client
+// that left an HTTP exchange disconnected, which was not a cancellation, and
+// stdio has no way to say it.
+func (s stdioSide) cancel(id, version string) string {
+	if version < "2026-07-28" {
+		return "a " + orUnknown(version) + " client leaving an HTTP exchange disconnected rather than cancelled, which stdio has no way to say"
+	}
+	s.send([]byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":`+id+`}}`), nil)
+	return ""
+}
+
+func orUnknown(version string) string {
+	if version == "" {
+		return "pre-2026"
+	}
+	return version
 }
 
 // plan turns the recording into the steps a replay takes and the requests it
@@ -367,6 +393,9 @@ func plan(rec *Recording) ([]*step, []*slot, map[string]int) {
 		open    = map[string]*slot{}
 		byID    = map[string]*serverRequest{}
 		counts  = map[string]int{}
+		// carried is the first request each HTTP exchange carried, which is what
+		// the client leaving that exchange gave up on.
+		carried = map[uint64]*slot{}
 	)
 	for _, env := range answersAfterRequests(rec.frames) {
 		switch env.Direction {
@@ -375,6 +404,16 @@ func plan(rec *Recording) ([]*step, []*slot, map[string]int) {
 			pending = nil
 			steps = append(steps, st)
 			switch {
+			case env.Abandoned:
+				// The client left an exchange before its answer, an act with no frame
+				// of its own. It is replayed as the cancellation it was, the way the
+				// transport the replay speaks has a client cancel.
+				if s := carried[env.Exchange]; s != nil && env.Exchange != 0 {
+					st.elements = []*element{{cancels: s, closes: true, delay: env.TS.Sub(s.recordedAt)}}
+				} else {
+					st.skip = "the client left an exchange whose request the recording does not hold"
+				}
+				continue
 			case env.Truncated:
 				st.skip = "it was cut at the frame-size limit when it was recorded"
 				continue
@@ -396,12 +435,18 @@ func plan(rec *Recording) ([]*step, []*slot, map[string]int) {
 				}
 				switch {
 				case msg.Method != "" && len(msg.ID) > 0:
-					s := &slot{id: string(msg.ID), method: msg.Method, recordedAt: env.TS}
+					s := &slot{id: string(msg.ID), method: msg.Method, recordedAt: env.TS, version: env.MCPProtocolVersion}
+					if v := n.get("params").get("_meta").get("io.modelcontextprotocol/protocolVersion"); v != nil && v.kind == stringNode {
+						s.version = v.str
+					}
 					if msg.Method == "tools/call" {
 						s.tool = paramString(n, "name")
 					}
 					if isTaskRequest(msg.Method) {
 						s.taskParam = paramString(n, "taskId")
+					}
+					if env.Exchange != 0 && carried[env.Exchange] == nil {
+						carried[env.Exchange] = s
 					}
 					open[s.id] = s
 					slots = append(slots, s)
@@ -811,6 +856,21 @@ func (e *engine) skip(st *step, reason string) {
 // send writes one recorded client frame, as recorded unless something in it
 // has to change.
 func (e *engine) send(st *step) {
+	if len(st.elements) == 1 && st.elements[0].closes {
+		el := st.elements[0]
+		if !e.cancelStillMeant(el) {
+			e.skip(st, "the call it gave up on was answered before the client would have left")
+			return
+		}
+		if reason := e.side.cancel(el.cancels.id, el.cancels.version); reason != "" {
+			e.skip(st, reason)
+			return
+		}
+		e.mu.Lock()
+		e.report.Sent++
+		e.mu.Unlock()
+		return
+	}
 	changed := false
 	var kept []*element
 	for _, el := range st.elements {

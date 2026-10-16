@@ -217,3 +217,64 @@ func TestAConnectionsOwnCallWinsOverAnotherClients(t *testing.T) {
 		t.Fatalf("the other client's call was settled: %+v", calls)
 	}
 }
+
+// TestAClientThatClosedItsStreamCancelledOn2026. On 2026-07-28 a client over HTTP
+// cancels by closing the stream its answer was coming on, and the proxy records
+// that as an abandoned frame on the exchange. The call it carried is cancelled,
+// not pending, so a cancellation does not read as a hung call. On 2025-11-25 a
+// disconnect is not a cancellation, and the call stays open.
+func TestAClientThatClosedItsStreamCancelledOn2026(t *testing.T) {
+	meta := `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}`
+	left := func(seq, exchange uint64) proxy.Envelope {
+		e := httpFrame(seq, proxy.ClientToServer, "10.0.0.1:5001", exchange, "")
+		e.Raw, e.Abandoned = nil, true
+		return e
+	}
+	cases := []struct {
+		name    string
+		request proxy.Envelope
+		want    CallState
+		pending int
+		says    string
+	}{
+		{
+			name: "a 2026 call",
+			request: httpFrame(1, proxy.ClientToServer, "10.0.0.1:5001", 1,
+				`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slow",`+meta+`}}`),
+			want: Cancelled, says: `the client closed the stream, which cancels tools/call "slow" (id 3)`,
+		},
+		{
+			name: "a 2026 subscription",
+			request: httpFrame(1, proxy.ClientToServer, "10.0.0.1:5001", 1,
+				`{"jsonrpc":"2.0","id":3,"method":"subscriptions/listen","params":{`+meta+`}}`),
+			want: Cancelled, says: "the client closed the stream, which cancels subscriptions/listen (id 3)",
+		},
+		{
+			name: "a 2025 call",
+			request: func() proxy.Envelope {
+				e := httpFrame(1, proxy.ClientToServer, "10.0.0.1:5001", 1,
+					`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slow"}}`)
+				e.MCPProtocolVersion = "2025-11-25"
+				return e
+			}(),
+			want: Pending, pending: 1, says: `the client disconnected, which on 2025-11-25 does not cancel tools/call "slow" (id 3)`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New()
+			s.Ingest(tc.request)
+			ev := s.Ingest(left(2, 1))
+			if !ev.Abandoned || ev.Kind != EventTransport || ev.Observation != tc.says || ev.Warning != "" || ev.Errored {
+				t.Fatalf("event = %+v", ev)
+			}
+			calls := s.Calls("s1")
+			if len(calls) != 1 || calls[0].State != tc.want {
+				t.Fatalf("calls = %+v, want %v", calls, tc.want)
+			}
+			if pending := s.Sessions()[0].Pending; pending != tc.pending {
+				t.Fatalf("pending = %d, want %d", pending, tc.pending)
+			}
+		})
+	}
+}

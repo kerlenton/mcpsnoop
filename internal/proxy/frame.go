@@ -113,6 +113,12 @@ type Envelope struct {
 	// never to have run. A timeout is not undelivered, since the target may have
 	// received the request before it stopped answering.
 	Undelivered bool `json:"undelivered,omitempty"`
+	// Abandoned marks a client frame with no message, written when the client
+	// left an HTTP exchange before the answer to the request it carried came
+	// back, by closing its connection or the stream the answer was coming on. On
+	// 2026-07-28 that is how a client cancels a request over HTTP, and on earlier
+	// revisions it is a disconnect, which is not a cancellation.
+	Abandoned bool `json:"abandoned,omitempty"`
 	// Truncated marks a frame whose observed copy was cut at the frame-size cap.
 	// The bytes still forwarded to the other side in full; only this copy is short.
 	Truncated bool `json:"truncated,omitempty"`

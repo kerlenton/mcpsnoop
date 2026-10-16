@@ -81,6 +81,7 @@ in the order they appear on a line.
 | `conn_id` | string | 0.18.0 | The client end of the TCP connection an HTTP frame travelled on, as `host:port` |
 | `exchange` | integer | 0.26.0 | Numbers the HTTP request a frame belongs to, from 1. The request's frame and every frame of its response share it |
 | `undelivered` | boolean | 0.26.0 | On mcpsnoop's own 502, the target refused the connection, so the request never reached it |
+| `abandoned` | boolean | 0.28.0 | On a `c2s` envelope with no message, the client left the exchange before the answer to its request came back |
 | `truncated` | boolean | 0.12.0 | This copy of the frame was cut at 16 MiB. The whole frame still reached the other side |
 | `redacted` | boolean | 0.17.0 | mcpsnoop's own redaction rewrote this envelope |
 | `status` | integer | 0.15.0 | The HTTP status of the response a server frame arrived on |
@@ -184,6 +185,13 @@ When the target cannot be reached, mcpsnoop answers the client with a 502 of its
 own and records it the same way, adding `undelivered` when the connection was
 never made. A timeout is not undelivered, because the target may have received
 the request before it stopped answering.
+
+When the client leaves an exchange before the answer to the request it carried
+comes back, by closing its connection or the event stream the answer was coming
+on, mcpsnoop records one `c2s` envelope with that `exchange`, `abandoned` set,
+and neither `raw` nor `text`. On 2026-07-28 that is how a client cancels a
+request over HTTP, and the server must treat it as a cancellation. On earlier
+revisions it is a disconnect, which the server should not.
 
 mcpsnoop asks the target for an uncompressed response. One that arrives
 compressed anyway is passed to the client and not recorded.

@@ -381,7 +381,10 @@ server, the way the specification describes for stdio. `multi round-trip` counts
 the `input_required` answers the server gave and the retries that continued
 them, with any retry whose `requestState` came back changed, missing or invented.
 `server requests` is the older channel, where the server asked through a request
-of its own and the client answered it or refused.
+of its own and the client answered it or refused. `cancellations` counts the
+calls a client gave up on, and says how many it gave up on by closing the stream
+the answer was coming on, which is how 2026-07-28 has a client over HTTP cancel,
+rather than by sending `notifications/cancelled`.
 
 `trace context` counts requests carrying a W3C `traceparent` in `_meta`, which is
 what lets a client's own spans and mcpsnoop's join one trace, and adds how many
