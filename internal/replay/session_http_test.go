@@ -19,7 +19,9 @@ import (
 // out a session id, a note id and a question id that differ on every run, asks
 // its question inside the event stream of the call that needs it, keeps a GET
 // stream on which it pings the client, and refuses any POST after the handshake
-// that does not carry its session.
+// that does not carry its session. It answers its first call only once its ping
+// has been answered, which is the order the recording has, since a replay that
+// had nothing left to wait for would otherwise be free to end first.
 type legacyServer struct {
 	mu       sync.Mutex
 	run      string
@@ -27,12 +29,14 @@ type legacyServer struct {
 	notes    map[string]string
 	waiting  map[string]chan string
 	pongs    int
+	ponged   chan struct{}
 	deleted  bool
 	refusals []string
 }
 
 func newLegacyServer() *legacyServer {
-	return &legacyServer{run: fmt.Sprintf("%x", time.Now().UnixNano()), notes: map[string]string{}, waiting: map[string]chan string{}}
+	return &legacyServer{run: fmt.Sprintf("%x", time.Now().UnixNano()), notes: map[string]string{},
+		waiting: map[string]chan string{}, ponged: make(chan struct{})}
 }
 
 func (s *legacyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +67,10 @@ func (s *legacyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} `json:"result"`
 	}
 	_ = json.Unmarshal(body, &msg)
-	if msg.Method != "initialize" && r.Header.Get("Mcp-Session-Id") != s.session {
+	s.mu.Lock()
+	session := s.session
+	s.mu.Unlock()
+	if msg.Method != "initialize" && r.Header.Get("Mcp-Session-Id") != session {
 		s.mu.Lock()
 		s.refusals = append(s.refusals, string(body))
 		s.mu.Unlock()
@@ -75,6 +82,9 @@ func (s *legacyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		if strings.HasPrefix(strings.Trim(string(msg.ID), `"`), "ping-") {
 			s.pongs++
+			if s.pongs == 1 {
+				close(s.ponged)
+			}
 		}
 		ch := s.waiting[string(msg.ID)]
 		s.mu.Unlock()
@@ -107,6 +117,10 @@ func (s *legacyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "tools/call":
 		switch msg.Params.Name {
 		case "create_note":
+			select {
+			case <-s.ponged:
+			case <-time.After(2 * time.Second):
+			}
 			id := "n-" + s.run
 			s.mu.Lock()
 			s.notes[id] = msg.Params.Arguments["text"]
@@ -526,8 +540,11 @@ func TestReplayOverHTTPCancelsByClosingTheStream(t *testing.T) {
 	if took := time.Since(start); took > 3*time.Second {
 		t.Fatalf("the replay waited %s for an answer to a call it cancelled", took)
 	}
+	// The server learns of a closed stream from its connection, a moment after
+	// the replay closed it.
+	cancelled := server.waitCancelled(2 * time.Second)
 	server.mu.Lock()
-	bad, cancelled := server.bad, server.cancelled
+	bad := server.bad
 	server.mu.Unlock()
 	if len(bad) != 0 {
 		t.Fatalf("the server got what a 2026 client over HTTP never sends: %v", bad)
@@ -537,6 +554,21 @@ func TestReplayOverHTTPCancelsByClosingTheStream(t *testing.T) {
 	}
 	if len(report.Missing) != 0 {
 		t.Fatalf("missing %v", report.Missing)
+	}
+}
+
+// waitCancelled returns how many calls the server saw cancelled, once it has
+// seen one or patience has passed.
+func (s *strictServer) waitCancelled(patience time.Duration) int {
+	deadline := time.Now().Add(patience)
+	for {
+		s.mu.Lock()
+		n := s.cancelled
+		s.mu.Unlock()
+		if n > 0 || time.Now().After(deadline) {
+			return n
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
