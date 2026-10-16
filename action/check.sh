@@ -24,6 +24,7 @@ refuse() {
 	out outcome error
 	out exit-code ""
 	out sarif ""
+	out capture ""
 	out upload false
 	printf '### mcpsnoop\n\n**Could not check.** See the step log; this is not a finding.\n' \
 		>>"${GITHUB_STEP_SUMMARY:-/dev/null}"
@@ -31,17 +32,57 @@ refuse() {
 }
 
 session="${MCPSNOOP_SESSION:-}"
+recording="${MCPSNOOP_REPLAY:-}"
 report="${RUNNER_TEMP:-}/mcpsnoop.sarif"
-# Neither is anything a caller can get wrong through the action's inputs, so
-# there is no help to offer beyond saying which one is missing.
-if [ -z "$session" ]; then
-	printf 'mcpsnoop-action: the session input is not set\n' >&2
-	exit 1
-fi
+# Not anything a caller can get wrong through the action's inputs, so there is
+# no help to offer beyond saying what is missing.
 if [ -z "${RUNNER_TEMP:-}" ]; then
 	printf 'mcpsnoop-action: RUNNER_TEMP is not set, which means this is not running on a GitHub runner\n' >&2
 	exit 1
 fi
+
+if [ -n "$session" ] && [ -n "$recording" ]; then
+	refuse "session and replay are both set, and the action checks one capture." \
+		"" \
+		"session checks a capture you recorded in an earlier step. replay records" \
+		"one by replaying a committed recording against server. Keep the one you mean."
+fi
+if [ -z "$session" ] && [ -z "$recording" ]; then
+	refuse "neither session nor replay is set, so there is nothing to check." \
+		"" \
+		"  session: artifacts/session.jsonl       a capture an earlier step recorded" \
+		"" \
+		"or" \
+		"" \
+		"  replay: tests/mcp/session.jsonl        a committed recording to replay" \
+		"  server: node dist/index.js             against the server this job built"
+fi
+
+# words splits a value into the global array words_out the way a command line
+# would read it, so a value with a space in it survives being quoted.
+#
+# xargs rather than word splitting, and its exit status has to be caught here,
+# before the tokens are read. xargs emits whatever it parsed before giving up, so
+# an unbalanced quote yields a shorter command line and a zero status, and
+# `--expect-tool 'oops` quietly becomes `--expect-tool` swallowing whatever came
+# next. Reading it through a pipe or a process substitution hides that failure
+# completely.
+words() { # input value example
+	words_out=()
+	local split token
+	if ! split="$(printf '%s' "$2" | xargs -n1 printf '%s\n' 2>&1)"; then
+		refuse "$1 is not something a command line can be read out of." \
+			"" \
+			"  ${split##*: }" \
+			"" \
+			"Quote $1 the way you would on a command line:" \
+			"" \
+			"  $1: $3"
+	fi
+	while IFS= read -r token; do
+		[ -n "$token" ] && words_out+=("$token")
+	done <<<"$split"
+}
 
 # The action reports through a file, so a capture piped in on stdin has nothing
 # for a result to point at and every alert would arrive with no location.
@@ -49,10 +90,21 @@ fi
 	"" \
 	"The report points at the file each finding came from, and a capture read from" \
 	"stdin has no file. Write it out first and pass the path."
-[ -e "$session" ] || refuse "there is no capture at \"$session\"." \
-	"" \
-	"session is a path to a .jsonl capture, relative to the repository root." \
-	"Record one by wrapping your server with mcpsnoop before this step."
+if [ -n "$session" ]; then
+	[ -e "$session" ] || refuse "there is no capture at \"$session\"." \
+		"" \
+		"session is a path to a .jsonl capture, relative to the repository root." \
+		"Record one by wrapping your server with mcpsnoop before this step."
+else
+	[ -e "$recording" ] || refuse "there is no recording at \"$recording\"." \
+		"" \
+		"replay is a path to a committed .jsonl capture, relative to the repository" \
+		"root. Record one once by wrapping your server with mcpsnoop in your own" \
+		"client, and commit the session log it writes."
+	[ -n "${MCPSNOOP_SERVER:-}" ] || refuse "replay needs server, the command that starts the server under test." \
+		"" \
+		"  server: node dist/index.js"
+fi
 
 command -v mcpsnoop >/dev/null 2>&1 || refuse "mcpsnoop is not on PATH." \
 	"" \
@@ -68,26 +120,9 @@ flags=()
 if [ -n "${MCPSNOOP_FAIL_ON:-}" ]; then
 	flags+=(--fail-on "$MCPSNOOP_FAIL_ON")
 fi
-# xargs rather than word splitting, so a value with a space in it survives being
-# quoted the way it would be on a command line.
-#
-# Its exit status has to be caught here, before the tokens are read. xargs emits
-# whatever it parsed before giving up, so an unbalanced quote yields a shorter
-# command line and a zero status, and `--expect-tool 'oops` quietly becomes
-# `--expect-tool` swallowing whatever came next. Reading it through a pipe or a
-# process substitution hides that failure completely.
 if [ -n "${MCPSNOOP_ARGS:-}" ]; then
-	if ! split="$(printf '%s' "$MCPSNOOP_ARGS" | xargs -n1 printf '%s\n' 2>&1)"; then
-		refuse "args is not something a command line can be read out of." \
-			"" \
-			"  ${split##*: }" \
-			"" \
-			"Quote args the way you would on a command line:" \
-			"" \
-			"  args: --expect-tool search --max-server-duration 500ms"
-	fi
-	while IFS= read -r token; do
-		[ -n "$token" ] || continue
+	words args "$MCPSNOOP_ARGS" "--expect-tool search --max-server-duration 500ms"
+	for token in ${words_out[@]+"${words_out[@]}"}; do
 		case "$token" in
 		--format | --format=*)
 			refuse "args cannot set --format." \
@@ -100,7 +135,57 @@ if [ -n "${MCPSNOOP_ARGS:-}" ]; then
 			;;
 		esac
 		flags+=("$token")
-	done <<<"$split"
+	done
+fi
+
+# A replay produces the capture this step then checks, and its own verdict, a
+# regression against the recording, joins the check's.
+regressed=false
+if [ -n "$recording" ]; then
+	words server "$MCPSNOOP_SERVER" "node dist/index.js"
+	[ "${#words_out[@]}" -gt 0 ] || refuse "server is empty, so there is no server to replay against." \
+		"" \
+		"  server: node dist/index.js"
+	server=("${words_out[@]}")
+	replay_flags=()
+	if [ -n "${MCPSNOOP_REPLAY_ARGS:-}" ]; then
+		words replay-args "$MCPSNOOP_REPLAY_ARGS" "--read-only --wait 30s"
+		for token in ${words_out[@]+"${words_out[@]}"}; do
+			case "$token" in
+			--out | --out=*)
+				refuse "replay-args cannot set --out." \
+					"" \
+					"The action writes the replayed capture where it can check it, and" \
+					"hands the path back as the capture output."
+				;;
+			--exit-code | --exit-code=*)
+				continue # the action always asks for it
+				;;
+			-h | --help)
+				refuse "replay-args cannot ask for help text."
+				;;
+			esac
+			replay_flags+=("$token")
+		done
+	fi
+	session="$RUNNER_TEMP/mcpsnoop-replay.jsonl"
+	replay_log="$RUNNER_TEMP/mcpsnoop-replay.txt"
+	printf 'mcpsnoop replay %s --out %s --exit-code %s -- %s\n' \
+		"$recording" "$session" "${replay_flags[*]-}" "${server[*]}"
+	mcpsnoop replay "$recording" --out "$session" --exit-code ${replay_flags[@]+"${replay_flags[@]}"} -- "${server[@]}" >"$replay_log"
+	replay_code=$?
+	cat "$replay_log"
+	case "$replay_code" in
+	0) ;;
+	1) regressed=true ;;
+	*)
+		refuse "the replay of \"$recording\" could not run, so there is no capture to check." \
+			"" \
+			"Its own message is above. The usual causes are a server command that" \
+			"does not start from the repository root, and a recording that is not a" \
+			"capture."
+		;;
+	esac
 fi
 
 printf 'mcpsnoop check --format sarif %s -- %s\n' "${flags[*]-}" "$session"
@@ -117,6 +202,10 @@ case "$code" in
 1) outcome=findings ;;
 *) outcome=error ;;
 esac
+# A regression fails the run however clean the replayed capture checks.
+if [ "$outcome" = passed ] && [ "$regressed" = true ]; then
+	outcome=findings
+fi
 
 # Belt and braces against the contract changing under us. A report that is not a
 # mcpsnoop SARIF document is not something to hand to code scanning, whatever the
@@ -137,6 +226,11 @@ fi
 out outcome "$outcome"
 out exit-code "$code"
 out sarif "$report"
+if [ "$outcome" = error ]; then
+	out capture ""
+else
+	out capture "$(cd "$(dirname "$session")" && pwd)/$(basename "$session")"
+fi
 # Written as if/else rather than && ||, because in the latter the right-hand
 # side also runs when the left-hand side merely fails, and the two branches here
 # say opposite things about whether a report should be published.
@@ -150,13 +244,26 @@ fi
 # every GitHub-hosted image; a container without one still gets the verdict.
 {
 	printf '### mcpsnoop\n\n'
+	shown="$session"
+	[ -n "$recording" ] && shown="$recording"
 	# The backticks below are markdown for the summary, not command substitution.
 	# shellcheck disable=SC2016
 	case "$outcome" in
-	passed) printf '**Passed.** `%s` violated nothing that was gated on.\n' "$session" ;;
-	findings) printf '**Findings.** `%s` violated a gated signal.\n' "$session" ;;
-	error) printf '**Could not check `%s`.** See the step log; this is not a finding.\n' "$session" ;;
+	passed) printf '**Passed.** `%s` violated nothing that was gated on.\n' "$shown" ;;
+	findings)
+		if [ "$regressed" = true ]; then
+			printf '**Findings.** Replaying `%s` against this build regressed.\n' "$shown"
+		else
+			printf '**Findings.** `%s` violated a gated signal.\n' "$shown"
+		fi
+		;;
+	error) printf '**Could not check `%s`.** See the step log; this is not a finding.\n' "$shown" ;;
 	esac
+	if [ -n "$recording" ] && [ -s "${replay_log:-}" ]; then
+		printf '\n<details><summary>Replay</summary>\n\n```text\n'
+		cat "$replay_log"
+		printf '```\n\n</details>\n'
+	fi
 	if [ "$outcome" != error ] && command -v python3 >/dev/null 2>&1; then
 		python3 - "$report" <<-'PY' 2>/dev/null || true
 			import collections, json, sys

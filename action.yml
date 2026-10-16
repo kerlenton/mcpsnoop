@@ -26,8 +26,29 @@ inputs:
   session:
     description: |
       Path to the .jsonl capture to check, relative to the repository root.
-      Record one by wrapping your server with mcpsnoop in an earlier step.
-    required: true
+      Record one by wrapping your server with mcpsnoop in an earlier step. Give
+      this or replay, not both.
+    default: ""
+  replay:
+    description: |
+      Path to a recorded capture, relative to the repository root, to replay
+      against server instead of checking a capture you made yourself. The
+      action drives the server with the recorded client's side of the session,
+      checks the capture that produces, and also fails when the server got
+      worse than in the recording: a tool removed or changed, a call that
+      failed or went unanswered, a call that got notably slower.
+    default: ""
+  server:
+    description: |
+      The command that starts the server under test, quoted the way it would
+      be on a command line, for example: node dist/index.js
+      Required with replay.
+    default: ""
+  replay-args:
+    description: |
+      Any other mcpsnoop replay flags, for example: --read-only --wait 30s
+      --out is not accepted: the action decides where the replayed capture goes.
+    default: ""
   fail-on:
     description: |
       Comma-separated signals to fail on, any of error, invalid, warn, mismatch,
@@ -81,6 +102,9 @@ outputs:
   exit-code:
     description: The exit code mcpsnoop check returned.
     value: ${{ steps.check.outputs.exit-code }}
+  capture:
+    description: Absolute path to the capture that was checked, which with replay is the one the replay wrote. Empty when nothing was checked.
+    value: ${{ steps.check.outputs.capture }}
 
 runs:
   using: composite
@@ -103,6 +127,9 @@ runs:
       shell: bash
       env:
         MCPSNOOP_SESSION: ${{ inputs.session }}
+        MCPSNOOP_REPLAY: ${{ inputs.replay }}
+        MCPSNOOP_SERVER: ${{ inputs.server }}
+        MCPSNOOP_REPLAY_ARGS: ${{ inputs.replay-args }}
         MCPSNOOP_FAIL_ON: ${{ inputs.fail-on }}
         MCPSNOOP_ARGS: ${{ inputs.args }}
         MCPSNOOP_UPLOAD: ${{ inputs.upload-sarif }}
@@ -125,6 +152,6 @@ runs:
       shell: bash
       env:
         MCPSNOOP_OUTCOME: ${{ steps.check.outputs.outcome }}
-        MCPSNOOP_SESSION: ${{ inputs.session }}
+        MCPSNOOP_SESSION: ${{ inputs.replay || inputs.session }}
         MCPSNOOP_FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
       run: bash "$GITHUB_ACTION_PATH/action/gate.sh"

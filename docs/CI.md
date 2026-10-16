@@ -67,6 +67,76 @@ path that is not there, a file that is not a session log, a state directory
 holding nothing, a flag that does not parse. Nothing is written to stdout on a 2,
 so a pipeline never uploads an empty report as though it were a verdict.
 
+## Replay a recording against every build
+
+A check needs a capture, and a capture needs a client. Running an agent in CI
+costs a model, a key and a different session every time. A replay needs none
+of that. Record one session with the client you care about, commit it, and
+replay its client side against each build of your server.
+
+```yaml
+steps:
+  # after the steps that check out and build the server
+  - uses: kerlenton/mcpsnoop@<the release the README pins>
+    with:
+      replay: tests/mcp/claude-code-session.jsonl
+      server: node dist/index.js
+```
+
+The same without the action, where `--exit-code` fails on a regression and the
+check runs on what the replay wrote.
+
+```bash
+mcpsnoop replay tests/mcp/claude-code-session.jsonl --out replayed.jsonl --exit-code -- node dist/index.js
+mcpsnoop check replayed.jsonl
+```
+
+To record, put mcpsnoop in front of the server in your client's configuration,
+`mcpsnoop --label notes -- node dist/index.js`, use the server the way you want
+covered, and copy the session log into the repository.
+[Review past sessions](POST_MORTEM.md) says where the log is. Read it before
+you commit it, since it holds every argument and every result of that session.
+A recording made with redaction on replays its placeholders to the server, so
+replay refuses one unless you pass `--allow-redacted`.
+
+What the replay keeps from the recording is the client's behaviour.
+
+- **Order.** Each frame goes out after the answers and server requests it
+  followed in the recording, so calls the client made at once still go out at
+  once and a call it made after an answer still waits for that answer. The
+  minutes a model spent thinking are not replayed.
+- **Values the server handed out.** A cursor, a `requestState`, a task id, the
+  id of a record a tool created, in `structuredContent` or inside text, are
+  learned by comparing each recorded answer with the new one, and the new value
+  goes where the client sent the old one. Names, titles, descriptions, schemas
+  and metadata are never carried, so a call goes to the tool the recording
+  called, and a tool that was renamed fails, which is the point.
+- **The server's requests.** An elicitation or a sampling request is answered
+  with what the client answered then, under whatever id the server uses now.
+  Pings are answered as they come.
+- **Cancellations.** One goes out after the delay it did in the recording, and
+  not at all when the server answered first, since the client would have had no
+  reason to give up.
+
+It runs every call the recording made, including those that change things, so
+point it at a server and data you can afford to change. `--read-only` holds back
+every call to a tool the recording's own listing did not mark `readOnlyHint`, and
+`--skip-tool` names tools one at a time. Anything that only made sense after a
+held-back call, its retries, its cancellation and its task, is held back with it.
+
+At the end the replay compares itself with the recording the way `diff` does,
+pairing calls by request id, since a carried argument changes what a call looks
+like and not which call it is. It reports what it did not send and why, what it
+waited for in vain, and any request the server sent that the recording never
+answered, which a server that grew a new question will do. A regression is a
+tool removed or changed, a call whose outcome got worse, and a call that got
+notably slower. `--wait` bounds how long it waits for any one answer, 10 seconds
+by default, and a server that stopped answering costs that once.
+
+The server runs over stdio from the current directory. A recording captured over
+HTTP replays its frames over stdio as well, which covers a server that speaks
+both.
+
 ## Assert what must and must not happen
 
 Beyond the signal counts, assert the shape of the run. These compose with each

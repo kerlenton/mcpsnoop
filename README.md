@@ -45,6 +45,19 @@ steps:
       session: artifacts/session.jsonl
 ```
 
+No capture to hand? Record one session with your own client once, commit it,
+and let the action replay it against every build. No model and no API key run
+in CI. The replay is checked like any capture, and the job also fails when the
+server got worse than in the recording.
+
+```yaml
+steps:
+  - uses: kerlenton/mcpsnoop@v0.27.0
+    with:
+      replay: tests/mcp/claude-code-session.jsonl
+      server: node dist/index.js
+```
+
 Pin whichever release you want. The newest is on the
 [releases page](https://github.com/kerlenton/mcpsnoop/releases). Every input and
 output is in [The GitHub Action](#the-github-action) further down, and every
@@ -187,6 +200,7 @@ completion and the install path for your OS.
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
 | `mcpsnoop mock <session>` | serve a captured session back as a stdio MCP server |
+| `mcpsnoop replay <session> -- <server>` | drive a server with the client side of a recorded session, and compare the result with the recording |
 | `mcpsnoop inventory` | list every server that has run through mcpsnoop on this machine |
 | `mcpsnoop stats` | fold every stored capture into one row per server and tool |
 | `mcpsnoop clients` | show what each MCP client actually did on the wire, by name and version |
@@ -259,7 +273,10 @@ stale.
 
 | Input | |
 |---|---|
-| `session` | the `.jsonl` capture to check, relative to the repository root. Required |
+| `session` | the `.jsonl` capture to check, relative to the repository root. Give this or `replay` |
+| `replay` | a committed recording to replay against `server`, which then has its capture checked and fails the job on a regression too |
+| `server` | the command that starts the server under test, quoted as on a command line. Required with `replay` |
+| `replay-args` | any other `replay` flags, such as `--read-only`. `--out` is refused, since the action decides where the capture goes |
 | `fail-on` | as `--fail-on`, defaulting to what the CLI defaults to |
 | `args` | any other `check` flags, quoted as on a command line. `--format` is refused, since the action reads the report |
 | `upload-sarif` | send the report to code scanning. `true` |
@@ -268,7 +285,9 @@ stale.
 | `version` | which mcpsnoop to install. Defaults to the release you pinned |
 | `install` | `false` when mcpsnoop is already on PATH, which is the way in on a platform no release is built for |
 
-Outputs are `outcome`, `sarif` and `exit-code`. `outcome` is `passed`,
+Outputs are `outcome`, `sarif`, `exit-code` and `capture`, the path of the
+capture that was checked, which with `replay` is the one the replay wrote and
+worth keeping as an artifact. `outcome` is `passed`,
 `findings`, or `error`, and the third is worth handling separately. It means
 nothing was checked, which is not the same as nothing being found. **A run that
 could not check fails the job whatever `fail-on-findings` says**, because a
@@ -283,7 +302,7 @@ check without the action, the signals it can fail on and the exit codes are in
 
 | Page | What is in it |
 |---|---|
-| [Checking sessions in CI](docs/CI.md) | every signal `check` can fail on, exit codes, assertions, JUnit and SARIF reports, comparing two sessions, and wiring it up without the action |
+| [Checking sessions in CI](docs/CI.md) | replaying a recording against every build, every signal `check` can fail on, exit codes, assertions, JUnit and SARIF reports, comparing two sessions, and wiring it up without the action |
 | [OpenTelemetry and Prometheus](docs/OPENTELEMETRY.md) | the spans and what they carry, streaming them to a collector, and live tool metrics |
 | [Using mcpsnoop](docs/USING.md) | keys, filtering, export formats, replay, what a server asked your user for, cost in context, stats across captures, what each client actually sends, the server inventory, remote machines and the config file |
 | [Redaction](docs/REDACTION.md) | scrubbing secrets, during capture or from a capture you already have |
