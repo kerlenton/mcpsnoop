@@ -42,7 +42,14 @@ inputs:
     description: |
       The command that starts the server under test, quoted the way it would
       be on a command line, for example: node dist/index.js
-      Required with replay.
+      Required with replay for a stdio server. With target it starts an HTTP
+      server first, and can be left out when one is already running.
+    default: ""
+  target:
+    description: |
+      The URL of a Streamable HTTP server to replay against, for example
+      http://localhost:3000/mcp. A credential goes in replay-args as
+      --header "Authorization: Bearer ...", which the step log shows hidden.
     default: ""
   replay-args:
     description: |
@@ -129,6 +136,7 @@ runs:
         MCPSNOOP_SESSION: ${{ inputs.session }}
         MCPSNOOP_REPLAY: ${{ inputs.replay }}
         MCPSNOOP_SERVER: ${{ inputs.server }}
+        MCPSNOOP_TARGET: ${{ inputs.target }}
         MCPSNOOP_REPLAY_ARGS: ${{ inputs.replay-args }}
         MCPSNOOP_FAIL_ON: ${{ inputs.fail-on }}
         MCPSNOOP_ARGS: ${{ inputs.args }}

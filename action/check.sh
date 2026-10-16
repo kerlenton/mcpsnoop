@@ -101,9 +101,13 @@ else
 		"replay is a path to a committed .jsonl capture, relative to the repository" \
 		"root. Record one once by wrapping your server with mcpsnoop in your own" \
 		"client, and commit the session log it writes."
-	[ -n "${MCPSNOOP_SERVER:-}" ] || refuse "replay needs server, the command that starts the server under test." \
-		"" \
-		"  server: node dist/index.js"
+	[ -n "${MCPSNOOP_SERVER:-}" ] || [ -n "${MCPSNOOP_TARGET:-}" ] ||
+		refuse "replay needs server, the command that starts the server under test, or target, the URL of one already running." \
+			"" \
+			"  server: node dist/index.js                    a stdio server" \
+			"" \
+			"  target: http://localhost:3000/mcp             an HTTP server, started by" \
+			"  server: node dist/http.js                     server or already running"
 fi
 
 command -v mcpsnoop >/dev/null 2>&1 || refuse "mcpsnoop is not on PATH." \
@@ -142,12 +146,18 @@ fi
 # regression against the recording, joins the check's.
 regressed=false
 if [ -n "$recording" ]; then
-	words server "$MCPSNOOP_SERVER" "node dist/index.js"
-	[ "${#words_out[@]}" -gt 0 ] || refuse "server is empty, so there is no server to replay against." \
-		"" \
-		"  server: node dist/index.js"
-	server=("${words_out[@]}")
+	server=()
+	if [ -n "${MCPSNOOP_SERVER:-}" ]; then
+		words server "$MCPSNOOP_SERVER" "node dist/index.js"
+		[ "${#words_out[@]}" -gt 0 ] || refuse "server is empty, so there is no server to replay against." \
+			"" \
+			"  server: node dist/index.js"
+		server=("${words_out[@]}")
+	fi
 	replay_flags=()
+	if [ -n "${MCPSNOOP_TARGET:-}" ]; then
+		replay_flags+=(--target "$MCPSNOOP_TARGET")
+	fi
 	if [ -n "${MCPSNOOP_REPLAY_ARGS:-}" ]; then
 		words replay-args "$MCPSNOOP_REPLAY_ARGS" "--read-only --wait 30s"
 		for token in ${words_out[@]+"${words_out[@]}"}; do
@@ -170,9 +180,34 @@ if [ -n "$recording" ]; then
 	fi
 	session="$RUNNER_TEMP/mcpsnoop-replay.jsonl"
 	replay_log="$RUNNER_TEMP/mcpsnoop-replay.txt"
-	printf 'mcpsnoop replay %s --out %s --exit-code %s -- %s\n' \
-		"$recording" "$session" "${replay_flags[*]-}" "${server[*]}"
-	mcpsnoop replay "$recording" --out "$session" --exit-code ${replay_flags[@]+"${replay_flags[@]}"} -- "${server[@]}" >"$replay_log"
+	# The command line goes to the log with every --header value hidden, since
+	# that is where a credential rides and a log outlives the job.
+	shown_flags=()
+	hide_next=false
+	for token in ${replay_flags[@]+"${replay_flags[@]}"}; do
+		if [ "$hide_next" = true ]; then
+			shown_flags+=("${token%%:*}: ***")
+			hide_next=false
+			continue
+		fi
+		case "$token" in
+		--header) hide_next=true ;;
+		--header=*)
+			value="${token#--header=}"
+			shown_flags+=("--header=${value%%:*}: ***")
+			continue
+			;;
+		esac
+		shown_flags+=("$token")
+	done
+	if [ "${#server[@]}" -gt 0 ]; then
+		printf 'mcpsnoop replay %s --out %s --exit-code %s -- %s\n' \
+			"$recording" "$session" "${shown_flags[*]-}" "${server[*]}"
+		mcpsnoop replay "$recording" --out "$session" --exit-code ${replay_flags[@]+"${replay_flags[@]}"} -- "${server[@]}" >"$replay_log"
+	else
+		printf 'mcpsnoop replay %s --out %s --exit-code %s\n' "$recording" "$session" "${shown_flags[*]-}"
+		mcpsnoop replay "$recording" --out "$session" --exit-code ${replay_flags[@]+"${replay_flags[@]}"} >"$replay_log"
+	fi
 	replay_code=$?
 	cat "$replay_log"
 	case "$replay_code" in

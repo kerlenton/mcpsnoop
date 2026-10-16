@@ -14,8 +14,10 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -41,6 +43,8 @@ type slowIn struct {
 }
 
 func main() {
+	addr := flag.String("http", "", "serve Streamable HTTP at /mcp on this address, such as 127.0.0.1:8931, rather than stdio")
+	flag.Parse()
 	server := mcp.NewServer(&mcp.Implementation{Name: "mcpsnoop-reference", Version: "1"}, &mcp.ServerOptions{
 		Instructions: "A reference server for observing how MCP clients behave. Every tool is safe to call.",
 		SetCacheable: func(_ context.Context, _ mcp.Request, c *mcp.Cacheable) {
@@ -77,9 +81,33 @@ func main() {
 	}, greeting)
 	server.AddResource(&mcp.Resource{URI: "ref://about", Name: "about", Description: "What this server is for.", MIMEType: "text/plain"}, about)
 
+	if *addr != "" {
+		log.Fatal(serveHTTP(*addr, server))
+	}
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// serveHTTP serves the same server over Streamable HTTP. The SDK takes
+// 2026-07-28 requests only on a stateless handler and the sessions of older
+// revisions only on a stateful one, so each request goes to the handler for
+// the revision its MCP-Protocol-Version header names. An initialize carries no
+// header, and opens a session.
+func serveHTTP(addr string, server *mcp.Server) error {
+	getServer := func(*http.Request) *mcp.Server { return server }
+	stateless := mcp.NewStreamableHTTPHandler(getServer, &mcp.StreamableHTTPOptions{Stateless: true})
+	stateful := mcp.NewStreamableHTTPHandler(getServer, nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("MCP-Protocol-Version") >= "2026-07-28" {
+			stateless.ServeHTTP(w, r)
+			return
+		}
+		stateful.ServeHTTP(w, r)
+	})
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	return srv.ListenAndServe()
 }
 
 func text(s string) *mcp.CallToolResult {

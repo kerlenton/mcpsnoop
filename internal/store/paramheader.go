@@ -325,6 +325,46 @@ func mcpParamHeaderValuesAgree(spellings []string, typ string) bool {
 	return true
 }
 
+// ParamHeaders is the Mcp-Param headers a conforming client sends with a call
+// of the tool whose inputSchema is schema, given the arguments being sent, in
+// the order the schema declares them. A parameter with no value at its path,
+// or a null one, gets no header, as the transport says.
+//
+// ok is false when the schema will not decode or breaks an x-mcp-header
+// constraint. A client over HTTP rejects such a tool, so there is nothing it
+// would send, and the caller has to decide on its own what to do instead.
+func ParamHeaders(schema, arguments json.RawMessage) (headers []proxy.MCPParamHeader, ok bool) {
+	var root paramHeaderSchema
+	if json.Unmarshal(schema, &root) != nil {
+		return nil, false
+	}
+	bindings, violation := mcpParamHeaderBindings(schema)
+	if violation != "" {
+		return nil, false
+	}
+	// Arguments that are not an object hold no value at any path, so the call
+	// gets no headers rather than no answer.
+	var args map[string]json.RawMessage
+	_ = json.Unmarshal(arguments, &args)
+	for _, binding := range bindings {
+		raw, found, _ := lookupParamArgument(args, binding.path)
+		if !found || string(raw) == "null" {
+			continue
+		}
+		value, reason := mcpParamPrimitive(raw, binding.typ)
+		if reason != "" {
+			// A value the declared type cannot carry has no spelling to mirror, and
+			// the server judges the call it gets.
+			continue
+		}
+		headers = append(headers, proxy.MCPParamHeader{
+			Name:  mcpParamHeaderPrefix + binding.header,
+			Value: proxy.EncodeHeaderValue(mcpParamString(value)),
+		})
+	}
+	return headers, true
+}
+
 // mcpParamHeaderBindings resolves a tool's x-mcp-header annotations. The second
 // return is the violation to report, empty when there is none.
 //

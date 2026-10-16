@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kerlenton/mcpsnoop/internal/proxy"
+	"github.com/kerlenton/mcpsnoop/internal/store"
 )
 
 // A session replay drives a server with the client half of a recorded session.
@@ -34,6 +35,10 @@ import (
 // before it carries on without it.
 const DefaultWait = 10 * time.Second
 
+// DefaultStartWait is how long a server the replay starts for HTTP gets to
+// begin listening, which a build tool in front of it can make slow.
+const DefaultStartWait = 30 * time.Second
+
 // stopGrace is how long a stopped server gets to let go of its pipes.
 const stopGrace = 5 * time.Second
 
@@ -43,6 +48,9 @@ type Recording struct {
 	Label     string
 	Transport string
 	frames    []proxy.Envelope
+	// listens says an HTTP recording shows the server reaching the client
+	// outside the answer to any request, which only a GET stream allows.
+	listens bool
 }
 
 // ClientFrames counts the frames the client sent in the recording.
@@ -96,13 +104,41 @@ func LoadRecording(r io.Reader, sessionID string) (*Recording, error) {
 		}
 		return nil, errors.New("the capture holds no session")
 	}
+	// A GET carries no body, so the proxy records no client frame for it, and
+	// the only trace of one is server frames on an exchange no client frame
+	// opened.
+	opened := map[uint64]bool{}
+	for _, env := range rec.frames {
+		if env.Direction == proxy.ClientToServer && env.Exchange != 0 {
+			opened[env.Exchange] = true
+		}
+	}
+	for _, env := range rec.frames {
+		if env.Direction == proxy.ServerToClient && env.Exchange != 0 && !opened[env.Exchange] && len(env.Raw) > 0 {
+			rec.listens = true
+			break
+		}
+	}
 	return rec, nil
 }
 
 // SessionOptions configures a session replay.
 type SessionOptions struct {
-	// Command starts the server under test.
+	// Command starts the server under test. Over stdio the replay speaks to it
+	// on its stdin and stdout. With Target set it is started and left to listen,
+	// and may be empty when the server is already running.
 	Command []string
+	// Target is the MCP endpoint of a Streamable HTTP server, which makes the
+	// replay speak HTTP. Headers are added to every request, which is how a
+	// credential reaches the server, since a capture never holds one.
+	Target  string
+	Headers []string
+	// StartWait bounds how long a started HTTP server gets to accept
+	// connections. Zero means DefaultStartWait.
+	StartWait time.Duration
+	// ServerOutput receives what a started HTTP server writes to stdout and
+	// stderr. Nil discards it.
+	ServerOutput io.Writer
 	// Label and SessionID name the replayed capture, and Sink receives it.
 	Label     string
 	SessionID string
@@ -188,11 +224,14 @@ type step struct {
 // ReplaySession runs the recording's client half against the server opts
 // names, and reports what it did. The replayed capture goes to opts.Sink.
 func ReplaySession(ctx context.Context, rec *Recording, opts SessionOptions) (SessionReport, error) {
-	if len(opts.Command) == 0 {
+	if len(opts.Command) == 0 && opts.Target == "" {
 		return SessionReport{}, errors.New("replay: no server command")
 	}
 	if opts.Wait <= 0 {
 		opts.Wait = DefaultWait
+	}
+	if opts.StartWait <= 0 {
+		opts.StartWait = DefaultStartWait
 	}
 	steps, slots, recordedServed := plan(rec)
 	skipTools := make(map[string]bool, len(opts.SkipTools))
@@ -211,10 +250,7 @@ func ReplaySession(ctx context.Context, rec *Recording, opts SessionOptions) (Se
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	in := newClientInput()
-	outR, outW := io.Pipe()
 	e := &engine{
-		in:       in,
 		wait:     opts.Wait,
 		inflight: map[string]*slot{},
 		served:   map[string][]json.RawMessage{},
@@ -222,6 +258,41 @@ func ReplaySession(ctx context.Context, rec *Recording, opts SessionOptions) (Se
 		carried:  newCarried(),
 	}
 	e.cond = sync.NewCond(&e.mu)
+
+	var (
+		finish func()
+		err    error
+	)
+	if opts.Target != "" {
+		finish, err = e.startHTTP(ctx, rec, opts)
+	} else {
+		finish = e.startStdio(ctx, cancel, opts)
+	}
+	if err != nil {
+		return SessionReport{}, err
+	}
+	e.run(steps, slots)
+	finish()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// The proxy returns an error only when the server could not be started or
+	// waited on, never for the server's own exit code, so whatever was queued
+	// before it failed never reached anything.
+	if e.startErr != nil {
+		return e.report, fmt.Errorf("replay: %w", e.startErr)
+	}
+	e.report.ExitCode = e.exitCode
+	return e.report, nil
+}
+
+// startStdio runs the server behind the stdio proxy that records live
+// sessions, speaking to it through the proxy's own client side, and returns
+// what ends the session.
+func (e *engine) startStdio(ctx context.Context, cancel context.CancelFunc, opts SessionOptions) func() {
+	in := newClientInput()
+	outR, outW := io.Pipe()
+	e.side = stdioSide{in: in}
 
 	done := make(chan struct{})
 	go func() {
@@ -248,36 +319,41 @@ func ReplaySession(ctx context.Context, rec *Recording, opts SessionOptions) (Se
 		e.read(outR)
 	}()
 
-	e.run(steps, slots)
-
-	// Close the client's side, which is the end of the session to a stdio
-	// server, then give it the same patience as any answer before stopping it.
-	_ = in.Close()
-	select {
-	case <-done:
-	case <-time.After(opts.Wait):
-		cancel()
+	return func() {
+		// Close the client's side, which is the end of the session to a stdio
+		// server, then give it the same patience as any answer before stopping it.
+		_ = in.Close()
 		select {
 		case <-done:
-		case <-time.After(stopGrace):
-			// A server started through a launcher, npx say, can leave a child
-			// holding its pipes open after the launcher is killed, and the proxy
-			// then waits on them forever. The replay is over either way.
+		case <-time.After(opts.Wait):
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(stopGrace):
+				// A server started through a launcher, npx say, can leave a child
+				// holding its pipes open after the launcher is killed, and the proxy
+				// then waits on them forever. The replay is over either way.
+			}
 		}
+		_ = outW.Close()
+		<-readerDone
 	}
-	_ = outW.Close()
-	<-readerDone
+}
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	// The proxy returns an error only when the server could not be started or
-	// waited on, never for the server's own exit code, so whatever was queued
-	// before it failed never reached anything.
-	if e.startErr != nil {
-		return e.report, fmt.Errorf("replay: %w", e.startErr)
-	}
-	e.report.ExitCode = e.exitCode
-	return e.report, nil
+// clientSide is how frames reach the server: a line on its stdin, or a POST.
+// env is the recorded envelope a frame came from, and nil for one the replay
+// writes itself, which is only ever an answer to a ping.
+type clientSide interface {
+	send(frame []byte, env *proxy.Envelope)
+}
+
+// stdioSide writes each frame as one line of the server's stdin.
+type stdioSide struct {
+	in io.Writer
+}
+
+func (s stdioSide) send(frame []byte, _ *proxy.Envelope) {
+	_, _ = s.in.Write(append(append([]byte(nil), frame...), '\n'))
 }
 
 // plan turns the recording into the steps a replay takes and the requests it
@@ -447,13 +523,17 @@ func recordedReadOnly(slots []*slot) map[string]bool {
 type engine struct {
 	mu   sync.Mutex
 	cond *sync.Cond
-	wmu  sync.Mutex
-	in   io.Writer
+	side clientSide
 	wait time.Duration
 
 	inflight map[string]*slot             // sent requests not yet answered, by id
 	served   map[string][]json.RawMessage // the server's requests by method, the ids in arrival order
 	recorded map[string]int               // how many of each the recording holds
+	// negotiated is the revision a replayed initialize settled on.
+	negotiated string
+	// schemas holds the inputSchema of every tool the replayed server listed,
+	// which is where a client over HTTP reads the Mcp-Param headers a call needs.
+	schemas  map[string]json.RawMessage
 	carried  *carried
 	report   SessionReport
 	exited   bool
@@ -495,6 +575,14 @@ func (e *engine) receive(n *node) {
 		}
 		delete(e.inflight, s.id)
 		s.answered = true
+		switch s.method {
+		case "initialize":
+			if v := n.get("result").get("protocolVersion"); v != nil && v.kind == stringNode {
+				e.negotiated = v.str
+			}
+		case "tools/list":
+			e.learnTools(n.get("result").get("tools"))
+		}
 		if s.recorded != nil {
 			e.carried.learn(s.recorded.get("result"), n.get("result"))
 			e.carried.learn(s.recorded.get("error"), n.get("error"))
@@ -504,7 +592,7 @@ func (e *engine) receive(n *node) {
 		// Every client answers a ping, and the replay is the client now. It is
 		// answered as it arrives rather than from the recording, since a ping is
 		// about the moment rather than the session.
-		go e.write([]byte(`{"jsonrpc":"2.0","id":` + string(msg.ID) + `,"result":{}}`))
+		go e.side.send([]byte(`{"jsonrpc":"2.0","id":`+string(msg.ID)+`,"result":{}}`), nil)
 	case msg.Method != "" && len(msg.ID) > 0:
 		e.served[msg.Method] = append(e.served[msg.Method], msg.ID)
 		if n := len(e.served[msg.Method]); n > e.recorded[msg.Method] {
@@ -517,10 +605,117 @@ func (e *engine) receive(n *node) {
 	}
 }
 
-func (e *engine) write(line []byte) {
-	e.wmu.Lock()
-	defer e.wmu.Unlock()
-	_, _ = e.in.Write(append(line, '\n'))
+// receiveRaw takes one message, or a batch of them, as the server sent it.
+func (e *engine) receiveRaw(raw []byte) {
+	root, err := parseNode(bytes.TrimSpace(raw))
+	if err != nil {
+		return
+	}
+	var batch bool
+	for _, n := range messagesOf(root, &batch) {
+		e.receive(n)
+	}
+}
+
+// learnTools keeps the input schema of every tool in a replayed listing. A
+// later page, or a later listing, replaces what an earlier one said about the
+// same tool, as it would for a client.
+func (e *engine) learnTools(tools *node) {
+	if tools == nil || tools.kind != arrayNode {
+		return
+	}
+	for _, tool := range tools.items {
+		name, schema := tool.get("name"), tool.get("inputSchema")
+		if name == nil || name.kind != stringNode || schema == nil {
+			continue
+		}
+		if e.schemas == nil {
+			e.schemas = map[string]json.RawMessage{}
+		}
+		e.schemas[name.str] = schema.encode()
+	}
+}
+
+// paramHeaders is what a conforming client sends with a tools/call over HTTP,
+// read from the definition the replayed server gave for the tool and the
+// arguments actually being sent. ok is false when the server gave none the
+// replay can use.
+func (e *engine) paramHeaders(params []byte) ([]proxy.MCPParamHeader, bool) {
+	var call struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if json.Unmarshal(params, &call) != nil || call.Name == "" {
+		return nil, false
+	}
+	e.mu.Lock()
+	schema, known := e.schemas[call.Name]
+	e.mu.Unlock()
+	if !known {
+		return nil, false
+	}
+	return store.ParamHeaders(schema, call.Arguments)
+}
+
+// negotiatedVersion is the revision the replayed handshake settled on, empty
+// before one answered.
+func (e *engine) negotiatedVersion() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.negotiated
+}
+
+// giveUp settles requests whose answer can no longer come, a POST the server
+// refused with nothing to read as an answer say, so nothing waits out the full
+// patience on them, and says why.
+func (e *engine) giveUp(ids []string, reason string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	settled := false
+	for _, id := range ids {
+		if s := e.inflight[id]; s != nil {
+			delete(e.inflight, id)
+			s.answered = true
+			s.gaveUp = true
+			settled = true
+		}
+	}
+	if settled || len(ids) == 0 {
+		e.report.Missing = append(e.report.Missing, reason)
+	}
+	e.cond.Broadcast()
+}
+
+// closed settles a request whose answer stream the replay closed to cancel it.
+// Nothing can come on a closed stream, so whatever waits on the answer stops
+// waiting, and it is not missing, since the replay chose to stop.
+func (e *engine) closed(id string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if s := e.inflight[id]; s != nil {
+		delete(e.inflight, id)
+		s.answered = true
+		s.gaveUp = true
+		e.cond.Broadcast()
+	}
+}
+
+// carriedHeader is a recorded Mcp-Param value with what the replay carried
+// applied, since the header mirrors an argument and has to match the argument
+// actually sent.
+func (e *engine) carriedHeader(value string) string {
+	decoded, ok := proxy.DecodeHeaderValue(value)
+	if !ok {
+		return value
+	}
+	e.mu.Lock()
+	n := &node{kind: stringNode, str: decoded}
+	changed := e.carried.applyAt(n, "")
+	e.mu.Unlock()
+	if !changed {
+		return value
+	}
+	return proxy.EncodeHeaderValue(n.str)
 }
 
 // run sends the steps in order.
@@ -656,7 +851,8 @@ func (e *engine) send(st *step) {
 	if changed || len(kept) != len(st.elements) {
 		line = encodeElements(kept, st.batch)
 	}
-	e.write(compact(line))
+	env := st.env
+	e.side.send(compact(line), &env)
 	e.mu.Lock()
 	e.report.Sent++
 	e.mu.Unlock()

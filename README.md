@@ -48,7 +48,8 @@ steps:
 No capture to hand? Record one session with your own client once, commit it,
 and let the action replay it against every build. No model and no API key run
 in CI. The replay is checked like any capture, and the job also fails when the
-server got worse than in the recording.
+server got worse than in the recording. A server reached over Streamable HTTP
+gets `target` with its endpoint, and a recording replays over either transport.
 
 ```yaml
 steps:
@@ -200,7 +201,7 @@ completion and the install path for your OS.
 | `mcpsnoop diff` | compare tools and calls across two captured sessions |
 | `mcpsnoop open` | open a saved session in the TUI |
 | `mcpsnoop mock <session>` | serve a captured session back as a stdio MCP server |
-| `mcpsnoop replay <session> -- <server>` | drive a server with the client side of a recorded session, and compare the result with the recording |
+| `mcpsnoop replay <session> -- <server>` | drive a server, over stdio or Streamable HTTP, with the client side of a recorded session, and compare the result with the recording |
 | `mcpsnoop inventory` | list every server that has run through mcpsnoop on this machine |
 | `mcpsnoop stats` | fold every stored capture into one row per server and tool |
 | `mcpsnoop clients` | show what each MCP client actually did on the wire, by name and version |
@@ -275,8 +276,9 @@ stale.
 | Input | |
 |---|---|
 | `session` | the `.jsonl` capture to check, or a directory of them, relative to the repository root. Give this or `replay` |
-| `replay` | a committed recording to replay against `server`, which then has its capture checked and fails the job on a regression too |
-| `server` | the command that starts the server under test, quoted as on a command line. Required with `replay` |
+| `replay` | a committed recording to replay against `server` or `target`, which then has its capture checked and fails the job on a regression too |
+| `server` | the command that starts the server under test, quoted as on a command line. Required with `replay` for a stdio server. With `target` it starts an HTTP server first, and can be left out when one is already running |
+| `target` | the Streamable HTTP endpoint to replay against, such as `http://localhost:3000/mcp`. A credential goes in `replay-args` as `--header`, and the step log shows its value hidden |
 | `replay-args` | any other `replay` flags, such as `--read-only`. `--out` is refused, since the action decides where the capture goes |
 | `fail-on` | as `--fail-on`, defaulting to what the CLI defaults to |
 | `args` | any other `check` flags, quoted as on a command line. `--format` is refused, since the action reads the report |

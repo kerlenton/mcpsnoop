@@ -38,19 +38,10 @@ type HTTPConfig struct {
 // text/event-stream SSE) while forwarding traffic transparently. It blocks
 // until ctx is cancelled.
 func RunHTTP(ctx context.Context, cfg HTTPConfig) error {
-	if cfg.Target == "" {
-		return errors.New("proxy: empty target")
-	}
-	target, err := url.Parse(cfg.Target)
+	handler, err := NewHTTPHandler(cfg)
 	if err != nil {
 		return err
 	}
-	sink := cfg.Sink
-	if sink == nil {
-		sink = NopSink()
-	}
-
-	handler := httpProxyHandler(target, newHTTPEmitter(cfg, sink))
 
 	srv := &http.Server{Addr: cfg.Listen, Handler: handler}
 	go func() {
@@ -63,6 +54,25 @@ func RunHTTP(ctx context.Context, cfg HTTPConfig) error {
 		return err
 	}
 	return nil
+}
+
+// NewHTTPHandler is the recording reverse proxy RunHTTP serves, for a caller
+// that serves it itself. A session replay over HTTP puts one in front of the
+// server under test on a port of its own, so the capture it leaves is written by
+// the same code that records a live session. cfg.Listen is not used.
+func NewHTTPHandler(cfg HTTPConfig) (http.Handler, error) {
+	if cfg.Target == "" {
+		return nil, errors.New("proxy: empty target")
+	}
+	target, err := url.Parse(cfg.Target)
+	if err != nil {
+		return nil, err
+	}
+	sink := cfg.Sink
+	if sink == nil {
+		sink = NopSink()
+	}
+	return httpProxyHandler(target, newHTTPEmitter(cfg, sink)), nil
 }
 
 // mcpMethodHeader and mcpNameHeader are the SEP-2243 Streamable HTTP routing

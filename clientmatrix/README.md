@@ -54,6 +54,21 @@ Point the client's MCP configuration at
 `mcpsnoop --label ref --trace-file <capture> -- <refserver>` and give it
 `scenario.md`. Add a case to `run.sh` once the command is known to work.
 
+## Over HTTP
+
+`refserver -http 127.0.0.1:8931` serves the same server as Streamable HTTP at
+`/mcp`. The SDK takes 2026-07-28 requests only on a stateless handler and the
+sessions of older revisions only on a stateful one, so each request goes to the
+one its `MCP-Protocol-Version` header names. A capture from any client above
+replays against it over HTTP, which is how `mcpsnoop replay --target` is checked
+against the protocol's own server.
+
+```bash
+(cd clientmatrix && go build -o /tmp/refserver ./refserver)
+mcpsnoop replay clientmatrix/captures/claude-code.jsonl --target http://127.0.0.1:8931/mcp \
+  --exit-code -- /tmp/refserver -http 127.0.0.1:8931
+```
+
 ## What it does not measure
 
 Only the wire. What a client does with a result, how it renders one, or what

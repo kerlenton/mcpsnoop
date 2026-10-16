@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -22,6 +23,9 @@ import (
 
 type replayOptions struct {
 	session, out, label string
+	target              string
+	headers             []string
+	startTimeout        time.Duration
 	wait, timeout       time.Duration
 	skipTools           []string
 	readOnly            bool
@@ -38,7 +42,7 @@ type replayOptions struct {
 func newReplayCmd() *cobra.Command {
 	var opts replayOptions
 	cmd := &cobra.Command{
-		Use:   "replay <session-id|log.jsonl> [flags] -- <server> [args...]",
+		Use:   "replay <session-id|log.jsonl> [flags] [-- <server> [args...]]",
 		Short: "Drive a server with the client side of a recorded session",
 		Long: `Drive a server with the client side of a recorded session.
 
@@ -60,13 +64,23 @@ pairing calls by their request id, and with --exit-code exits 1 when the
 server got worse: a tool removed or changed, a call that failed or went
 unanswered, a call that got notably slower.
 
+Over stdio the server is the command after --. Over Streamable HTTP --target
+names the endpoint and the command after -- is optional. The server, started
+here or already running, gets --start-timeout to start listening, and
+--header adds a credential, since a capture never holds one. Each frame is
+then its own POST. The session id a 2025 server assigns goes on every later
+one, the server's requests on an event stream are answered with POSTs of their
+own, and a 2026 request gets the routing and Mcp-Param headers a client would
+send, cancelled by closing its stream. A recording replays over either
+transport, whichever it was captured over.
+
 It runs every call the recording made, including ones that change things, so
 point it at a server and data you can afford to change, or hold calls back
 with --skip-tool or --read-only.
 
 Exit codes: 0 when the replay ran, 1 when it ran and --exit-code found a
 regression, 2 when it could not run at all.`,
-		Args: cobra.MinimumNArgs(2),
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runReplay(cmd, args, &opts)
 		},
@@ -75,6 +89,9 @@ regression, 2 when it could not run at all.`,
 	f.SortFlags = false
 	f.StringVar(&opts.session, "session", "", "session id within the capture to replay, defaults to the first")
 	f.StringVar(&opts.out, "out", "", "where to write the replayed capture, defaults to the session log directory")
+	f.StringVar(&opts.target, "target", "", "replay over Streamable HTTP against this MCP endpoint, for example http://localhost:3000/mcp")
+	f.StringArrayVar(&opts.headers, "header", nil, "with --target, a request header as 'Name: value', repeatable")
+	f.DurationVar(&opts.startTimeout, "start-timeout", replay.DefaultStartWait, "with --target, how long the server gets to start listening")
 	f.StringVar(&opts.label, "label", "", "server label of the replayed session, defaults to the recorded one")
 	f.DurationVar(&opts.wait, "wait", replay.DefaultWait, "how long to wait for any one answer the recording got")
 	f.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "limit for the whole replay")
@@ -98,8 +115,26 @@ func runReplay(cmd *cobra.Command, args []string, opts *replayOptions) error {
 		return exitCode(2)
 	}
 	dash := cmd.ArgsLenAtDash()
-	if dash != 1 || len(args) < 2 {
-		return fail("give one capture, then -- and the server command, as in mcpsnoop replay session.jsonl -- node build/index.js")
+	switch {
+	case opts.target != "" && (dash == -1 && len(args) == 1 || dash == 1):
+	case opts.target == "" && dash == 1 && len(args) >= 2:
+	case opts.target != "":
+		return fail("give one capture, and optionally -- and the command that starts the server, as in mcpsnoop replay session.jsonl --target http://localhost:3000/mcp -- node dist/index.js")
+	default:
+		return fail("give one capture, then -- and the server command, as in mcpsnoop replay session.jsonl -- node build/index.js, or --target and the server's URL")
+	}
+	for _, header := range opts.headers {
+		if name, _, ok := strings.Cut(header, ":"); !ok || strings.TrimSpace(name) == "" {
+			return fail("--header %q is not 'Name: value'", header)
+		}
+	}
+	if len(opts.headers) > 0 && opts.target == "" {
+		return fail("--header is for --target, since a stdio server has no headers")
+	}
+	if opts.target != "" {
+		if u, err := url.Parse(opts.target); err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fail("--target %q is not an http or https URL", opts.target)
+		}
 	}
 	if opts.wait <= 0 || opts.timeout <= 0 {
 		return fail("--wait and --timeout must be positive")
@@ -107,7 +142,10 @@ func runReplay(cmd *cobra.Command, args []string, opts *replayOptions) error {
 	if opts.durationThreshold < 0 || opts.durationRatio < 1 || math.IsNaN(opts.durationRatio) || math.IsInf(opts.durationRatio, 0) {
 		return fail("--duration-threshold must not be negative, and --duration-ratio must be finite and at least 1")
 	}
-	command := args[dash:]
+	var command []string
+	if dash >= 0 {
+		command = args[dash:]
+	}
 
 	recordedPath, err := exporter.ResolveSessionPath(args[0])
 	if err != nil {
@@ -159,16 +197,25 @@ func runReplay(cmd *cobra.Command, args []string, opts *replayOptions) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), opts.timeout)
 	defer cancel()
 	report, replayErr := replay.ReplaySession(ctx, rec, replay.SessionOptions{
-		Command:   command,
-		Label:     label,
-		SessionID: sessionID,
-		Sink:      sink,
-		Wait:      opts.wait,
-		SkipTools: opts.skipTools,
-		ReadOnly:  opts.readOnly,
+		Command:      command,
+		Target:       opts.target,
+		Headers:      opts.headers,
+		StartWait:    opts.startTimeout,
+		ServerOutput: stderr,
+		Label:        label,
+		SessionID:    sessionID,
+		Sink:         sink,
+		Wait:         opts.wait,
+		SkipTools:    opts.skipTools,
+		ReadOnly:     opts.readOnly,
 	})
 	_ = sink.Close()
 	if replayErr != nil {
+		// Nothing reached the server, so the file holds nothing either, and left
+		// behind it would be the newest log a bare check or export picks.
+		if info, err := os.Stat(out); err == nil && info.Size() == 0 {
+			_ = os.Remove(out)
+		}
 		return fail("%v", replayErr)
 	}
 	if dropped := fileSink.Dropped(); dropped > 0 {
@@ -176,7 +223,11 @@ func runReplay(cmd *cobra.Command, args []string, opts *replayOptions) error {
 	}
 
 	w := cmd.OutOrStdout()
-	writeReplayReport(w, rec, report, command, out)
+	against := strings.Join(command, " ")
+	if opts.target != "" {
+		against = proxy.EndpointForLog(opts.target)
+	}
+	writeReplayReport(w, rec, report, against, opts.target != "", out)
 
 	before, err := loadDiffSessionAt(recordedPath, rec.SessionID)
 	if err != nil {
@@ -218,12 +269,15 @@ func loadDiffSessionAt(path, sessionID string) (exporter.SessionExport, error) {
 	return exporter.Build(st, sessionID)
 }
 
-func writeReplayReport(w io.Writer, rec *replay.Recording, report replay.SessionReport, command []string, out string) {
+func writeReplayReport(w io.Writer, rec *replay.Recording, report replay.SessionReport, against string, overHTTP bool, out string) {
 	fmt.Fprintf(w, "replayed %d of %d client frames from session %s against %s\n",
-		report.Sent, rec.ClientFrames(), wiretext.OneLine(rec.SessionID), wiretext.OneLine(strings.Join(command, " ")))
+		report.Sent, rec.ClientFrames(), wiretext.OneLine(rec.SessionID), wiretext.OneLine(against))
 	fmt.Fprintf(w, "capture: %s\n", out)
-	if rec.Transport == proxy.TransportHTTP {
+	switch {
+	case rec.Transport == proxy.TransportHTTP && !overHTTP:
 		fmt.Fprintln(w, "the recording was captured over HTTP, and its frames were replayed over stdio")
+	case rec.Transport != proxy.TransportHTTP && overHTTP:
+		fmt.Fprintln(w, "the recording was captured over stdio, and its frames were replayed over HTTP")
 	}
 	section := func(title string, lines []string) {
 		if len(lines) == 0 {
