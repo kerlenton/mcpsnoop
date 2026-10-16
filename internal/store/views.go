@@ -38,6 +38,9 @@ type CallView struct {
 	// HTTPStatus is the failed HTTP status that settled the call when its response
 	// carried no JSON-RPC answer of its own, a 401 say, and zero otherwise.
 	HTTPStatus int
+	// TraceContext is the W3C trace context headers the request's HTTP POST
+	// carried, nil on stdio and when it carried none.
+	TraceContext *proxy.TraceContext
 }
 
 // Failed reports a protocol error, a tool-level error (result.isError), or any
@@ -89,6 +92,9 @@ type EventView struct {
 	// WWW-Authenticate header.
 	HTTPStatus    int
 	AuthChallenge string
+	// TraceContext is the W3C trace context headers of the HTTP request this
+	// client frame arrived in, nil when it carried none.
+	TraceContext *proxy.TraceContext
 	// RoutingMismatch is true when a routing header (Mcp-Method/Mcp-Name or an
 	// Mcp-Param-* value) or the MCP-Protocol-Version header disagrees with the body,
 	// or a routing header rides a batch, or a required one is missing. It is also
@@ -475,6 +481,7 @@ func (e *event) view(sess *session) EventView {
 		MCPParamHeaders:    slices.Clone(e.mcpParamHeaders),
 		HTTPStatus:         e.status,
 		AuthChallenge:      e.authChallenge,
+		TraceContext:       e.traceContext,
 		RoutingMismatch:    e.mismatch,
 		Truncated:          e.truncated,
 		Deprecated:         e.deprecated,
@@ -537,6 +544,7 @@ func (c *call) view() CallView {
 		TaskID:       c.taskID,
 		TaskStatus:   c.taskStatus,
 		HTTPStatus:   c.transportStatus,
+		TraceContext: c.traceContext,
 	}
 }
 

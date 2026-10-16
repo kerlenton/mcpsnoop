@@ -384,7 +384,9 @@ them, with any retry whose `requestState` came back changed, missing or invented
 of its own and the client answered it or refused.
 
 `trace context` counts requests carrying a W3C `traceparent` in `_meta`, which is
-what lets a client's own spans and mcpsnoop's join one trace. `re-fetches inside
+what lets a client's own spans and mcpsnoop's join one trace, and adds how many
+HTTP requests carried one in the `traceparent` header instead, where
+OpenTelemetry's HTTP instrumentation puts it. `re-fetches inside
 ttlMs` counts list and read requests repeated inside the freshness window the
 server declared, so a client ignoring the caching hints is visible. `deprecated
 in use` names features 2026-07-28 deprecated and the client still exercised.

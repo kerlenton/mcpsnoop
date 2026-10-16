@@ -135,6 +135,20 @@ type Envelope struct {
 	// recorded them, which is what keeps reading an old log from reporting every
 	// frame in it for a header nobody ever wrote down.
 	TransportHeaders *TransportHeaders `json:"transport_headers,omitempty"`
+	// TraceContext carries the W3C trace context headers of an HTTP request.
+	// OpenTelemetry's HTTP instrumentation propagates a trace in these headers
+	// and never in the JSON-RPC body, so without them a call from an
+	// instrumented client could not join the client's trace. Nil on stdio, on
+	// server frames, and on a request that carried neither header.
+	TraceContext *TraceContext `json:"trace_context,omitempty"`
+}
+
+// TraceContext is the W3C trace context of one HTTP request, as sent. baggage
+// is left out on purpose: it is application data a client chose to forward,
+// often about its user, and a span needs none of it.
+type TraceContext struct {
+	Traceparent string `json:"traceparent,omitempty"`
+	Tracestate  string `json:"tracestate,omitempty"`
 }
 
 // TransportHeaders are the spec-mandated Streamable HTTP headers of one frame.

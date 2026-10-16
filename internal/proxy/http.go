@@ -100,6 +100,8 @@ type route struct {
 	// a frame mcpsnoop captured with none is distinguishable from a log written
 	// before it recorded them at all.
 	headers *TransportHeaders
+	// trace is the request's W3C trace context headers, nil when it sent none.
+	trace *TraceContext
 }
 
 // wwwAuthenticateHeader carries the challenge on a 401. It is kept verbatim
@@ -153,6 +155,7 @@ func newHTTPEmitter(cfg HTTPConfig, sink Sink) func(Direction, []byte, route) {
 			Status:             r.status,
 			AuthChallenge:      r.challenge,
 			TransportHeaders:   r.headers,
+			TraceContext:       r.trace,
 		}
 		if raw != nil {
 			env.Raw = append([]byte(nil), raw...)
@@ -471,6 +474,7 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 				},
 				params: mcpParamHeaders(r.Header),
 				conn:   r.RemoteAddr,
+				trace:  traceContextOf(r.Header),
 			}
 			// Same streaming tap for the request body, so a large upload is forwarded
 			// without being held in memory whole.
@@ -480,6 +484,17 @@ func httpProxyHandler(target *url.URL, emit func(Direction, []byte, route)) http
 		}
 		rp.ServeHTTP(w, r)
 	})
+}
+
+// traceContextOf reads a request's W3C trace context headers as sent. Both are
+// kept verbatim and judged by whoever reads them, since a proxy that dropped a
+// malformed one would hide the very thing a reader might be chasing.
+func traceContextOf(header http.Header) *TraceContext {
+	tc := TraceContext{Traceparent: header.Get("Traceparent"), Tracestate: strings.Join(header.Values("Tracestate"), ",")}
+	if tc.Traceparent == "" && tc.Tracestate == "" {
+		return nil
+	}
+	return &tc
 }
 
 // exchangeKey carries an exchange's number on its request context.
@@ -512,8 +527,10 @@ func emitFrames(emit func(Direction, []byte, route), dir Direction, body []byte,
 				// to one operation in it, so unlike the routing headers they ride every
 				// element. Dropping them here would make a batched response the one
 				// place the transport layer went missing again.
+				// The trace context describes the HTTP request, so like the protocol
+				// version it is true of every element the request carried.
 				er := route{batch: true, protocolVersion: rt.protocolVersion, status: rt.status,
-					challenge: rt.challenge, conn: rt.conn, exchange: rt.exchange}
+					challenge: rt.challenge, conn: rt.conn, exchange: rt.exchange, trace: rt.trace}
 				if i == 0 {
 					er.method, er.name, er.params = rt.method, rt.name, rt.params
 				}

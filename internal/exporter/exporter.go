@@ -294,6 +294,9 @@ type CallExport struct {
 	// answer came with it, a 401 say, which is why a call can read error with no
 	// Error beside it.
 	HTTPStatus int `json:"http_status,omitempty"`
+	// TraceContext is the W3C trace context headers the request's HTTP POST
+	// carried, which a span falls back to when params._meta names no trace.
+	TraceContext *proxy.TraceContext `json:"trace_context,omitempty"`
 }
 
 type EventExport struct {
@@ -1248,7 +1251,7 @@ type spanContext struct {
 // the other.
 func callSpans(call CallExport, in *InteractionExport, data SessionExport, sessionTraceID string) []otlpSpan {
 	ctx := spanContext{traceID: sessionTraceID}
-	if propagated, ok := traceContext(call.Params); ok {
+	if propagated, ok := callTraceContext(call); ok {
 		ctx = spanContext{traceID: propagated.TraceID, parent: propagated.ParentSpanID, state: propagated.TraceState}
 	}
 	if in == nil || in.RoundTrips < 2 || !in.HopsComplete {
@@ -1527,6 +1530,31 @@ func traceContext(params json.RawMessage) (propagatedContext, bool) {
 	}, true
 }
 
+// callTraceContext is the trace a call joins. params._meta comes first, since
+// that is the carrier the specification names today. The request's HTTP headers
+// come next, because that is where OpenTelemetry's HTTP instrumentation puts a
+// trace, and an MCP SDK writes nothing to _meta on its own, so a call from an
+// instrumented client over HTTP carried its trace only there. A proposal in
+// the Transports Working Group would make the headers the carrier on HTTP, and
+// this order reads either correctly while a client sends only one of them.
+func callTraceContext(call CallExport) (propagatedContext, bool) {
+	if propagated, ok := traceContext(call.Params); ok {
+		return propagated, true
+	}
+	if call.TraceContext == nil {
+		return propagatedContext{}, false
+	}
+	traceID, parentSpanID, ok := parseTraceparent(call.TraceContext.Traceparent)
+	if !ok {
+		return propagatedContext{}, false
+	}
+	return propagatedContext{
+		TraceID:      traceID,
+		ParentSpanID: parentSpanID,
+		TraceState:   validTraceState(call.TraceContext.Tracestate),
+	}, true
+}
+
 // metaString returns a string-valued _meta entry, or "" when it is absent or is
 // some other JSON type. A carrier of the wrong type is treated as no carrier,
 // because a number where a traceparent belongs says nothing about the trace.
@@ -1721,6 +1749,7 @@ func exportCall(index int, c store.CallView) CallExport {
 		Error:        c.Err,
 		ErrorName:    errorName(c.Err),
 		HTTPStatus:   c.HTTPStatus,
+		TraceContext: c.TraceContext,
 	}
 	if !c.CancelledAt.IsZero() {
 		cancelledAt := c.CancelledAt

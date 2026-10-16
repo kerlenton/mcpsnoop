@@ -53,6 +53,7 @@ var schemaDefs = map[reflect.Type]string{
 	reflect.TypeFor[SessionMeta]():      "sessionMeta",
 	reflect.TypeFor[TransportHeaders](): "transportHeaders",
 	reflect.TypeFor[MCPParamHeader]():   "mcpParamHeader",
+	reflect.TypeFor[TraceContext]():     "traceContext",
 }
 
 func loadCaptureSchema(t *testing.T) map[string]any {
@@ -247,10 +248,11 @@ func TestCaptureFormatDocNamesEveryField(t *testing.T) {
 		reflect.TypeFor[Envelope](),
 		reflect.TypeFor[MCPParamHeader](),
 		reflect.TypeFor[TransportHeaders](),
+		reflect.TypeFor[TraceContext](),
 		reflect.TypeFor[SessionMeta](),
 	}
 	if len(tables) != len(order) {
-		t.Fatalf("the page has %d field tables, want %d (envelope, mcp_param_headers, transport_headers, meta raw)", len(tables), len(order))
+		t.Fatalf("the page has %d field tables, want %d (envelope, mcp_param_headers, transport_headers, trace_context, meta raw)", len(tables), len(order))
 	}
 	for i, typ := range order {
 		var want []string

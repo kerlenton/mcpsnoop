@@ -237,6 +237,9 @@ type call struct {
 	// HeaderMismatch the server answers with is the server's to explain.
 	origin          bool
 	headersVerified bool
+	// traceContext is the W3C trace context the request's HTTP POST carried in
+	// headers, which is where an instrumented HTTP client puts it.
+	traceContext *proxy.TraceContext
 	// signature identifies a tool call by its tool and arguments, empty for any
 	// other call and for one whose arguments cannot be compared. retryOf is the
 	// identical earlier call whose outcome the client could not yet know when it
@@ -266,6 +269,7 @@ type event struct {
 	transport          string // the channel this frame was observed on (proxy.TransportHTTP, …)
 	status             int    // HTTP status of the response this frame arrived on (zero on stdio)
 	authChallenge      string // WWW-Authenticate on that response
+	traceContext       *proxy.TraceContext
 	mismatch           bool   // a routing header disagrees with the body (structured flag for warning)
 	truncated          bool   // the observed copy was capped at the frame-size limit
 	deprecated         string // a deprecated MCP feature was used (structured, not a protocol warning)
@@ -543,7 +547,7 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		return EventView{Kind: EventOther} // control frame, not shown in the stream
 	}
 
-	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName, mcpProtocolVersion: e.MCPProtocolVersion, mcpParamHeaders: sortedMCPParamHeaders(e.MCPParamHeaders), batch: e.Batch, transport: e.Transport, status: e.Status, authChallenge: e.AuthChallenge}
+	ev := &event{seq: e.Seq, ts: e.TS, dir: e.Direction, raw: e.Raw, text: e.Text, mcpMethod: e.MCPMethod, mcpName: e.MCPName, mcpProtocolVersion: e.MCPProtocolVersion, mcpParamHeaders: sortedMCPParamHeaders(e.MCPParamHeaders), batch: e.Batch, transport: e.Transport, status: e.Status, authChallenge: e.AuthChallenge, traceContext: e.TraceContext}
 
 	if e.Direction == proxy.ServerStderr {
 		ev.kind = EventStderr
@@ -1359,6 +1363,7 @@ func (sess *session) openCall(id string, msg proxy.RPCMessage, e proxy.Envelope)
 	c.protocolVersion = requestProtocolVersion(msg.Params, e.MCPProtocolVersion)
 	c.exchange = e.Exchange
 	c.origin = e.TransportHeaders != nil && e.TransportHeaders.Origin != ""
+	c.traceContext = e.TraceContext
 	sess.calls[key] = c
 	sess.noteAttempt(c)
 	return c, reused
