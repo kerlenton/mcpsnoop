@@ -25,6 +25,11 @@ const (
 type Options struct {
 	DurationThreshold time.Duration
 	DurationRatio     float64
+	// PairByRequestID pairs calls by tool and request id instead of by tool and
+	// arguments. A replay sends every recorded request under its recorded id,
+	// but the arguments of some carry values the server handed out afresh, so
+	// pairing by arguments would leave exactly those calls uncompared.
+	PairByRequestID bool
 }
 
 type Report struct {
@@ -143,8 +148,8 @@ func Compare(before, after exporter.SessionExport, opts Options) Report {
 	}
 	report.Tools = CompareToolDefinitions(listedTools(before), listedTools(after))
 
-	beforeCalls := callsBySignature(before)
-	afterCalls := callsBySignature(after)
+	beforeCalls := callsBySignature(before, opts.PairByRequestID)
+	afterCalls := callsBySignature(after, opts.PairByRequestID)
 	var signatures []string
 	for signature := range beforeCalls {
 		if _, ok := afterCalls[signature]; ok {
@@ -441,7 +446,7 @@ type comparableCall struct {
 	duration  *time.Duration
 }
 
-func callsBySignature(session exporter.SessionExport) map[string][]comparableCall {
+func callsBySignature(session exporter.SessionExport, byRequestID bool) map[string][]comparableCall {
 	calls := make(map[string][]comparableCall)
 	for _, call := range session.Calls {
 		if !call.IsTool || call.ToolName == "" {
@@ -449,6 +454,9 @@ func callsBySignature(session exporter.SessionExport) map[string][]comparableCal
 		}
 		arguments := callArguments(call.Params)
 		signature := call.ToolName + "\x00" + arguments
+		if byRequestID {
+			signature = call.ToolName + "\x00" + call.ID
+		}
 		comparable := comparableCall{
 			toolName: call.ToolName, arguments: arguments, status: call.Status,
 		}

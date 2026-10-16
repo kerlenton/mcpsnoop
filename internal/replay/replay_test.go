@@ -129,6 +129,10 @@ func handle(line []byte) {
 // statelessBin is the fixture above, built alongside demoBin.
 var statelessBin string
 
+// sessionBin is the stateful fixture session_test.go replays recordings
+// against, built alongside the other two.
+var sessionBin string
+
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "mcpsnoop-replay")
 	if err != nil {
@@ -136,6 +140,7 @@ func TestMain(m *testing.M) {
 	}
 	demoBin = buildFixture(dir, "tinyserver", tinyServer)
 	statelessBin = buildFixture(dir, "statelessserver", statelessServer)
+	sessionBin = buildFixture(dir, "sessionserver", sessionServer)
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

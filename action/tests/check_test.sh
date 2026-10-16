@@ -123,6 +123,46 @@ for case in \
 		bad "$label left a file where the report goes, which the upload would take for one"
 done
 
+# replay. The server under test is mcpsnoop mock serving a capture, which
+# answers the clean recording the way it was recorded, or, serving the dirty
+# one, refuses its call, which is the regression a replay exists to catch.
+run "" MCPSNOOP_REPLAY="$root/clean.jsonl" "MCPSNOOP_SERVER=mcpsnoop mock $root/clean.jsonl"
+expect "a replay that held up checks its capture and passes" passed true 0
+capture="$(sed -n 's/^capture=//p' "$root/out")"
+if [ -s "$capture" ] && grep -q '"direction":"meta"' "$capture"; then
+	ok "and hands back the capture it checked"
+else
+	bad "a passing replay left no capture behind" "capture=$capture" "$(cat "$root/log")"
+fi
+
+run "" MCPSNOOP_REPLAY="$root/clean.jsonl" "MCPSNOOP_SERVER=mcpsnoop mock $root/dirty.jsonl" MCPSNOOP_FAIL_ON=pending
+expect "a replay that regressed fails even when its capture checks clean" findings true 1
+grep -q "regressed" "$root/summary" ||
+	bad "the summary does not say the replay regressed" "$(cat "$root/summary")"
+
+run "" MCPSNOOP_REPLAY="$root/clean.jsonl" "MCPSNOOP_SERVER=mcpsnoop mock $root/dirty.jsonl" MCPSNOOP_FAIL_ON=pending MCPSNOOP_FAIL_ON_FINDINGS=false
+expect "a regression can be reported without failing" findings true 0
+
+# Each of these means nothing was replayed or checked, so each is an error, and
+# none of them may be suppressed.
+replay_refusals=(
+	"session and replay together|MCPSNOOP_SESSION=$root/clean.jsonl|MCPSNOOP_REPLAY=$root/clean.jsonl|MCPSNOOP_SERVER=mcpsnoop mock $root/clean.jsonl"
+	"neither session nor replay|MCPSNOOP_SESSION="
+	"replay without a server|MCPSNOOP_REPLAY=$root/clean.jsonl"
+	"a recording that is not there|MCPSNOOP_REPLAY=$root/no-such-file.jsonl|MCPSNOOP_SERVER=mcpsnoop mock $root/clean.jsonl"
+	"a server with an unbalanced quote|MCPSNOOP_REPLAY=$root/clean.jsonl|MCPSNOOP_SERVER=node 'oops"
+	"a server that does not start|MCPSNOOP_REPLAY=$root/clean.jsonl|MCPSNOOP_SERVER=$root/no-such-server"
+	"replay-args setting --out|MCPSNOOP_REPLAY=$root/clean.jsonl|MCPSNOOP_SERVER=mcpsnoop mock $root/clean.jsonl|MCPSNOOP_REPLAY_ARGS=--out elsewhere.jsonl"
+)
+for case in "${replay_refusals[@]}"; do
+	IFS='|' read -r -a parts <<<"$case"
+	label="${parts[0]}"
+	run "" "${parts[@]:1}"
+	expect "$label is an error, not a finding" error false 1
+	run "" "${parts[@]:1}" MCPSNOOP_FAIL_ON_FINDINGS=false
+	[ "$gate_code" = 1 ] || bad "$label was suppressed by fail-on-findings" "gate exited $gate_code"
+done
+
 # The two safeguards, pinned one at a time.
 #
 # The exit code and the shape of the report each decide the verdict on their own,

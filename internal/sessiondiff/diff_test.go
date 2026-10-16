@@ -207,3 +207,27 @@ func TestStatusRankCoversCancellationAndLateResults(t *testing.T) {
 		t.Fatal("a cancelled call must rank worse than ok, or the exit code stays 0")
 	}
 }
+
+// TestComparePairsByRequestIDWhenAsked. A replay carries the ids a server
+// handed out into the calls that echo them, so the replayed call has other
+// arguments than the recorded one and pairing by arguments loses it. Paired by
+// request id, the worse outcome is reported against the recorded arguments.
+func TestComparePairsByRequestIDWhenAsked(t *testing.T) {
+	recorded := toolCall("get_note", `{"name":"get_note","arguments":{"id":"n-old"}}`, "ok", nil)
+	recorded.ID = "5"
+	replayed := toolCall("get_note", `{"name":"get_note","arguments":{"id":"n-new"}}`, "error", nil)
+	replayed.ID = "5"
+	before := exporter.SessionExport{Session: exporter.SessionSummary{ID: "rec"}, Calls: []exporter.CallExport{recorded}}
+	after := exporter.SessionExport{Session: exporter.SessionSummary{ID: "replay"}, Calls: []exporter.CallExport{replayed}}
+
+	if report := Compare(before, after, Options{}); len(report.CallChanges) != 0 {
+		t.Fatalf("by arguments the two calls are different calls, got %+v", report.CallChanges)
+	}
+	report := Compare(before, after, Options{PairByRequestID: true})
+	if len(report.CallChanges) != 1 || report.CallChanges[0].Arguments != `{"id":"n-old"}` || report.CallChanges[0].After != "error" {
+		t.Fatalf("call changes = %+v", report.CallChanges)
+	}
+	if !report.HasRegression() {
+		t.Fatal("a call that got worse is a regression")
+	}
+}
