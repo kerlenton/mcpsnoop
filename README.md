@@ -221,8 +221,9 @@ questions it can answer.
 |---|---|---|
 | [MCP Inspector](https://github.com/modelcontextprotocol/inspector) | its own client, connected to your server | trying a server by hand, in a browser or from a scriptable CLI |
 | [Snyk Agent Scan](https://github.com/snyk/agent-scan) | its own client, launching or connecting to the servers in your configs to read their tools | scanning agents, MCP servers and skills on your machine for prompt injection and vulnerabilities |
+| [MCP Observatory](https://github.com/KryptosAI/mcp-observatory) | its own client, launching your server to test, record and verify it | security and regression testing in CI, with attack simulation, schema drift, and record, replay and verify |
 | [mcprec](https://github.com/erphq/mcprec) | on the wire, between client and server | recording a session once and replaying it as a test fixture without the network |
-| mcpsnoop | on the wire, between client and server | watching what your real client and server say, failing CI on it, and exporting it as OpenTelemetry |
+| mcpsnoop | on the wire, between client and server | watching what your real client and server say, replaying a real client's session against each build, failing CI on it, and exporting it as OpenTelemetry |
 
 A tool that is its own client sees the calls it makes, not the ones your client
 makes, so it cannot show the call your model never made or made with the wrong
@@ -273,7 +274,7 @@ stale.
 
 | Input | |
 |---|---|
-| `session` | the `.jsonl` capture to check, relative to the repository root. Give this or `replay` |
+| `session` | the `.jsonl` capture to check, or a directory of them, relative to the repository root. Give this or `replay` |
 | `replay` | a committed recording to replay against `server`, which then has its capture checked and fails the job on a regression too |
 | `server` | the command that starts the server under test, quoted as on a command line. Required with `replay` |
 | `replay-args` | any other `replay` flags, such as `--read-only`. `--out` is refused, since the action decides where the capture goes |

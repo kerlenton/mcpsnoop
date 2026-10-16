@@ -102,6 +102,16 @@ expect "a finding nobody gated on passes" passed true 0
 run "$root/clean.jsonl" MCPSNOOP_UPLOAD=false
 expect "upload can be turned off without changing the verdict" passed false 0
 
+# One capture per server is what an agent run with several of them leaves, so
+# session may name a directory, and any one capture in it failing fails the job.
+mkdir -p "$root/captures"
+cp "$root/clean.jsonl" "$root/captures/a.jsonl"
+run "$root/captures"
+expect "a directory of clean captures passes" passed true 0
+cp "$root/dirty.jsonl" "$root/captures/b.jsonl"
+run "$root/captures"
+expect "a directory holding one failing capture fails" findings true 1
+
 # Everything below is the same thing said six ways: the check did not happen.
 # None of it may pass, and none of it may be suppressed by fail-on-findings,
 # because a run that could not look has not approved anything.

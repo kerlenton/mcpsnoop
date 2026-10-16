@@ -1091,7 +1091,13 @@ func TestTraceSinkReportsOnlyTheFileSinkDrops(t *testing.T) {
 	// With no file to write, nothing can be missing from it, so the shim has
 	// nothing to say however much the other sinks drop.
 	t.Run("no file sink means nothing to call incomplete", func(t *testing.T) {
-		sink, file := traceSink("sess-2", filepath.Join(t.TempDir(), "no", "such", "dir", "t.jsonl"),
+		// A missing directory is made now, so the path runs through a regular file,
+		// which no directory can be made under and no trace can be opened beneath.
+		blocker := filepath.Join(t.TempDir(), "blocker")
+		if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sink, file := traceSink("sess-2", filepath.Join(blocker, "t.jsonl"),
 			false, proxy.RedactConfig{}, traceOptions{})
 		defer sink.Close()
 		if file != nil {

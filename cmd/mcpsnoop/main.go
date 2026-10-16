@@ -709,6 +709,12 @@ func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.Redact
 	}
 	if traceFile == "" {
 		traceFile = paths.SessionLogPath(sessionID)
+	} else {
+		// A trace file named for CI usually sits in a directory the job has not
+		// made yet, and failing to open it only costs a warning on the server's
+		// stderr, which a client keeps out of sight. The check after the run then
+		// finds no capture, far from the cause, so the directory is made here.
+		_ = os.MkdirAll(filepath.Dir(traceFile), 0o700)
 	}
 	var (
 		sinks []proxy.Sink
@@ -746,6 +752,7 @@ func traceSink(sessionID, traceFile string, noTrace bool, redaction proxy.Redact
 func newHTTPCmd() *cobra.Command {
 	var (
 		target, listen, label  string
+		traceFile              string
 		otlpEndpoint           string
 		noTrace, redactSecrets bool
 		redactKeys             redactKeysFlag
@@ -786,7 +793,7 @@ func newHTTPCmd() *cobra.Command {
 			}
 			sessionID := newSessionID(lbl)
 
-			sink, file := traceSink(sessionID, "", noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths), trace)
+			sink, file := traceSink(sessionID, traceFile, noTrace, redactConfig(redactSecrets, redactKeys, redactValues, redactPaths), trace)
 			defer func() {
 				_ = sink.Close()
 				if file != nil {
@@ -818,6 +825,7 @@ func newHTTPCmd() *cobra.Command {
 	f.StringVar(&target, "target", "", "real MCP server endpoint, for example http://localhost:3000/mcp (required)")
 	f.StringVar(&listen, "listen", ":7000", "address to listen on")
 	f.StringVar(&label, "label", "", "server label shown in the TUI, defaults to the target host")
+	f.StringVar(&traceFile, "trace-file", "", "override the JSONL trace path, defaults to the well-known session log")
 	f.StringVar(&otlpEndpoint, "otlp-endpoint", "", "stream completed calls to an OTLP/HTTP JSON traces endpoint")
 	f.Var(&otlpHeaders, "otlp-header", "HTTP header for OTLP delivery as Name=Value, repeatable")
 	f.BoolVar(&noTrace, "no-trace", false, "disable tracing, pure passthrough")

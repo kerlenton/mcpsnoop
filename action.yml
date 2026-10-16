@@ -25,9 +25,9 @@ branding:
 inputs:
   session:
     description: |
-      Path to the .jsonl capture to check, relative to the repository root.
-      Record one by wrapping your server with mcpsnoop in an earlier step. Give
-      this or replay, not both.
+      Path to the .jsonl capture to check, or to a directory of them, relative
+      to the repository root. Record one by wrapping your server with mcpsnoop
+      in an earlier step. Give this or replay, not both.
     default: ""
   replay:
     description: |

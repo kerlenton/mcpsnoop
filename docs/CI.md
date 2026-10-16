@@ -14,12 +14,15 @@ capture incomplete, schemas that travel badly across clients, or tools that
 declare their behaviour badly or not at all.
 
 ```bash
-mcpsnoop check [--format text|junit|sarif] [--fail-on error,invalid,warn,mismatch,pending,late-result,duplicate,drift,loosened,deprecated,incomplete,schema,annotations] [session-id|log.jsonl|-]
+mcpsnoop check [--format text|junit|sarif] [--fail-on error,invalid,warn,mismatch,pending,late-result,duplicate,drift,loosened,deprecated,incomplete,schema,annotations] [session-id|log.jsonl|directory|-]...
 ```
 
 `error`, `invalid` and `warn` fail the check on their own. The rest are opt-in.
 Pass a comma-separated subset to gate on only what a job cares about, omit the
 session to check the newest capture, or use `-` to read JSONL from stdin.
+Several captures, or a directory of them, are checked together, each session
+on its own, and the run fails if any one of them does. An empty capture in a
+directory is skipped, since it is a trace file nobody connected to.
 
 | Signal | Fails on |
 |---|---|
@@ -136,6 +139,41 @@ by default, and a server that stopped answering costs that once.
 The server runs over stdio from the current directory. A recording captured over
 HTTP replays its frames over stdio as well, which covers a server that speaks
 both.
+
+## Record an agent run in CI
+
+When an agent already runs in your workflow, wrap the server it uses and check
+what it did. With claude-code-action the MCP configuration goes in
+`claude_args`.
+
+```yaml
+steps:
+  # after the steps that check out and build the server
+  - uses: anthropics/claude-code-action@v1
+    with:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      prompt: Create a note that says hello, read it back, then list every note.
+      claude_args: |
+        --mcp-config '{"mcpServers":{"notes":{"command":"npx","args":["-y","mcpsnoop","--trace-file","${{ runner.temp }}/mcp/notes.jsonl","--","node","${{ github.workspace }}/dist/index.js"]}}}'
+        --allowedTools mcp__notes__create_note,mcp__notes__get_note,mcp__notes__list_notes
+  - uses: kerlenton/mcpsnoop@<the release the README pins>
+    if: ${{ !cancelled() }}
+    with:
+      session: ${{ runner.temp }}/mcp
+      args: --expect-tool create_note --expect-tool get_note
+```
+
+`--trace-file` puts the capture where the next step looks for it, and makes the
+directory when it is not there yet. Give every server its own file in one
+directory, and `session` takes the directory. `npx` runs whichever mcpsnoop is
+newest, so pin it as `mcpsnoop@<version>` the way you pin the action, and
+`mcpsnoop http --trace-file` does the same for a server you reach over HTTP.
+
+A model decides what to call, so no two runs are the same. `--expect-tool`
+turns an agent that never called the tool into a failure rather than a clean
+pass over nothing, and the protocol signals hold whatever the model chose.
+`!cancelled()` runs the check even when the agent step failed, which is when its
+capture is worth reading.
 
 ## Assert what must and must not happen
 

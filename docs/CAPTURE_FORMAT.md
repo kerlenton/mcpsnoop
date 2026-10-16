@@ -26,12 +26,13 @@ made.
 
 `mcpsnoop -- <server>` writes one file per run, named `<session-id>.jsonl`, in
 the sessions directory, and [Review past sessions](POST_MORTEM.md) says where
-that is. `--trace-file <path>` writes it to a path you choose instead.
-`mcpsnoop http` writes into the sessions directory.
+that is. `--trace-file <path>` writes it to a path you choose instead, making
+the directory when it is missing. `mcpsnoop http` writes into the sessions
+directory and takes `--trace-file` too.
 
 A run appends and never rewrites a line it has written, so a `--trace-file`
 reused across runs holds several sessions one after another. `check` checks
-every session in a file, and `export` writes the first.
+every session in every file it is given, and `export` writes the first.
 
 The session id is `<label>-<pid>-<random hex>`. Treat it as an opaque name.
 

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -72,10 +75,10 @@ func newCheckCmd() *cobra.Command {
 	var baselineDir string
 	var assertions checkAssertions
 	cmd := &cobra.Command{
-		Use:   "check [session-id|log.jsonl|-]",
+		Use:   "check [session-id|log.jsonl|directory|-]...",
 		Short: "Fail when a captured session violates a signal or an assertion",
-		Long:  "Check a captured session against signals (errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, results that arrived after cancellation, tool calls repeated before the first attempt's outcome was known, tool-definition drift, tool annotations loosened since the baseline, deprecated protocol features, dropped frames that leave the capture incomplete, schemas that travel badly across clients, tools that declare their behaviour badly or not at all) and assertions (a tool-call latency budget, a round-trip budget, and tools that must or must not have been called). With no session, the newest session log is checked. Use - to read from stdin.",
-		Args:  cobra.MaximumNArgs(1),
+		Long:  "Check a captured session against signals (errors, invalid frames, warnings, routing-header mismatches, calls that never got a response, results that arrived after cancellation, tool calls repeated before the first attempt's outcome was known, tool-definition drift, tool annotations loosened since the baseline, deprecated protocol features, dropped frames that leave the capture incomplete, schemas that travel badly across clients, tools that declare their behaviour badly or not at all) and assertions (a tool-call latency budget, a round-trip budget, and tools that must or must not have been called). With no session, the newest session log is checked. Several logs, or a directory of them, are checked together, each session on its own. Use - to read one from stdin.",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			signals, err := parseCheckSignals(failOn)
 			if err != nil {
@@ -88,11 +91,7 @@ func newCheckCmd() *cobra.Command {
 				return exitCode(2)
 			}
 
-			var arg string
-			if len(args) == 1 {
-				arg = args[0]
-			}
-			sessionLog, err := loadCheckSession(cmd, arg, format.needsLineIndex())
+			sessionLog, err := loadCheckSessions(cmd, args, format.needsLineIndex())
 			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "mcpsnoop check:", err)
 				// 2, not 1, and the difference is the whole contract a CI wrapper
@@ -371,8 +370,98 @@ func (f checkOutputFormat) needsLineIndex() bool { return f == checkFormatSARIF 
 type checkLog struct {
 	store     *store.Store
 	sessionID string
-	path      string
-	lines     exporter.FrameLines
+	// path is the one file read, and files says which file each session came
+	// from when several were. Both are empty for stdin.
+	path  string
+	files map[string]string
+	lines exporter.FrameLines
+}
+
+// fileOf names the file a session was read from, empty when it was stdin or the
+// finding belongs to no one session of several files.
+func (l checkLog) fileOf(sessionID string) string {
+	if path, ok := l.files[sessionID]; ok {
+		return path
+	}
+	return l.path
+}
+
+// loadCheckSessions reads what a check run judges. One argument or none is the
+// single-log path every earlier release took. Several, or a directory, are read
+// into one store as though they were one concatenated capture, which check
+// already gates session by session, with every session remembering its file so
+// a report can point at it.
+func loadCheckSessions(cmd *cobra.Command, args []string, withLines bool) (checkLog, error) {
+	if len(args) <= 1 {
+		var arg string
+		if len(args) == 1 {
+			arg = args[0]
+		}
+		if info, err := os.Stat(arg); arg == "" || arg == "-" || err != nil || !info.IsDir() {
+			return loadCheckSession(cmd, arg, withLines)
+		}
+	}
+	var paths []string
+	for _, arg := range args {
+		if arg == "-" {
+			return checkLog{}, errors.New("- reads one capture from stdin and cannot be combined with others")
+		}
+		found, err := capturePaths(arg)
+		if err != nil {
+			return checkLog{}, err
+		}
+		paths = append(paths, found...)
+	}
+	st, files, lines, err := exporter.LoadFilesLines(paths)
+	if err != nil {
+		return checkLog{}, err
+	}
+	log := checkLog{store: st, files: files}
+	if withLines {
+		log.lines = lines
+	}
+	if sessions := st.Sessions(); len(sessions) > 0 {
+		log.sessionID = sessions[0].ID
+	}
+	if len(paths) == 1 {
+		log.path = paths[0]
+	}
+	return log, nil
+}
+
+// capturePaths resolves one argument to the logs it names. A directory names
+// every non-empty .jsonl directly inside it, in name order. An empty one is a
+// trace file whose session never got traffic, the way --trace-file leaves one
+// behind when nothing ever connected, so it is skipped rather than reported as
+// a broken capture. A directory with no capture in it at all is an error, since
+// a gate that passes having read nothing has approved nothing.
+func capturePaths(arg string) ([]string, error) {
+	info, err := os.Stat(arg)
+	if err != nil || !info.IsDir() {
+		path, err := exporter.ResolveSessionPath(arg)
+		if err != nil {
+			return nil, err
+		}
+		return []string{path}, nil
+	}
+	entries, err := os.ReadDir(arg)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || filepath.Ext(entry.Name()) != ".jsonl" {
+			continue
+		}
+		if info, err := entry.Info(); err != nil || info.Size() == 0 {
+			continue
+		}
+		paths = append(paths, filepath.Join(arg, entry.Name()))
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("%s: no capture in the directory", arg)
+	}
+	return paths, nil
 }
 
 // loadCheckSession reads the log a check or baseline run judges. withLines asks
