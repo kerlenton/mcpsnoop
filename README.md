@@ -40,7 +40,7 @@ permissions:
   contents: read
 
 steps:
-  - uses: kerlenton/mcpsnoop@v0.27.0
+  - uses: kerlenton/mcpsnoop@v0.28.0
     with:
       session: artifacts/session.jsonl
 ```
@@ -53,7 +53,7 @@ gets `target` with its endpoint, and a recording replays over either transport.
 
 ```yaml
 steps:
-  - uses: kerlenton/mcpsnoop@v0.27.0
+  - uses: kerlenton/mcpsnoop@v0.28.0
     with:
       replay: tests/mcp/claude-code-session.jsonl
       server: node dist/index.js
@@ -262,7 +262,7 @@ permissions:
   contents: read
 
 steps:
-  - uses: kerlenton/mcpsnoop@v0.27.0
+  - uses: kerlenton/mcpsnoop@v0.28.0
     with:
       session: artifacts/session.jsonl
 ```
