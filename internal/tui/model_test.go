@@ -3225,3 +3225,51 @@ func TestInspectorBoundsItsVerdicts(t *testing.T) {
 		t.Fatal("a cut verdict should say where the rest is")
 	}
 }
+
+// TestInspectorShowsACancelledCallAndTheClientLeaving. A call cancelled with no
+// answer has no response to time, and the inspector header said 0s for it. It
+// ran until the client gave up, which is the figure the header now shows. The
+// frame that records the client leaving carries no message, and says so rather
+// than showing an empty first line.
+func TestInspectorShowsACancelledCallAndTheClientLeaving(t *testing.T) {
+	st := store.New()
+	start := time.Now().Add(-time.Minute)
+	call := envAt(1, proxy.ClientToServer, start,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`)
+	call.Transport, call.Exchange = proxy.TransportHTTP, 1
+	left := envAt(2, proxy.ClientToServer, start.Add(2*time.Second), "")
+	left.Raw, left.Transport, left.Exchange, left.Abandoned = nil, proxy.TransportHTTP, 1, true
+	st.Ingest(call)
+	st.Ingest(left)
+
+	m := ready(t, st)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // the stream, following its last frame
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // inspect it
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "id 1 · 2s · cancel") {
+		t.Fatalf("header does not say how long the call ran:\n%s", view)
+	}
+	if !strings.Contains(view, "no message of its own") {
+		t.Fatalf("the client leaving shows an empty body:\n%s", view)
+	}
+}
+
+// TestInspectorNotesAreReadableText. The inspector numbers and highlights its
+// body as wire text, which strips control characters, so a note styled before it
+// got there showed its colour codes as text and broke the wrapping. A released
+// body, the client leaving an exchange and an HTTP status with no body each say
+// so in plain words.
+func TestInspectorNotesAreReadableText(t *testing.T) {
+	m := Model{full: []store.EventView{
+		{Seq: 1, Kind: store.EventResponse, BodyReleased: true},
+		{Seq: 2, Kind: store.EventTransport, Abandoned: true},
+		{Seq: 3, Kind: store.EventTransport, HTTPStatus: 202},
+	}}
+	for i, want := range []string{"body released to stay inside the live memory budget", "no message of its own", "no body"} {
+		m.inspect = i
+		got := m.inspectorBody()
+		if !strings.Contains(got, want) || strings.ContainsRune(got, '\x1b') {
+			t.Fatalf("frame %d body = %q, want plain text containing %q", i+1, got, want)
+		}
+	}
+}
