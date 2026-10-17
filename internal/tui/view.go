@@ -1220,9 +1220,21 @@ func (m Model) inspectorBody() string {
 	// A frame whose body the live store released still has a row, a verdict and a
 	// place in the timeline, and saying nothing here would read as a server that
 	// sent an empty frame. The log on disk is untouched.
+	// The notes below are plain text. The body is numbered and highlighted as wire
+	// text, which strips control characters, so a note styled here showed its
+	// colour codes as text and broke the wrapping.
 	if e.BodyReleased {
-		b.WriteString(m.styles.dim.Render(
-			"body released to stay inside the live memory budget; open the session log to read it"))
+		b.WriteString("body released to stay inside the live memory budget; open the session log to read it")
+	}
+	// A frame with nothing to show, an HTTP status with no body or the client
+	// leaving an exchange, says so, rather than showing an empty first line that
+	// reads as a body that failed to load.
+	if e.Text == "" && len(e.Raw) == 0 && !e.BodyReleased {
+		note := "no body"
+		if e.Abandoned {
+			note = "no message of its own, mcpsnoop records the client leaving the exchange before its answer came back"
+		}
+		b.WriteString(note)
 	}
 	return b.String()
 }
@@ -1242,8 +1254,10 @@ func (m Model) inspectorHeader(w int) string {
 		if e.Call.Method != "" {
 			parts = append(parts, m.styles.req.Render(safeCell(e.Call.Method)))
 		}
-		parts = append(parts, m.styles.dim.Render("id "+safeCell(e.Call.ID)),
-			m.styles.dim.Render(e.Call.Duration().Round(time.Millisecond).String()))
+		parts = append(parts, m.styles.dim.Render("id "+safeCell(e.Call.ID)))
+		if d, known := inspectorDuration(*e.Call); known {
+			parts = append(parts, m.styles.dim.Render(d.Round(time.Millisecond).String()))
+		}
 	}
 	if c.status != "" {
 		parts = append(parts, m.statusStyle(e).Render(safeCell(c.status)))
@@ -1281,6 +1295,19 @@ func (m Model) inspectorHeader(w int) string {
 		head += "\n" + strings.Join(verdicts, "\n")
 	}
 	return head
+}
+
+// inspectorDuration is how long the call ran, as far as the capture says. A call
+// cancelled with no answer ran until it was cancelled, and Duration reports zero
+// for it, which the header printed as a call that took no time at all.
+func inspectorDuration(c store.CallView) (time.Duration, bool) {
+	if c.State == store.Cancelled && !c.LateResult {
+		if c.CancelledAt.IsZero() || c.Start.IsZero() {
+			return 0, false
+		}
+		return c.CancelledAt.Sub(c.Start), true
+	}
+	return c.Duration(), true
 }
 
 // truncatedNote is how a frame whose observed copy hit the frame cap is described,
