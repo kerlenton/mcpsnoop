@@ -23,8 +23,19 @@ func TestCheckFailsOnSelectedSessionSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 late_results=0 deprecated=0 missing_frames=0 schema_findings=0 annotation_findings=0 duplicates=0\ncheck failed: error,invalid,warn\n" {
-		t.Fatalf("stdout = %q", stdout)
+	// The frames behind each failing signal follow the counts, so the log says
+	// what failed rather than only how much.
+	want := "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 late_results=0 deprecated=0 missing_frames=0 schema_findings=0 annotation_findings=0 duplicates=0\n" +
+		"errors:\n" +
+		"  frame 2, tools/call missing (id 1) ended in an error: missing (code -32601)\n" +
+		"  frame 4, tools/call broken (id 2) ended in an error: the result is marked isError\n" +
+		"invalid frames:\n" +
+		"  frame 5, frame on the protocol channel is not valid JSON-RPC\n" +
+		"warnings:\n" +
+		"  frame 6, missing jsonrpc=2.0\n" +
+		"check failed: error,invalid,warn\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 	if stderr != "" {
 		t.Fatalf("stderr = %q, want empty", stderr)
@@ -68,11 +79,41 @@ func TestCheckFailsOnlyOnSelectedSignals(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 because the fixture contains an invalid frame", code)
 	}
-	if stdout != "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 late_results=0 deprecated=0 missing_frames=0 schema_findings=0 annotation_findings=0 duplicates=0\ncheck failed: invalid\n" {
-		t.Fatalf("stdout = %q", stdout)
+	// Only the failing signal's frames are listed. The others are counted and
+	// left to the SARIF report.
+	want := "session s1: errors=2 invalid=1 warnings=1 mismatches=0 pending=1 late_results=0 deprecated=0 missing_frames=0 schema_findings=0 annotation_findings=0 duplicates=0\n" +
+		"invalid frames:\n" +
+		"  frame 5, frame on the protocol channel is not valid JSON-RPC\n" +
+		"check failed: invalid\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 	if stderr != "" {
 		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
+// TestCheckListsAFewFramesAndCountsTheRest. A session can hold thousands of
+// failing frames, and a log that scrolls past them helps nobody, so the text
+// report lists the first ones and says how many more the SARIF report holds. A
+// frame's own text goes through on one line, so a server cannot write past it
+// into the log.
+func TestCheckListsAFewFramesAndCountsTheRest(t *testing.T) {
+	t.Setenv("MCPSNOOP_HOME", t.TempDir())
+	var envelopes []proxy.Envelope
+	for i := range 25 {
+		envelopes = append(envelopes, proxy.Envelope{SessionID: "s1", ServerLabel: "srv", Seq: uint64(i + 1),
+			TS: time.Unix(int64(i+1), 0), Direction: proxy.ServerToClient, Text: "not json-rpc"})
+	}
+	code, stdout, _ := executeCheck(t, []string{"--fail-on", "invalid", "-"}, encodeCheckLog(t, envelopes...))
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if listed := strings.Count(stdout, "\n  frame "); listed != frameFindingsShown {
+		t.Fatalf("listed %d frames, want %d: %s", listed, frameFindingsShown, stdout)
+	}
+	if !strings.Contains(stdout, "  frame 20, frame on the protocol channel is not valid JSON-RPC\n  and 5 more, every one listed by --format sarif\ncheck failed: invalid\n") {
+		t.Fatalf("stdout = %s", stdout)
 	}
 }
 

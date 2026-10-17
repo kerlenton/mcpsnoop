@@ -227,55 +227,15 @@ func (b *sarifBuilder) session(st *store.Store, summary checkSummary) {
 	}
 
 	var toolListSeq uint64
-	pending := make(map[string]bool)
 	for _, event := range st.Timeline(sessionID) {
 		if event.Kind == store.EventResponse && event.Call != nil && event.Call.Method == "tools/list" {
 			// The last page, not the first: a paginated listing is only complete after
 			// it, and drift compares the complete list.
 			toolListSeq = event.Seq
 		}
-		if event.Errored {
-			// Keyed off the frames the store counted the errors on, so the report
-			// names them rather than re-deriving the conditions and drifting from the
-			// gate. Deriving them from Call.Errored instead reported neither a
-			// transport failure nor an unmatched error response, both of which carry
-			// no call, and anchored an async task failure at the call's first response
-			// rather than at the frame that failed it.
-			b.frame(sessionID, checkError, sarifErrorMessage(sessionID, event), event.Seq)
-		}
-		if event.Kind == store.EventInvalid {
-			b.frame(sessionID, checkInvalid,
-				fmt.Sprintf("session %s frame %d: frame on the protocol channel is not valid JSON-RPC", sessionID, event.Seq), event.Seq)
-		}
-		if event.Warning != "" {
-			b.frame(sessionID, checkWarn,
-				fmt.Sprintf("session %s frame %d: %s", sessionID, event.Seq, event.Warning), event.Seq)
-		}
-		if event.RoutingMismatch {
-			// A mismatched frame usually carries the warning naming it, and then it is
-			// two findings under two rules, exactly as the gate counts it under two
-			// signals. Reporting fewer results than the gate counts would leave a
-			// failing run with nothing to open.
-			b.frame(sessionID, checkMismatch, sarifMismatchMessage(sessionID, event.Seq, event.Warning), event.Seq)
-		}
-		if event.Deprecated != "" {
-			b.frame(sessionID, checkDeprecated,
-				fmt.Sprintf("session %s frame %d: %s", sessionID, event.Seq, event.Deprecated), event.Seq)
-		}
-		if event.LateResult {
-			// Keyed off the frame the store counted it on, like the error axis above.
-			// Call.LateResult is true from the request frame onwards once the answer
-			// lands, so reading it here would report the same finding twice.
-			b.frame(sessionID, checkLateResult, sarifLateResultMessage(sessionID, event), event.Seq)
-		}
-		if event.Kind == store.EventRequest && event.Call != nil && event.Call.State == store.Pending {
-			// A multi round-trip retry continues the same call, so keying on the call
-			// reports one hung operation rather than one per round trip.
-			if key := sarifCallKey(*event.Call); !pending[key] {
-				pending[key] = true
-				b.frame(sessionID, checkPending, sarifPendingMessage(sessionID, event.Seq, *event.Call), event.Seq)
-			}
-		}
+	}
+	for _, f := range frameFindings(st, sessionID) {
+		b.frame(sessionID, f.signal, fmt.Sprintf("session %s frame %d: %s", sessionID, f.seq, f.text), f.seq)
 	}
 
 	// One result per repeated call, the unit the gate counts, anchored at the
@@ -515,35 +475,6 @@ func checkSARIFSignalRule(signal checkSignal) (name, short, full, help string) {
 	return string(signal), "An mcpsnoop check signal", "A signal reported by mcpsnoop check.", "See the mcpsnoop documentation."
 }
 
-// sarifErrorMessage names what went wrong on the frame the error was counted on,
-// rather than leaving a reader with a count and a frame number. The store counts
-// an error on four kinds of frame, and each one reads differently: a settled
-// call, a task that ended in a failed state, an HTTP failure carrying no
-// JSON-RPC body, and an error response matching no request it could name.
-func sarifErrorMessage(sessionID string, event store.EventView) string {
-	switch {
-	// The failed call is read before the task it was polling: a tasks/get that
-	// errored is the poll failing, not the task, and a task lifecycle frame
-	// carries both calls either way.
-	case event.Kind == store.EventResponse && event.Call != nil && event.Call.Errored:
-		return fmt.Sprintf("session %s frame %d: %s ended in an error: %s",
-			sessionID, event.Seq, sarifCallSubject(*event.Call), sarifErrorDetail(*event.Call))
-	case event.TaskCall != nil:
-		return fmt.Sprintf("session %s frame %d: %s failed as task %s: %s",
-			sessionID, event.Seq, sarifCallSubject(*event.TaskCall), event.TaskID, sarifErrorDetail(*event.TaskCall))
-	case event.Kind == store.EventTransport:
-		return fmt.Sprintf("session %s frame %d: the transport failed with HTTP %d",
-			sessionID, event.Seq, event.HTTPStatus)
-	}
-	// An error response whose id matches no request the capture saw. There is no
-	// call to name, so the frame and its own warning are all a reader gets.
-	if event.Warning != "" {
-		return fmt.Sprintf("session %s frame %d: error response could not be matched to a call: %s",
-			sessionID, event.Seq, event.Warning)
-	}
-	return fmt.Sprintf("session %s frame %d: error response could not be matched to a call", sessionID, event.Seq)
-}
-
 // sarifErrorDetail says why a call is counted as failed, preferring the server's
 // own words to a restatement of the flag.
 func sarifErrorDetail(call store.CallView) string {
@@ -554,34 +485,6 @@ func sarifErrorDetail(call store.CallView) string {
 		return "the result is marked isError"
 	}
 	return "the call failed"
-}
-
-// sarifLateResultMessage names the call that was answered after its cancellation
-// and how late the answer was, since the delay is what separates the race the
-// spec allows for from a server that kept working after being told to stop. The
-// store writes that sentence as the frame's observation, so the two formats read
-// alike rather than paraphrasing each other.
-func sarifLateResultMessage(sessionID string, event store.EventView) string {
-	subject := "a cancelled call"
-	if event.Call != nil {
-		subject = sarifCallSubject(*event.Call)
-	}
-	if event.Observation == "" {
-		return fmt.Sprintf("session %s frame %d: %s was answered after it was cancelled", sessionID, event.Seq, subject)
-	}
-	return fmt.Sprintf("session %s frame %d: %s was answered after it was cancelled: %s",
-		sessionID, event.Seq, subject, event.Observation)
-}
-
-func sarifPendingMessage(sessionID string, seq uint64, call store.CallView) string {
-	return fmt.Sprintf("session %s frame %d: %s never got a response", sessionID, seq, sarifCallSubject(call))
-}
-
-func sarifMismatchMessage(sessionID string, seq uint64, warning string) string {
-	if warning == "" {
-		return fmt.Sprintf("session %s frame %d: a routing header disagrees with the body", sessionID, seq)
-	}
-	return fmt.Sprintf("session %s frame %d: routing header mismatch: %s", sessionID, seq, warning)
 }
 
 // sarifCallSubject names a call the way the reader saw it on the wire, tool name

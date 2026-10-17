@@ -47,8 +47,14 @@ before you decide what should fail on it.
 session build-agent: errors=1 invalid=0 warnings=0 mismatches=0 pending=0 late_results=0 deprecated=0 missing_frames=0 schema_findings=1 annotation_findings=0 duplicates=0
 schema findings:
   oneOf: search
+errors:
+  frame 12, tools/call search (id 4) ended in an error: upstream timed out (code -32603)
 check failed: error
 ```
+
+Under the counts, each signal that failed the run lists the frames it counted,
+so the log says what failed and where to look. Twenty frames at most are listed
+per signal, with a count of the rest, and `--format sarif` lists every one.
 
 The dropped-frame count travels with the artifacts too, so a capture that
 understates itself says so wherever it is opened:
