@@ -856,6 +856,60 @@ session that negotiated 2024-11-05 is not held to annotations, which arrived in
 2025-03-26, or to a tool `title`, which arrived in 2025-06-18. A value mcpsnoop's
 own redaction replaced is never reported.
 
+### Catch a result that breaks its own outputSchema
+
+A tool that declares an `outputSchema` promises the shape of its
+`structuredContent`, and the specification makes keeping that promise a MUST for
+the server. The TypeScript and Python SDK clients hold the server to it, so a
+result that breaks the schema, or leaves `structuredContent` out, reaches the
+agent as a failed call.
+
+Measured with one tool returning `"temperature":"warm"` where its schema says
+`number`, one returning no `structuredContent`, and one returning
+`"not an address"` for a field whose schema gives `"format":"email"`.
+
+| Client | A field of the wrong type | No structuredContent | A value breaking only its format |
+|---|---|---|---|
+| TypeScript SDK 1.32.1 | error -32602 | error -32600 | error -32602 |
+| Python SDK 2.3.0 | RuntimeError | RuntimeError | accepted |
+| Go SDK 1.8.0 | accepted unchecked | accepted unchecked | accepted unchecked |
+
+The Go SDK server does not check what a raw tool handler returns either, so a Go
+server ships the mistake without noticing and its TypeScript and Python clients
+are the ones that fail.
+
+So mcpsnoop judges every `tools/call` result against the `outputSchema` its tool
+declared in the session's listing, and warns on the response, naming where the
+result breaks the schema and how. A default `check` run fails on it.
+
+```
+tool "get_weather" returned structuredContent that breaks its outputSchema at /temperature, got string, want number
+tool "get_weather" declares an outputSchema and returned no structuredContent, which SDK clients reject
+```
+
+mcpsnoop reports the first two and not the third. 2020-12 makes `format` an
+annotation rather than a rule, and the clients disagree on it, so a warning
+would accuse a server of breaking a rule the specification does not set. A
+server with clients built on the TypeScript SDK should still keep its values to
+their formats.
+
+What is judged beyond that is what the SDK clients judge. A result marked
+`isError` is not judged at all. A schema with no `$schema` is read as JSON
+Schema 2020-12, the default from 2025-11-25. On 2025-06-18, which left the
+dialect open, a result is reported only when it breaks the schema read both as
+2020-12 and as draft-07, and a schema that declares its dialect is read in that
+one.
+
+Nothing is reported where the verdict would be a guess. That covers a schema
+that will not compile, names a dialect mcpsnoop does not know, or refers outside
+itself with `$ref`, which mcpsnoop never follows, as the specification requires
+for network references and as safety requires for files. It also covers a
+result that is not the call's answer yet, a multi round-trip input request or a
+task, a frame or a listing mcpsnoop's own redaction rewrote, and a session on a
+revision before `outputSchema` existed. A schema past 256 KiB, or a result past
+4 MiB, is left unjudged too, since the specification asks a validator to bound
+what a hostile schema can cost it.
+
 ### Detect a client that mangles server state
 
 Under the multi round-trip pattern the server hands the client an opaque

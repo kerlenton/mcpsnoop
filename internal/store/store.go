@@ -272,6 +272,7 @@ type event struct {
 	traceContext       *proxy.TraceContext
 	mismatch           bool   // a routing header disagrees with the body (structured flag for warning)
 	truncated          bool   // the observed copy was capped at the frame-size limit
+	outputMismatch     bool   // a tool result breaks its own outputSchema (structured flag for warning)
 	abandoned          bool   // the client left the exchange before its answer came back
 	deprecated         string // a deprecated MCP feature was used (structured, not a protocol warning)
 	cacheHint          CacheHint
@@ -319,11 +320,14 @@ type capabilities struct {
 
 // session aggregates everything observed for one proxied server instance.
 type session struct {
-	id    string
-	label string
-	first time.Time
-	last  time.Time
-	caps  capabilities
+	// outputValidators holds each called tool's compiled outputSchema. See
+	// outputSchemaWarning.
+	outputValidators map[string]*outputValidator
+	id               string
+	label            string
+	first            time.Time
+	last             time.Time
+	caps             capabilities
 
 	advertisedTools  []string
 	advertisedSet    map[string]struct{}
@@ -701,6 +705,14 @@ func (s *Store) Ingest(e proxy.Envelope) EventView {
 		// is what carries the revision this response is judged by.
 		if note := missingResultTypeWarning(msg, c); note != "" {
 			ev.warning = appendWarning(ev.warning, note)
+		}
+		// Judged on the frame that answered the call, once, since a repeat of the
+		// same answer is not a second result.
+		if matched {
+			if note := sess.outputSchemaWarning(c, msg.Result, e.Redacted); note != "" {
+				ev.warning = appendWarning(ev.warning, note)
+				ev.outputMismatch = true
+			}
 		}
 		// Drained here rather than returned, because applyToolsList runs inside
 		// completeCall. Each name is reported once, on the frame that advertised it.
@@ -1988,6 +2000,7 @@ func (sess *session) applyToolsList(reqParams, result json.RawMessage, redacted 
 
 		annotationKinds := analyzeAnnotations(tool.Annotations, redacted)
 		sess.toolDefinitions[name] = ToolDefinition{
+			listingRedacted:    redacted,
 			Name:               name,
 			Description:        description,
 			InputSchema:        schema,
