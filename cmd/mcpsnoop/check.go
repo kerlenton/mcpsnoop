@@ -166,6 +166,9 @@ func newCheckCmd() *cobra.Command {
 						writeDuplicateCalls(cmd.OutOrStdout(), summary.duplicates)
 					}
 					if failed := summary.failed(signals); len(failed) > 0 {
+						// The frames behind each failing signal, so a CI log says what
+						// failed and where to look, not only how much.
+						writeFrameFindings(cmd.OutOrStdout(), frameFindings(st, summary.sessionID), failed)
 						fmt.Fprintf(cmd.OutOrStdout(), "check failed: %s\n", strings.Join(failed, ","))
 						anyFailed = true
 					}
