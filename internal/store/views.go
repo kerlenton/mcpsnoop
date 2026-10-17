@@ -107,6 +107,10 @@ type EventView struct {
 	// Truncated is true when mcpsnoop capped its own observed copy of a large body.
 	// It is a structured marker, not a protocol warning, so it never fails check.
 	Truncated bool
+	// OutputMismatch is true on a tools/call result that leaves out the
+	// structuredContent its tool's outputSchema promises, or breaks that schema. A
+	// structured handle for the warning that says so.
+	OutputMismatch bool
 	// Abandoned is true on the transport event recorded when the client left an
 	// HTTP exchange before the answer to its request came back.
 	Abandoned bool
@@ -206,6 +210,9 @@ type ToolDefinition struct {
 	// ingest beside Findings, where the frame's redaction is still known.
 	AnnotationFindings []AnnotationFindingKind
 	paramHeaders       []paramHeaderBinding
+	// listingRedacted says mcpsnoop's own redaction rewrote the listing this
+	// definition came from, so its outputSchema is not what the server sent.
+	listingRedacted bool
 	// Cost is what advertising this tool weighs, measured once at ingest.
 	Cost ToolCost
 }
@@ -487,6 +494,7 @@ func (e *event) view(sess *session) EventView {
 		TraceContext:       e.traceContext,
 		RoutingMismatch:    e.mismatch,
 		Truncated:          e.truncated,
+		OutputMismatch:     e.outputMismatch,
 		Abandoned:          e.abandoned,
 		Deprecated:         e.deprecated,
 		CacheHint:          e.cacheHint,

@@ -309,6 +309,9 @@ type EventExport struct {
 	Warning     string          `json:"warning,omitempty"`
 	Observation string          `json:"observation,omitempty"`
 	Mismatch    bool            `json:"mismatch,omitempty"`
+	// OutputMismatch marks a tools/call result that breaks, or leaves out, the
+	// structuredContent its tool's outputSchema promises.
+	OutputMismatch bool `json:"output_mismatch,omitempty"`
 	// Status is the HTTP status the frame arrived on and AuthChallenge that
 	// response's WWW-Authenticate header, both absent on stdio.
 	Status        int    `json:"http_status,omitempty"`
@@ -1777,6 +1780,7 @@ func exportEvent(ev store.EventView, callIndex map[string]int) EventExport {
 		Warning:           ev.Warning,
 		Observation:       ev.Observation,
 		Mismatch:          ev.RoutingMismatch,
+		OutputMismatch:    ev.OutputMismatch,
 		Status:            ev.HTTPStatus,
 		AuthChallenge:     ev.AuthChallenge,
 		Truncated:         ev.Truncated,
