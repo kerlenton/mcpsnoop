@@ -28,7 +28,7 @@ jobs:
         with:
           go-version: stable
           check-latest: true
-      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           version: "~> v2"
           args: release --clean
@@ -68,7 +68,7 @@ jobs:
       # it exports a dummy NODE_AUTH_TOKEN. Both are gone by v7. Caching is off
       # because a release must build from what is in the tag, not from whatever
       # a cache happens to hold.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
