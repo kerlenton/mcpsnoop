@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: hashgraph-online/ai-plugin-scanner-action@e48bafa772fc8faa5c4d6fdee554500d474ffb18 # v1.2.750
+      - uses: hashgraph-online/ai-plugin-scanner-action@3220f5fedcd269533a6275738b2ab5d5f9753e8e # v1.2.811
         # The catalog's bar. By default the action only reports and never fails.
         # Markdown so the log names the file behind each finding, which the text
         # report does not. No comments, so a pull request gets a check and nothing
